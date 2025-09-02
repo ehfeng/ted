@@ -33,7 +33,6 @@ You can directly provide connection data with flags.
 1. end
 1. page up
 1. page down
-1. hjkl "arrow" keys
 1. cmd+arrow: jump to edge
 
 ### Data
@@ -43,7 +42,6 @@ You can directly provide connection data with flags.
 1. shift+enter: edit/up (if at top)
 1. shift+space: select row (for deletion)
 1. ctrl+space: select column (for deletion)
-1. cmd+n: new row
 1. cmd+r: refresh data
 1. cmd+f: find
 1. alt+↑/↓: moves row up/down
@@ -72,6 +70,9 @@ databases:
 format:
   int: 3
   text: 12
+
+null: <null> # default is \N
+
 ```
 
 ### Example
@@ -93,6 +94,8 @@ Focusing a cell always brings its full width into the view.
 Each column has a default width of 8 characters + 2 spaces + pipe = 11 characters. 7 columns + 1 pipe = 78 characters. Column minimum width is 3 characters. `…` indicates overflow. Additional columns flow off screen, just like spreadsheets. Focusing a cell minimally scrolls to fit the cell into the editor window.
 
 When editing values with overflow, it overlays _on top_ of the table with a light background. Overflow overlay flows to the right and below the cell. When value overflows the editor window, it word wraps. The editing overlay _never_ exceeds the terminal window size.
+
+Default null sentinel is `\N` (configurable). `\\N` to input actual string.
 
 JSON is treated as text. JSONB is pretty printed.
 
@@ -116,11 +119,17 @@ Status bar in the bottom row where contextual information can be displayed, like
 
 The status bar default shows the current database.table and the row number/total in the bottom right.
 
-During viewing, show summary stats. During editing, show column data type, constraints.
+During viewing, show column data type, constraints. During editing, input-specific context, including whether input is "valid"
+
+- run check constraints, test against unique index
+- valid int, bool, float, json
+- enums
+- date time format
+- references: preview
 
 When highlighting or editing foreign key references, the status bar shows a logfmt preview. Say we highlight `accounts.owner`, which references the users table: `users: id=1 name='Eric' plan='free'…`.
 
-If the sheet does not have a primary key, the status bar will show warning upon opening the file or updating data.
+If the sheet does not have a primary key or unique index with non-null columns, the status bar shows a warning upon opening the file or updating data. If a unique, nullable index exists, show a warning when editing null values. When updating rows without a unique key, status bar shows the number of rows updated.
 
 If an update fails, status bar shows error message.
 
