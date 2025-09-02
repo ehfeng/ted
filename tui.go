@@ -26,14 +26,17 @@ type Model struct {
 	
 	statusMsg   string
 	errorMsg    string
+	
+	colWidthOverrides map[int]int
 }
 
 func NewModel(config *Config, connection *Connection) Model {
 	return Model{
-		config:     config,
-		connection: connection,
-		focusRow:   0,
-		focusCol:   0,
+		config:            config,
+		connection:        connection,
+		focusRow:          0,
+		focusCol:          0,
+		colWidthOverrides: make(map[int]int),
 	}
 }
 
@@ -163,6 +166,30 @@ func (m Model) handleNavigationKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.table != nil && m.table.TableName != "" {
 			return m, refreshTableData(m.connection, "SELECT * FROM " + m.table.TableName)
 		}
+		
+	case "+", "=":
+		// Increase current column width
+		if m.table != nil && m.focusCol < len(m.table.Columns) {
+			currentWidth := m.getColumnWidth(m.focusCol)
+			m.colWidthOverrides[m.focusCol] = currentWidth + 2
+		}
+		
+	case "-", "_":
+		// Decrease current column width
+		if m.table != nil && m.focusCol < len(m.table.Columns) {
+			currentWidth := m.getColumnWidth(m.focusCol)
+			newWidth := currentWidth - 2
+			if newWidth < 8 {
+				newWidth = 8
+			}
+			m.colWidthOverrides[m.focusCol] = newWidth
+		}
+		
+	case "0":
+		// Reset current column width to default
+		if m.table != nil && m.focusCol < len(m.table.Columns) {
+			delete(m.colWidthOverrides, m.focusCol)
+		}
 	}
 	
 	return m, nil
@@ -248,18 +275,25 @@ func (m Model) renderTable() string {
 	for i, col := range m.table.Columns {
 		width := colWidths[i]
 		content := truncateString(col, width-2)
+		
+		// Pad content with spaces to full column width
+		if len(content) < width-2 {
+			content = content + strings.Repeat(" ", (width-2)-len(content))
+		}
+		
 		if i == m.focusCol {
 			content = lipgloss.NewStyle().Bold(true).Render(content)
 		}
-		b.WriteString(fmt.Sprintf(" %-*s |", width-2, content))
+		b.WriteString(fmt.Sprintf(" %s |", content))
 	}
 	b.WriteString("\n")
 	
 	// Render separator
 	b.WriteString("|")
 	for _, width := range colWidths {
-		b.WriteString(strings.Repeat("-", width-1))
-		b.WriteString("|")
+		b.WriteString(" ")
+		b.WriteString(strings.Repeat("-", width-2))
+		b.WriteString(" |")
 	}
 	b.WriteString("\n")
 	
@@ -277,16 +311,25 @@ func (m Model) renderTable() string {
 		for colIdx, value := range row {
 			width := colWidths[colIdx]
 			var content string
-			if value == nil {
-				content = ""
-			} else {
-				content = fmt.Sprintf("%v", value)
-			}
 			
 			if m.editing && rowIdx == m.focusRow && colIdx == m.focusCol {
+				// Show editing content with cursor
 				content = m.editValue + "█"
 			} else {
-				content = truncateString(content, width-2)
+				// Show normal cell content
+				if value == nil {
+					content = ""
+				} else {
+					content = fmt.Sprintf("%v", value)
+				}
+			}
+			
+			// Always truncate content to fit column width
+			content = truncateString(content, width-2)
+			
+			// Pad content with spaces to full column width
+			if len(content) < width-2 {
+				content = content + strings.Repeat(" ", (width-2)-len(content))
 			}
 			
 			if rowIdx == m.focusRow && colIdx == m.focusCol {
@@ -297,7 +340,7 @@ func (m Model) renderTable() string {
 				}
 			}
 			
-			b.WriteString(fmt.Sprintf(" %-*s |", width-2, content))
+			b.WriteString(fmt.Sprintf(" %s |", content))
 		}
 		b.WriteString("\n")
 	}
@@ -332,21 +375,59 @@ func (m Model) calculateColumnWidths() []int {
 	}
 	
 	numCols := len(m.table.Columns)
-	
-	// For now, use equal column widths
 	widths := make([]int, numCols)
 	availableWidth := m.width - numCols - 1 // Account for pipes
+	
+	// Get default maximum width from config (default 12 for text)
+	defaultMaxWidth := 12
+	if textWidth, exists := m.config.Format["text"]; exists {
+		defaultMaxWidth = textWidth
+	}
+	
+	// Calculate base column width
 	colWidth := availableWidth / numCols
 	
+	// Apply constraints
 	if colWidth < 8 {
 		colWidth = 8
 	}
+	if colWidth > defaultMaxWidth {
+		colWidth = defaultMaxWidth
+	}
 	
 	for i := range widths {
-		widths[i] = colWidth
+		// Check for runtime overrides first
+		if overrideWidth, exists := m.colWidthOverrides[i]; exists {
+			widths[i] = overrideWidth
+		} else {
+			// Use column type specific width if available
+			if m.table.ColumnTypes != nil && i < len(m.table.ColumnTypes) {
+				colType := m.table.ColumnTypes[i].DatabaseTypeName()
+				if typeWidth, exists := m.config.Format[strings.ToLower(colType)]; exists {
+					// Use type-specific max width but respect minimum
+					if typeWidth < 8 {
+						widths[i] = 8
+					} else {
+						widths[i] = typeWidth
+					}
+				} else {
+					widths[i] = colWidth
+				}
+			} else {
+				widths[i] = colWidth
+			}
+		}
 	}
 	
 	return widths
+}
+
+func (m Model) getColumnWidth(colIndex int) int {
+	widths := m.calculateColumnWidths()
+	if colIndex < len(widths) {
+		return widths[colIndex]
+	}
+	return 12 // fallback default
 }
 
 func truncateString(s string, maxLen int) string {
