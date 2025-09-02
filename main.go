@@ -78,26 +78,30 @@ func runTed(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	
-	var dbConfig DatabaseConfig
-	var found bool
-	
-	if dbName != "" {
-		dbConfig, found = config.GetDatabase(dbName)
-		if !found {
-			fmt.Fprintf(os.Stderr, "Database '%s' not found in config and not a valid file\n", dbName)
-			os.Exit(1)
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: must specify database name\n")
-		os.Exit(1)
-	}
-	
 	connectionFlags := ConnectionFlags{
 		Database: database,
 		Host:     host,
 		Port:     port,
 		Username: username,
 		Password: password,
+	}
+	
+	var dbConfig DatabaseConfig
+	var found bool
+	
+	if dbName != "" {
+		dbConfig, found = config.GetDatabase(dbName)
+		if !found {
+			var err error
+			dbConfig, err = tryFallbackConnections(dbName, connectionFlags)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to connect to '%s': %v\n", dbName, err)
+				os.Exit(1)
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: must specify database name\n")
+		os.Exit(1)
 	}
 	
 	connection, err := connectToDatabase(dbConfig, connectionFlags)
@@ -119,4 +123,44 @@ func runTed(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error running program: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func tryFallbackConnections(dbName string, flags ConnectionFlags) (DatabaseConfig, error) {
+	var lastErr error
+	
+	// Try PostgreSQL first
+	pgConfig := DatabaseConfig{
+		Type:   "postgres",
+		DBName: dbName,
+		Host:   "localhost",
+		Port:   "5432",
+		User:   os.Getenv("USER"),
+	}
+	
+	// Test the connection
+	if connection, err := connectToDatabase(pgConfig, flags); err == nil {
+		connection.DB.Close()
+		return pgConfig, nil
+	} else {
+		lastErr = err
+	}
+	
+	// Try MySQL as fallback
+	mysqlConfig := DatabaseConfig{
+		Type:   "mysql",
+		DBName: dbName,
+		Host:   "localhost",
+		Port:   "3306", 
+		User:   "root",
+	}
+	
+	// Test the connection
+	if connection, err := connectToDatabase(mysqlConfig, flags); err == nil {
+		connection.DB.Close()
+		return mysqlConfig, nil
+	} else {
+		lastErr = err
+	}
+	
+	return DatabaseConfig{}, fmt.Errorf("failed to connect to both PostgreSQL and MySQL: %v", lastErr)
 }
