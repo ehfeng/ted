@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -69,15 +70,21 @@ func connectToDatabase(config DatabaseConfig, flags ConnectionFlags) (*Connectio
 		return nil, fmt.Errorf("unsupported database type: %s", dbType)
 	}
 	
+	log.Printf("[CONNECT] Attempting to connect to %s database", driver)
+	
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
+		log.Printf("[CONNECT ERROR] Failed to open %s database: %v", driver, err)
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 	
 	if err := db.Ping(); err != nil {
+		log.Printf("[CONNECT ERROR] Failed to ping %s database: %v", driver, err)
 		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
+	
+	log.Printf("[CONNECT SUCCESS] Connected to %s database: %s", driver, config.DBName)
 	
 	return &Connection{
 		DB:     db,
@@ -104,9 +111,21 @@ func getStringValue(configValue, flagValue, defaultValue string) string {
 	return defaultValue
 }
 
+func (c *Connection) getPlaceholder(index int) string {
+	switch c.Driver {
+	case "postgres":
+		return fmt.Sprintf("$%d", index+1)
+	default:
+		return "?"
+	}
+}
+
 func (c *Connection) QueryTable(query string) (*TableData, error) {
+	log.Printf("[QUERY] %s", query)
+	
 	rows, err := c.DB.Query(query)
 	if err != nil {
+		log.Printf("[QUERY ERROR] %s: %v", query, err)
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
 	defer rows.Close()
@@ -165,6 +184,10 @@ func (c *Connection) UpdateCell(tableName string, rowData []interface{}, columnI
 	// Build WHERE clause using all current row values for safety
 	var whereParts []string
 	var whereArgs []interface{}
+	paramIndex := 1 // Start from 1 for PostgreSQL, will be ignored for other DBs
+	
+	// First parameter is the new value
+	paramIndex++
 	
 	for i, value := range rowData {
 		if i == columnIndex {
@@ -174,8 +197,9 @@ func (c *Connection) UpdateCell(tableName string, rowData []interface{}, columnI
 		if value == nil {
 			whereParts = append(whereParts, fmt.Sprintf("%s IS NULL", columns[i]))
 		} else {
-			whereParts = append(whereParts, fmt.Sprintf("%s = ?", columns[i]))
+			whereParts = append(whereParts, fmt.Sprintf("%s = %s", columns[i], c.getPlaceholder(paramIndex)))
 			whereArgs = append(whereArgs, value)
+			paramIndex++
 		}
 	}
 	
@@ -183,16 +207,21 @@ func (c *Connection) UpdateCell(tableName string, rowData []interface{}, columnI
 		return fmt.Errorf("cannot update: no identifying columns available")
 	}
 	
-	// Build UPDATE query with RETURNING clause for verification
-	query := fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s", 
+	// Build UPDATE query with database-specific placeholder for the new value
+	query := fmt.Sprintf("UPDATE %s SET %s = %s WHERE %s", 
 		tableName, 
 		columns[columnIndex], 
+		c.getPlaceholder(0), // First parameter is the new value
 		strings.Join(whereParts, " AND "))
 	
 	args := append([]interface{}{newValue}, whereArgs...)
 	
+	log.Printf("[UPDATE] %s", query)
+	log.Printf("[UPDATE ARGS] %+v", args)
+	
 	result, err := c.DB.Exec(query, args...)
 	if err != nil {
+		log.Printf("[UPDATE ERROR] %s: %v", query, err)
 		return fmt.Errorf("update failed: %w", err)
 	}
 	
@@ -221,7 +250,7 @@ func (c *Connection) InsertRow(tableName string, columns []string) error {
 	args := make([]interface{}, len(columns))
 	
 	for i := range columns {
-		placeholders[i] = "?"
+		placeholders[i] = c.getPlaceholder(i)
 		args[i] = nil // Default to NULL values
 	}
 	
@@ -230,8 +259,12 @@ func (c *Connection) InsertRow(tableName string, columns []string) error {
 		strings.Join(columns, ", "), 
 		strings.Join(placeholders, ", "))
 	
+	log.Printf("[INSERT] %s", query)
+	log.Printf("[INSERT ARGS] %+v", args)
+	
 	_, err := c.DB.Exec(query, args...)
 	if err != nil {
+		log.Printf("[INSERT ERROR] %s: %v", query, err)
 		return fmt.Errorf("insert failed: %w", err)
 	}
 	
