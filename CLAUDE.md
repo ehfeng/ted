@@ -2,8 +2,6 @@
 
 ## Implementation
 
-Use golang
+Use golang. Use `cobra` to parse cli arguments and `https://github.com/rivo/tview` to build tui.
 
-When finished with changes, run `go install`
-
-Use `cobra` to parse cli arguments and `https://github.com/charmbracelet/bubbletea` for the editor. Attempt to leverage components from `https://github.com/charmbracelet/bubbles`.
+This is a TTY, so `go run` will not work inside Claude Code. When finished with changes, run `go install`.

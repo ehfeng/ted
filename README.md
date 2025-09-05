@@ -2,14 +2,22 @@
 
 ted is a tabular editor. It displays database tables as markdown table and provides spreadsheet-like editing, including mouse support for selecting cells (with Opt key) or adjust column widths.
 
+```
+┌──────────┬──────┬──────────┬────────────┬────────────┬─────┐
+│       id │ name │ email    │ created_at │ updated_at │ org…│
+┝━━━━━━━━━━┿━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━┥
+│        4 │ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │  32 │
+│        5 │ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │   4 │
+└──────────┴──────┴──────────┴────────────┴────────────┴─────┘
+```
+
 ```sh
 ted [dbname] [tbl.col,col]
 ted [dbname] [tbl.col,col]
 ted test users.id,name
-ted test -c "select * from users where name = 'eric'"
 ```
 
-`[dbname]` is a filename (sqlite or duckdb) or a database name in the `.ted.yml` config. If no matching name is found and database type flag is not set, suggest `ted init`. Support for tab-completing database (from either local files or config), table and column names.
+`dbname` can either be a database file (sqlite or duckdb) or a database name. If the file is not present, try the name with default parameters in Postgres and MySQL.
 
 ## Common flags
 
@@ -48,43 +56,6 @@ You can directly provide connection data with flags.
 1. alt+←/→: rearranges column order
 1. ctrl+←/→: increase/decrease column width
 
-## `.ted.yml` format
-
-```yml
-databases:
-  [name]: <postgres|mysql|clickhouse>
-  [name]:
-    type: <postgres|mysql|clickhouse>
-    host: [host] # opt
-    port: [port] # opt
-    user: [user] # optional, assumes system username
-    dbname: [dbname] # opt, assumes name
-
-    format: # database specific formats
-      int: 3 # database type format
-      users: # table specific col selection, order, size
-        - id: 4
-        - name # default width
-        - preferences: 20
-
-format:
-  int: 3
-  text: 12
-
-null: <null> # default is \N
-
-```
-
-### Example
-
-```yml
-databases:
-  test: postgres
-  bloggy:
-    type: postgres
-    username: bloggy
-```
-
 ## Table UI
 
 Get terminal size to size column widths and how many rows to display.
@@ -98,20 +69,6 @@ When editing values with overflow, it overlays _on top_ of the table with a ligh
 Default null sentinel is `\N` (configurable). `\\N` to input actual string.
 
 JSON is treated as text. JSONB is pretty printed.
-
-```md
-| greet…| numb…| boo…|
-|:----- | ----:| ---:|
-| hello…|    1 |   t |
-| goodb…|    2 |   f |
-| see y…|…3456 |   f |
-
-| gree… | numb…| boo…|
-|:0---- | ----:| ---:|
-| hello kind sir   t |
-| fare thee well?█ f |
-| see … |    3 |   f |
-```
 
 ## Status Bar
 
@@ -142,6 +99,42 @@ The "view" of the table is always just a cache.
 Updates are run with `RETURNING *` clause, attempt to update just the row and *not* refresh the entire table.
 
 When updating cells, identify a table's primary keys or unique constraints (even if they are multicolumn). If none exists, warn that updates are "best effort" and are made by `WHERE`'ing matching values. If the number of rows updated >1, message in the status bar.
+
+## `.ted.yml` format
+
+`[dbname]` is a filename (sqlite or duckdb) or a database name in the `.ted.yml` config. If no matching name is found and database type flag is not set, suggest `ted init`. Support for tab-completing database (from either local files or config), table and column names.
+
+```yml
+databases:
+  [name]: <postgres|mysql|clickhouse>
+  [name]:
+    type: <postgres|mysql|clickhouse>
+    host: [host] # opt
+    port: [port] # opt
+    user: [user] # optional, assumes system username
+    dbname: [dbname] # opt, assumes name
+
+    users: # table
+      frozen: [id, name]
+      columns: # order and width
+        id # default
+        name: 0 # hidden
+        preferences: 20
+
+null: <null> # default is \N
+```
+
+`.ted.yaml` can be used to store table column order and width.
+
+### Example
+
+```yml
+databases:
+  test: postgres
+  bloggy:
+    type: postgres
+    username: bloggy
+```
 
 ## Nice to have's
 
