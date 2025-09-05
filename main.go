@@ -1,0 +1,78 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+var (
+	database string
+	host     string
+	port     string
+	username string
+	password string
+	command  string
+)
+
+var rootCmd = &cobra.Command{
+	Use:   "ted [database] [table.columns]",
+	Short: "ted is a tabular editor for databases",
+	Long: `ted is a spreadsheet-like editor for database tables, allowing for easy viewing and editing of table data.
+
+Examples:
+  ted test users.id,name
+  ted mydb.sqlite users
+  ted -h localhost -p 5432 -U myuser mydb users.id,name,email`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		dbname := args[0]
+		tableSpec := ""
+		if len(args) > 1 {
+			tableSpec = args[1]
+		}
+
+		config := &Config{
+			Database: getValue(database, dbname),
+			Host:     host,
+			Port:     port,
+			Username: username,
+			Password: password,
+			Command:  command,
+		}
+
+		if err := runEditor(config, tableSpec); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
+	rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
+	rootCmd.Flags().StringVarP(&port, "port", "p", "", "Database port")
+	rootCmd.Flags().StringVarP(&username, "username", "U", "", "Database username")
+	rootCmd.Flags().StringVarP(&password, "password", "W", "", "Database password")
+	rootCmd.Flags().StringVarP(&command, "command", "c", "", "SQL command to execute")
+}
+
+func getValue(flag, arg string) string {
+	if flag != "" {
+		return flag
+	}
+	return arg
+}
+
+func main() {
+	rootCmd.SetHelpCommand(&cobra.Command{
+		Use:    "no-help",
+		Hidden: true,
+	})
+	rootCmd.PersistentFlags().BoolP("help", "", false, "help for ted")
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
