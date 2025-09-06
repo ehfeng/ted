@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -181,24 +182,125 @@ func (e *Editor) enterEditMode(row, col int) {
 	currentValue := e.table.GetCell(row, col)
 	currentText := formatCellValue(currentValue)
 
-	inputField := tview.NewInputField().
-		SetText(currentText).
-		SetFieldWidth(e.table.GetColumnWidth(col))
+	// Create textarea for editing with proper styling
+	textArea := tview.NewTextArea().
+		SetText(currentText, false).
+		SetWrap(true)
 
-	inputField.SetBackgroundColor(tcell.ColorWhite)
+	textArea.SetBorder(false).
+		SetBackgroundColor(tcell.ColorWhite)
 
-	inputField.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			newText := inputField.GetText()
+	// Move cursor to end of text by setting the text again with moveCursor=true
+	if len(currentText) > 0 {
+		// Set text with cursor at the end
+		textArea.SetText(currentText, true)
+	}
+
+	// Handle textarea input capture for save/cancel
+	textArea.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEnter:
+			newText := textArea.GetText()
 			e.updateCell(row, col, newText)
-		} else if key == tcell.KeyEscape {
+			return nil
+		case tcell.KeyEscape:
 			e.exitEditMode()
+			return nil
 		}
+		return event
 	})
 
-	e.pages.AddPage("editor", inputField, true, true)
-	e.app.SetFocus(inputField)
+	// Position the textarea to align with the cell
+	modal := e.createCellEditOverlay(textArea, row, col)
+	e.pages.AddPage("editor", modal, true, true)
+	e.app.SetFocus(textArea)
 	e.editMode = true
+}
+
+func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) tview.Primitive {
+	// Get the current text to calculate minimum size
+	currentValue := e.table.GetCell(row, col)
+	currentText := formatCellValue(currentValue)
+
+	// Calculate the position where the cell content appears on screen
+	// HeaderTable structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
+	tableRow := row + 3 // Convert data row to table display row
+
+	// Calculate horizontal position: left border + previous columns + cell padding
+	leftOffset := 1 // Left table border "│"
+	for i := 0; i < col; i++ {
+		leftOffset += e.table.GetColumnWidth(i) + 2 + 1 // width + " │ " padding + separator
+	}
+	leftOffset += 1 // Cell padding (space after "│ ")
+
+	// Calculate vertical position relative to table
+	topOffset := tableRow
+
+	// Calculate minimum textarea size based on content
+	cellWidth := e.table.GetColumnWidth(col)
+
+	// Calculate minimum width needed for the text content
+	textLines := splitTextToLines(currentText, cellWidth)
+	longestLine := 0
+	for _, line := range textLines {
+		if len(line) > longestLine {
+			longestLine = len(line)
+		}
+	}
+
+	// Minimum width: max of cell width or longest line length, with some padding
+	minWidth := max(cellWidth, longestLine) + 2 // Add small padding
+	textAreaWidth := min(minWidth, cellWidth*2) // Cap at 2x cell width
+
+	// Minimum height: number of lines needed, minimum 1
+	textAreaHeight := max(len(textLines), 1)
+
+	// Create positioned overlay that aligns text with the original cell
+	return tview.NewFlex().
+		AddItem(nil, leftOffset, 0, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, topOffset, 0, false).
+			AddItem(textArea, textAreaHeight, 0, true).
+			AddItem(nil, 0, 1, false), textAreaWidth, 0, true).
+		AddItem(nil, 0, 1, false)
+}
+
+func splitTextToLines(text string, maxWidth int) []string {
+	if text == "" {
+		return []string{""}
+	}
+
+	// Split by newlines first
+	paragraphs := strings.Split(text, "\n")
+	var lines []string
+
+	for _, paragraph := range paragraphs {
+		if paragraph == "" {
+			lines = append(lines, "")
+			continue
+		}
+
+		// Wrap lines that are too long
+		for len(paragraph) > maxWidth {
+			// Find a good break point (prefer spaces)
+			breakPoint := maxWidth
+			for i := maxWidth - 1; i > maxWidth/2 && i < len(paragraph); i-- {
+				if paragraph[i] == ' ' {
+					breakPoint = i
+					break
+				}
+			}
+
+			lines = append(lines, paragraph[:breakPoint])
+			paragraph = strings.TrimLeft(paragraph[breakPoint:], " ")
+		}
+
+		if len(paragraph) > 0 {
+			lines = append(lines, paragraph)
+		}
+	}
+
+	return lines
 }
 
 func (e *Editor) exitEditMode() {
