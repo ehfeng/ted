@@ -213,6 +213,39 @@ func (e *Editor) enterEditMode(row, col int) {
 	// Position the textarea to align with the cell
 	modal := e.createCellEditOverlay(textArea, row, col)
 	e.pages.AddPage("editor", modal, true, true)
+
+	// Set up native cursor positioning using terminal escapes
+	e.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		if !e.editMode {
+			return
+		}
+
+		// Hide the default tcell cursor first
+		screen.HideCursor()
+		screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
+
+		// Get cursor position from textarea
+		_, _, toRow, toCol := textArea.GetCursor()
+
+		// Calculate screen position based on original cell position
+		// Use the same calculation as createCellEditOverlay
+		tableRow := row + 3 // Convert data row to table display row
+		leftOffset := 1     // Left table border "│"
+		for i := 0; i < col; i++ {
+			leftOffset += e.table.GetColumnWidth(i) + 2 + 1 // width + " │ " padding + separator
+		}
+		leftOffset += 1 // Cell padding (space after "│ ")
+
+		// Calculate cursor position relative to the cell content area
+		cursorX := leftOffset + toCol
+		cursorY := tableRow + toRow
+
+		screen.ShowCursor(cursorX, cursorY)
+	})
+
+	// Set cursor to bar style (style 5 = blinking bar)
+	e.setCursorStyle(5)
+
 	e.app.SetFocus(textArea)
 	e.editMode = true
 }
@@ -303,9 +336,19 @@ func splitTextToLines(text string, maxWidth int) []string {
 	return lines
 }
 
+func (e *Editor) setCursor(x, y int) {
+	fmt.Printf("\033[%d;%dH", y+1, x+1)
+}
+
+func (e *Editor) setCursorStyle(style int) {
+	fmt.Printf("\033[%d q", style)
+}
+
 func (e *Editor) exitEditMode() {
 	if e.editMode {
 		e.pages.RemovePage("editor")
+		e.app.SetAfterDrawFunc(nil) // Clear the cursor function
+		e.setCursorStyle(0)         // Reset to default cursor style
 		e.app.SetFocus(e.table)
 		e.editMode = false
 	}
