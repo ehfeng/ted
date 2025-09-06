@@ -312,7 +312,7 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 	// Calculate minimum textarea size based on content
 	cellWidth := e.table.GetColumnWidth(col)
 
-	// Calculate total table width for better text wrapping
+	// Calculate total table width for maximum textarea width
 	totalTableWidth := 0
 	for i := 0; i < len(e.data.Columns); i++ {
 		totalTableWidth += e.table.GetColumnWidth(i)
@@ -320,8 +320,11 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
 	totalTableWidth += 1 + (len(e.data.Columns)-1)*3 + 1
 
-	// Calculate minimum width needed for the text content using table width for wrapping
-	textLines := splitTextToLines(currentText, totalTableWidth)
+	// Calculate the maximum available width for the textarea
+	maxAvailableWidth := totalTableWidth - leftOffset - 1 // Leave 1 unit margin
+
+	// First, try with cell width to see if content fits
+	textLines := strings.Split(currentText, "\n")
 	longestLine := 0
 	for _, line := range textLines {
 		if len(line) > longestLine {
@@ -329,9 +332,15 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 		}
 	}
 
-	// Minimum width: max of cell width or longest line length, with some padding
-	minWidth := max(cellWidth, longestLine) + 2                // Add small padding
-	textAreaWidth := min(minWidth, totalTableWidth-leftOffset) // Cap at table width minus offset and margin
+	// Calculate desired width based on content
+	desiredWidth := max(cellWidth, longestLine) + 2
+	textAreaWidth := min(desiredWidth, maxAvailableWidth)
+	log.Printf("longest line: %d, cell width: %d, desired width: %d, text area width: %d", longestLine, cellWidth, desiredWidth, textAreaWidth)
+
+	// If we're using the capped width, recalculate text lines with the actual textarea width
+	if textAreaWidth < desiredWidth {
+		textLines = splitTextToLines(currentText, textAreaWidth-1) // Account for padding
+	}
 
 	// Minimum height: number of lines needed, minimum 1
 	textAreaHeight := max(len(textLines), 1)
@@ -365,7 +374,7 @@ func (e *Editor) createCellEditOverlayWithText(textArea tview.Primitive, row, co
 	// Calculate minimum textarea size based on content
 	cellWidth := e.table.GetColumnWidth(col)
 
-	// Calculate total table width for better text wrapping
+	// Calculate total table width for maximum textarea width
 	totalTableWidth := 0
 	for i := 0; i < len(e.data.Columns); i++ {
 		totalTableWidth += e.table.GetColumnWidth(i)
@@ -373,18 +382,26 @@ func (e *Editor) createCellEditOverlayWithText(textArea tview.Primitive, row, co
 	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
 	totalTableWidth += 1 + (len(e.data.Columns)-1)*3 + 1
 
-	// Calculate minimum width needed for the text content using table width for wrapping
-	textLines := splitTextToLines(currentText, totalTableWidth)
+	// Calculate the maximum available width for the textarea
+	maxAvailableWidth := totalTableWidth - leftOffset - 1 // Leave 1 margin
+
+	// First, try with cell width to see if content fits
 	longestLine := 0
+	textLines := strings.Split(currentText, "\n")
 	for _, line := range textLines {
 		if len(line) > longestLine {
 			longestLine = len(line)
 		}
 	}
 
-	// Minimum width: max of cell width or longest line length, with some padding
-	minWidth := max(cellWidth, longestLine) + 2                // Add small padding
-	textAreaWidth := min(minWidth, totalTableWidth-leftOffset) // Cap at table width minus offset and margin
+	// Calculate desired width based on content
+	desiredWidth := max(cellWidth, longestLine) + 2 // Add small padding
+	textAreaWidth := min(desiredWidth, maxAvailableWidth)
+
+	// If we're using the capped width, recalculate text lines with the actual textarea width
+	if textAreaWidth < desiredWidth {
+		textLines = splitTextToLines(currentText, textAreaWidth-2) // Account for padding
+	}
 
 	// Minimum height: number of lines needed, minimum 1
 	// Adjust for tview's TextArea behavior with trailing newlines
