@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -184,22 +185,54 @@ func (e *Editor) enterEditMode(row, col int) {
 
 	// Create textarea for editing with proper styling
 	textArea := tview.NewTextArea().
-		SetText(currentText, false).
-		SetWrap(true)
+		SetText(currentText, true).
+		SetWrap(true).
+		SetOffset(0, 0)
 
 	textArea.SetBorder(false).
 		SetBackgroundColor(tcell.ColorWhite)
 
-	// Move cursor to end of text by setting the text again with moveCursor=true
-	if len(currentText) > 0 {
-		// Set text with cursor at the end
-		textArea.SetText(currentText, true)
+	// Store references for dynamic resizing
+	var modal tview.Primitive
+
+	// Function to resize textarea based on current content
+	resizeTextarea := func() {
+		currentText := textArea.GetText()
+
+		e.pages.RemovePage("editor")
+		modal = e.createCellEditOverlayWithText(textArea, row, col, currentText)
+		e.pages.AddPage("editor", modal, true, true)
+
+		// Log the calculated dimensions from the overlay
+		if flex, ok := modal.(*tview.Flex); ok {
+			_, _, width, height := flex.GetRect()
+			log.Printf("Modal dimensions - width: %d, height: %d", width, height)
+		}
 	}
 
 	// Handle textarea input capture for save/cancel
 	textArea.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyEnter:
+			// Check if Alt/Option is pressed with Enter
+			if event.Modifiers()&tcell.ModAlt != 0 {
+				// Alt+Enter: only allow newlines for text-compatible column types
+				if e.isMultilineColumnType(col) {
+					// Manually insert newline instead of relying on default handler
+					currentText := textArea.GetText()
+					// Simply append newline at the end for now
+					newText := currentText + "\n"
+					textArea.SetText(newText, true)
+					resizeTextarea()
+					return nil
+					// return event
+				}
+				// For other types, treat as regular Enter (save and exit)
+				newText := textArea.GetText()
+				e.updateCell(row, col, newText)
+				return nil
+			}
+			// Plain Enter: save and exit
 			newText := textArea.GetText()
 			e.updateCell(row, col, newText)
 			return nil
@@ -210,8 +243,14 @@ func (e *Editor) enterEditMode(row, col int) {
 		return event
 	})
 
+	// Set up dynamic resizing on text changes
+	textArea.SetChangedFunc(func() {
+		resizeTextarea()
+		textArea.SetOffset(0, 0)
+	})
+
 	// Position the textarea to align with the cell
-	modal := e.createCellEditOverlay(textArea, row, col)
+	modal = e.createCellEditOverlay(textArea, row, col)
 	e.pages.AddPage("editor", modal, true, true)
 
 	// Set up native cursor positioning using terminal escapes
@@ -226,6 +265,7 @@ func (e *Editor) enterEditMode(row, col int) {
 
 		// Get cursor position from textarea
 		_, _, toRow, toCol := textArea.GetCursor()
+		offsetRow, offsetColumn := textArea.GetOffset()
 
 		// Calculate screen position based on original cell position
 		// Use the same calculation as createCellEditOverlay
@@ -237,8 +277,8 @@ func (e *Editor) enterEditMode(row, col int) {
 		leftOffset += 1 // Cell padding (space after "│ ")
 
 		// Calculate cursor position relative to the cell content area
-		cursorX := leftOffset + toCol
-		cursorY := tableRow + toRow
+		cursorX := leftOffset + toCol - offsetColumn
+		cursorY := tableRow + toRow - offsetRow
 
 		screen.ShowCursor(cursorX, cursorY)
 	})
@@ -272,8 +312,16 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 	// Calculate minimum textarea size based on content
 	cellWidth := e.table.GetColumnWidth(col)
 
-	// Calculate minimum width needed for the text content
-	textLines := splitTextToLines(currentText, cellWidth)
+	// Calculate total table width for better text wrapping
+	totalTableWidth := 0
+	for i := 0; i < len(e.data.Columns); i++ {
+		totalTableWidth += e.table.GetColumnWidth(i)
+	}
+	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
+	totalTableWidth += 1 + (len(e.data.Columns)-1)*3 + 1
+
+	// Calculate minimum width needed for the text content using table width for wrapping
+	textLines := splitTextToLines(currentText, totalTableWidth)
 	longestLine := 0
 	for _, line := range textLines {
 		if len(line) > longestLine {
@@ -282,11 +330,74 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 	}
 
 	// Minimum width: max of cell width or longest line length, with some padding
-	minWidth := max(cellWidth, longestLine) + 2 // Add small padding
-	textAreaWidth := min(minWidth, cellWidth*2) // Cap at 2x cell width
+	minWidth := max(cellWidth, longestLine) + 2                // Add small padding
+	textAreaWidth := min(minWidth, totalTableWidth-leftOffset) // Cap at table width minus offset and margin
 
 	// Minimum height: number of lines needed, minimum 1
 	textAreaHeight := max(len(textLines), 1)
+
+	// Create positioned overlay that aligns text with the original cell
+	return tview.NewFlex().
+		AddItem(nil, leftOffset, 0, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, topOffset, 0, false).
+			AddItem(textArea, textAreaHeight, 0, true).
+			AddItem(nil, 0, 1, false), textAreaWidth, 0, true).
+		AddItem(nil, 0, 1, false)
+}
+
+func (e *Editor) createCellEditOverlayWithText(textArea tview.Primitive, row, col int, currentText string) tview.Primitive {
+	// Calculate the position where the cell content appears on screen
+	// HeaderTable structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
+	tableRow := row + 3 // Convert data row to table display row
+
+	// Calculate horizontal position: left border + previous columns + cell padding
+	leftOffset := 1 // Left table border "│"
+	for i := 0; i < col; i++ {
+		leftOffset += e.table.GetColumnWidth(i) + 2 + 1 // width + " │ " padding + separator
+	}
+	leftOffset += 1 // Cell padding (space after "│ ")
+
+	// Calculate vertical position relative to table
+	// For multi-line cells, position at the first line of the cell content
+	topOffset := tableRow
+
+	// Calculate minimum textarea size based on content
+	cellWidth := e.table.GetColumnWidth(col)
+
+	// Calculate total table width for better text wrapping
+	totalTableWidth := 0
+	for i := 0; i < len(e.data.Columns); i++ {
+		totalTableWidth += e.table.GetColumnWidth(i)
+	}
+	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
+	totalTableWidth += 1 + (len(e.data.Columns)-1)*3 + 1
+
+	// Calculate minimum width needed for the text content using table width for wrapping
+	textLines := splitTextToLines(currentText, totalTableWidth)
+	longestLine := 0
+	for _, line := range textLines {
+		if len(line) > longestLine {
+			longestLine = len(line)
+		}
+	}
+
+	// Minimum width: max of cell width or longest line length, with some padding
+	minWidth := max(cellWidth, longestLine) + 2                // Add small padding
+	textAreaWidth := min(minWidth, totalTableWidth-leftOffset) // Cap at table width minus offset and margin
+
+	// Minimum height: number of lines needed, minimum 1
+	// Adjust for tview's TextArea behavior with trailing newlines
+	textAreaHeight := len(textLines)
+	if textAreaHeight == 0 {
+		textAreaHeight = 1
+	}
+
+	// tview TextArea might add extra space for cursor when text ends with newline
+	// Reduce height by 1 to compensate for this visual artifact
+	// if strings.HasSuffix(currentText, "\n") && textAreaHeight > 1 {
+	// 	textAreaHeight = textAreaHeight - 1
+	// }
 
 	// Create positioned overlay that aligns text with the original cell
 	return tview.NewFlex().
@@ -491,4 +602,18 @@ func formatCellValue(value interface{}) string {
 	default:
 		return fmt.Sprintf("%v", value)
 	}
+}
+
+func (e *Editor) isMultilineColumnType(col int) bool {
+	if e.data == nil || col < 0 || col >= len(e.data.Columns) {
+		return false
+	}
+
+	columnType := strings.ToLower(e.data.Columns[col].Type)
+
+	// Check for text-compatible data types that support multiline content
+	return strings.Contains(columnType, "char") ||
+		strings.Contains(columnType, "varchar") ||
+		strings.Contains(columnType, "text") ||
+		columnType == "json" // json but not jsonb
 }
