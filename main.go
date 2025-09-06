@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -66,6 +67,8 @@ func getValue(flag, arg string) string {
 }
 
 func main() {
+	log.SetOutput(os.Stderr)
+
 	rootCmd.SetHelpCommand(&cobra.Command{
 		Use:    "no-help",
 		Hidden: true,
