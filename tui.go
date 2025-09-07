@@ -189,8 +189,11 @@ func (e *Editor) enterEditMode(row, col int) {
 		SetWrap(true).
 		SetOffset(0, 0)
 
-	textArea.SetBorder(false).
-		SetBackgroundColor(tcell.ColorWhite)
+	textArea.SetBorder(false)
+
+	// Wrap textarea in a box with dark blue background
+	textAreaBox := tview.NewFlex().
+		AddItem(textArea, 0, 1, true)
 
 	// Store references for dynamic resizing
 	var modal tview.Primitive
@@ -200,7 +203,7 @@ func (e *Editor) enterEditMode(row, col int) {
 		currentText := textArea.GetText()
 
 		e.pages.RemovePage("editor")
-		modal = e.createCellEditOverlayWithText(textArea, row, col, currentText)
+		modal = e.createCellEditOverlayWithText(textAreaBox, row, col, currentText)
 		e.pages.AddPage("editor", modal, true, true)
 
 		// Log the calculated dimensions from the overlay
@@ -250,7 +253,7 @@ func (e *Editor) enterEditMode(row, col int) {
 	})
 
 	// Position the textarea to align with the cell
-	modal = e.createCellEditOverlay(textArea, row, col)
+	modal = e.createCellEditOverlay(textAreaBox, row, col)
 	e.pages.AddPage("editor", modal, true, true)
 
 	// Set up native cursor positioning using terminal escapes
@@ -295,6 +298,14 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 	currentValue := e.table.GetCell(row, col)
 	currentText := formatCellValue(currentValue)
 
+	return e.createCellEditOverlayInternal(textArea, row, col, currentText)
+}
+
+func (e *Editor) createCellEditOverlayWithText(textArea tview.Primitive, row, col int, currentText string) tview.Primitive {
+	return e.createCellEditOverlayInternal(textArea, row, col, currentText)
+}
+
+func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, col int, currentText string) tview.Primitive {
 	// Calculate the position where the cell content appears on screen
 	// HeaderTable structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
 	tableRow := row + 3 // Convert data row to table display row
@@ -305,6 +316,7 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 		leftOffset += e.table.GetColumnWidth(i) + 2 + 1 // width + " │ " padding + separator
 	}
 	leftOffset += 1 // Cell padding (space after "│ ")
+	leftOffset -= 1 // Move overlay one position to the left
 
 	// Calculate vertical position relative to table
 	topOffset := tableRow
@@ -335,68 +347,6 @@ func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) t
 	// Calculate desired width based on content
 	desiredWidth := max(cellWidth, longestLine) + 2
 	textAreaWidth := min(desiredWidth, maxAvailableWidth)
-	log.Printf("longest line: %d, cell width: %d, desired width: %d, text area width: %d", longestLine, cellWidth, desiredWidth, textAreaWidth)
-
-	// If we're using the capped width, recalculate text lines with the actual textarea width
-	if textAreaWidth < desiredWidth {
-		textLines = splitTextToLines(currentText, textAreaWidth-1) // Account for padding
-	}
-
-	// Minimum height: number of lines needed, minimum 1
-	textAreaHeight := max(len(textLines), 1)
-
-	// Create positioned overlay that aligns text with the original cell
-	return tview.NewFlex().
-		AddItem(nil, leftOffset, 0, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(nil, topOffset, 0, false).
-			AddItem(textArea, textAreaHeight, 0, true).
-			AddItem(nil, 0, 1, false), textAreaWidth, 0, true).
-		AddItem(nil, 0, 1, false)
-}
-
-func (e *Editor) createCellEditOverlayWithText(textArea tview.Primitive, row, col int, currentText string) tview.Primitive {
-	// Calculate the position where the cell content appears on screen
-	// HeaderTable structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
-	tableRow := row + 3 // Convert data row to table display row
-
-	// Calculate horizontal position: left border + previous columns + cell padding
-	leftOffset := 1 // Left table border "│"
-	for i := 0; i < col; i++ {
-		leftOffset += e.table.GetColumnWidth(i) + 2 + 1 // width + " │ " padding + separator
-	}
-	leftOffset += 1 // Cell padding (space after "│ ")
-
-	// Calculate vertical position relative to table
-	// For multi-line cells, position at the first line of the cell content
-	topOffset := tableRow
-
-	// Calculate minimum textarea size based on content
-	cellWidth := e.table.GetColumnWidth(col)
-
-	// Calculate total table width for maximum textarea width
-	totalTableWidth := 0
-	for i := 0; i < len(e.data.Columns); i++ {
-		totalTableWidth += e.table.GetColumnWidth(i)
-	}
-	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
-	totalTableWidth += 1 + (len(e.data.Columns)-1)*3 + 1
-
-	// Calculate the maximum available width for the textarea
-	maxAvailableWidth := totalTableWidth - leftOffset - 1 // Leave 1 margin
-
-	// First, try with cell width to see if content fits
-	longestLine := 0
-	textLines := strings.Split(currentText, "\n")
-	for _, line := range textLines {
-		if len(line) > longestLine {
-			longestLine = len(line)
-		}
-	}
-
-	// Calculate desired width based on content
-	desiredWidth := max(cellWidth, longestLine) + 2 // Add small padding
-	textAreaWidth := min(desiredWidth, maxAvailableWidth)
 
 	// If we're using the capped width, recalculate text lines with the actual textarea width
 	if textAreaWidth < desiredWidth {
@@ -404,24 +354,21 @@ func (e *Editor) createCellEditOverlayWithText(textArea tview.Primitive, row, co
 	}
 
 	// Minimum height: number of lines needed, minimum 1
-	// Adjust for tview's TextArea behavior with trailing newlines
-	textAreaHeight := len(textLines)
-	if textAreaHeight == 0 {
-		textAreaHeight = 1
-	}
-
-	// tview TextArea might add extra space for cursor when text ends with newline
-	// Reduce height by 1 to compensate for this visual artifact
-	// if strings.HasSuffix(currentText, "\n") && textAreaHeight > 1 {
-	// 	textAreaHeight = textAreaHeight - 1
-	// }
+	textAreaHeight := max(len(textLines), 1)
 
 	// Create positioned overlay that aligns text with the original cell
+	leftPadding := tview.NewBox()
+	rightPadding := tview.NewBox()
+
 	return tview.NewFlex().
 		AddItem(nil, leftOffset, 0, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, topOffset, 0, false).
-			AddItem(textArea, textAreaHeight, 0, true).
+			AddItem(tview.NewFlex().
+				AddItem(leftPadding, 1, 0, false).           // Left padding (red)
+				AddItem(textArea, textAreaWidth-2, 0, true). // Text area
+				AddItem(rightPadding, 1, 0, false),          // Right padding (green)
+				textAreaHeight, 0, true).
 			AddItem(nil, 0, 1, false), textAreaWidth, 0, true).
 		AddItem(nil, 0, 1, false)
 }
