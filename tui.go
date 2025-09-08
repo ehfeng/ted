@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -34,10 +37,33 @@ func runEditor(config *Config, tableSpec string) error {
 	}
 	defer db.Close()
 
-	data, err := loadTable(db, dbType, tableSpec)
+	// Get terminal height for optimal data loading
+	terminalHeight := getTerminalHeight()
+	
+	data, err := loadTable(db, dbType, tableSpec, terminalHeight)
 	if err != nil {
 		return err
 	}
+
+	// Register cleanup functions for signal handling
+	cleanupFunc := func() {
+		if data.TempFilePath != "" {
+			if err := os.Remove(data.TempFilePath); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to cleanup temp file %s: %v\n", data.TempFilePath, err)
+			}
+		}
+		if data.StopChan != nil {
+			select {
+			case data.StopChan <- struct{}{}:
+			default:
+			}
+		}
+	}
+
+	addCleanup(cleanupFunc)
+
+	// Also ensure cleanup on normal function exit
+	defer cleanupFunc()
 
 	editor := &Editor{
 		app:          tview.NewApplication(),
@@ -483,7 +509,8 @@ func (e *Editor) unhighlightColumn(col int) {
 }
 
 func (e *Editor) refreshData() {
-	data, err := loadTable(e.db, e.dbType, e.tableSpec)
+	terminalHeight := getTerminalHeight()
+	data, err := loadTable(e.db, e.dbType, e.tableSpec, terminalHeight)
 	if err != nil {
 		return
 	}
@@ -580,4 +607,27 @@ func (e *Editor) isMultilineColumnType(col int) bool {
 		strings.Contains(columnType, "varchar") ||
 		strings.Contains(columnType, "text") ||
 		columnType == "json" // json but not jsonb
+}
+
+// getTerminalHeight returns the height of the terminal in rows
+func getTerminalHeight() int {
+	type winsize struct {
+		Row    uint16
+		Col    uint16
+		Xpixel uint16
+		Ypixel uint16
+	}
+	
+	ws := &winsize{}
+	retCode, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(syscall.Stdin),
+		uintptr(syscall.TIOCGWINSZ),
+		uintptr(unsafe.Pointer(ws)))
+		
+	if int(retCode) == -1 {
+		// If we can't get terminal size, return a reasonable default
+		_ = errno // avoid unused variable error
+		return 24 // Standard terminal height
+	}
+	return int(ws.Row)
 }

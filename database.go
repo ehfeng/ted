@@ -2,15 +2,22 @@ package main
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 )
 
 type Table struct {
-	Name      string
-	LookupKey []string // empty if no primary key
-	Columns   []Column
-	Rows      [][]interface{}
+	Name         string
+	LookupKey    []string // empty if no primary key
+	Columns      []Column
+	Rows         [][]interface{}
+	TempFilePath string               // path to temporary file containing full dataset
+	TuiChan      <-chan []interface{} // channel for TUI updates
+	FileChan     <-chan []interface{} // channel for file writing
+	StopChan     chan struct{}        // channel to stop streaming
 }
 
 type Column struct {
@@ -42,7 +49,7 @@ func parseTableSpec(tableSpec string) (string, []string) {
 	return tableName, nil
 }
 
-func loadTable(db *sql.DB, dbType DatabaseType, tableSpec string) (*Table, error) {
+func loadTable(db *sql.DB, dbType DatabaseType, tableSpec string, terminalHeight int) (*Table, error) {
 	tableName, columns := parseTableSpec(tableSpec)
 
 	if tableName == "" {
@@ -57,7 +64,7 @@ func loadTable(db *sql.DB, dbType DatabaseType, tableSpec string) (*Table, error
 		return nil, fmt.Errorf("failed to load table schema: %w", err)
 	}
 
-	if err := loadTableData(db, table, columns); err != nil {
+	if err := loadTableData(db, table, columns, terminalHeight); err != nil {
 		return nil, fmt.Errorf("failed to load table data: %w", err)
 	}
 
@@ -143,7 +150,7 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Table) error {
 	return nil
 }
 
-func loadTableData(db *sql.DB, table *Table, requestedColumns []string) error {
+func loadTableData(db *sql.DB, table *Table, requestedColumns []string, terminalHeight int) error {
 	var columnNames []string
 
 	if len(requestedColumns) > 0 {
@@ -164,38 +171,185 @@ func loadTableData(db *sql.DB, table *Table, requestedColumns []string) error {
 		}
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s LIMIT 1000", strings.Join(columnNames, ", "), table.Name)
-
-	rows, err := db.Query(query)
+	// Create temporary file for full dataset
+	tempFile, err := os.CreateTemp("", "ted_data_*.csv")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
-	defer rows.Close()
+	table.TempFilePath = tempFile.Name()
 
-	for rows.Next() {
-		values := make([]interface{}, len(columnNames))
-		scanArgs := make([]interface{}, len(columnNames))
-		for i := range values {
-			scanArgs[i] = &values[i]
+	// Use passed terminal height for buffer sizing
+	tuiBufferSize := max(50, terminalHeight*2) // Buffer for 2 screens worth
+
+	// Create channels for streaming
+	tuiChan := make(chan []interface{}, tuiBufferSize) // Buffered based on terminal size
+	fileChan := make(chan []interface{}, 1000)         // Larger buffer for file writing
+	stopChan := make(chan struct{})
+
+	// Set up channels in table
+	table.TuiChan = tuiChan
+	table.FileChan = fileChan
+	table.StopChan = stopChan
+
+	// Write CSV header to temp file
+	csvWriter := csv.NewWriter(tempFile)
+	headers := make([]string, len(columnNames))
+	copy(headers, columnNames)
+	if err := csvWriter.Write(headers); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to write CSV headers: %w", err)
+	}
+
+	// Start goroutine for file writing
+	go func() {
+		defer func() {
+			csvWriter.Flush()
+			tempFile.Close()
+		}()
+
+		for row := range fileChan {
+			record := make([]string, len(row))
+			for i, val := range row {
+				record[i] = formatCSVValue(val)
+			}
+			if err := csvWriter.Write(record); err != nil {
+				// Log error but continue
+				fmt.Fprintf(os.Stderr, "Error writing to temp file: %v\n", err)
+			}
 		}
+	}()
 
-		if err := rows.Scan(scanArgs...); err != nil {
-			return err
+	// Start goroutine for data streaming
+	go func(maxTuiRows int) {
+		defer func() {
+			close(tuiChan)
+			close(fileChan)
+		}()
+
+		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columnNames, ", "), table.Name)
+
+		rows, err := db.Query(query)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Query error: %v\n", err)
+			return
 		}
+		defer rows.Close()
 
-		for i, val := range values {
-			if val != nil {
-				str := fmt.Sprintf("%v", val)
-				if len(str) > table.Columns[i].Width {
-					table.Columns[i].Width = min(len(str), 50)
+		rowCount := 0
+		for rows.Next() {
+			select {
+			case <-stopChan:
+				return
+			default:
+			}
+
+			values := make([]interface{}, len(columnNames))
+			scanArgs := make([]interface{}, len(columnNames))
+			for i := range values {
+				scanArgs[i] = &values[i]
+			}
+
+			if err := rows.Scan(scanArgs...); err != nil {
+				fmt.Fprintf(os.Stderr, "Scan error: %v\n", err)
+				continue
+			}
+
+			// Send to both channels
+			rowCopy1 := make([]interface{}, len(values))
+			rowCopy2 := make([]interface{}, len(values))
+			copy(rowCopy1, values)
+			copy(rowCopy2, values)
+
+			// Send to file channel (non-blocking)
+			select {
+			case fileChan <- rowCopy1:
+			default:
+				// File channel full, skip this row for file (shouldn't happen with large buffer)
+			}
+
+			// Send to TUI channel for initial screen population
+			if rowCount < maxTuiRows {
+				select {
+				case tuiChan <- rowCopy2:
+					rowCount++
+				default:
+					// TUI channel full, continue streaming to file only
 				}
 			}
 		}
 
-		table.Rows = append(table.Rows, values)
+		if err := rows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "Rows iteration error: %v\n", err)
+		}
+	}(tuiBufferSize)
+
+	// Reserve space for headers, borders, and some margin
+	initialBatchSize := max(10, terminalHeight-5)
+
+	// Load initial batch with proper timeout handling
+	initialBatch := make([][]interface{}, 0, initialBatchSize)
+	done := make(chan bool, 1)
+
+	// Collect available rows up to the batch size, but don't block if fewer are available
+	go func() {
+		defer func() { done <- true }()
+
+		// Use a reasonable timeout for data collection
+		timeout := make(chan bool, 1)
+		go func() {
+			// Wait 200ms for data, then timeout
+			for i := 0; i < 200; i++ {
+				// 1ms delays
+				for j := 0; j < 100000; j++ {
+				}
+			}
+			timeout <- true
+		}()
+
+		// Collect rows until we have enough, the channel closes, or we timeout
+		for len(initialBatch) < initialBatchSize {
+			select {
+			case row, ok := <-table.TuiChan:
+				if !ok {
+					// Channel closed, no more data
+					return
+				}
+				initialBatch = append(initialBatch, row)
+			case <-timeout:
+				// Timeout reached, use whatever we have
+				return
+			}
+		}
+	}()
+
+	<-done
+	table.Rows = initialBatch
+
+	return nil
+}
+
+func formatCSVValue(value interface{}) string {
+	if value == nil {
+		return ""
 	}
 
-	return rows.Err()
+	switch v := value.(type) {
+	case []byte:
+		return string(v)
+	case string:
+		return v
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", value)
+	}
 }
 
 func getPrimaryKeyColumns(db *sql.DB, dbType DatabaseType, tableName string) ([]string, error) {

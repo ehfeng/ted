@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -66,8 +68,33 @@ func getValue(flag, arg string) string {
 	return arg
 }
 
+var cleanupFuncs []func()
+
+func addCleanup(f func()) {
+	cleanupFuncs = append(cleanupFuncs, f)
+}
+
+func runCleanup() {
+	for _, f := range cleanupFuncs {
+		f()
+	}
+}
+
 func main() {
 	log.SetOutput(os.Stderr)
+
+	// Set up signal handling for graceful cleanup
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
+	go func() {
+		<-sigChan
+		runCleanup()
+		os.Exit(0)
+	}()
+
+	// Also run cleanup on normal exit
+	defer runCleanup()
 
 	rootCmd.SetHelpCommand(&cobra.Command{
 		Use:    "no-help",
