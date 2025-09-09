@@ -12,9 +12,8 @@ ted is a tabular editor. It displays database tables as markdown table and provi
 ```
 
 ```sh
-ted [dbname] [tbl.col,col]
-ted [dbname] [tbl.col,col]
-ted test users.id,name
+ted [dbname] [tbl]
+ted test users
 ```
 
 `dbname` can either be a database file (sqlite or duckdb) or a database name. If the file is not present, try the name with default parameters in Postgres and MySQL.
@@ -28,7 +27,6 @@ You can directly provide connection data with flags.
 - `-p` or `--port`
 - `-U` or `--username`
 - `-W` or `--password`
-- `-c` or `--command`
 
 ## Supported keyboard shortcuts
 
@@ -41,7 +39,7 @@ You can directly provide connection data with flags.
 1. end
 1. page up
 1. page down
-1. cmd+arrow: jump to edge
+1. cmd+arrow
 
 ### Data
 
@@ -86,7 +84,7 @@ During viewing, show column data type, constraints. During editing, input-specif
 
 When highlighting or editing foreign key references, the status bar shows a logfmt preview. Say we highlight `accounts.owner`, which references the users table: `users: id=1 name='Eric' plan='free'…`.
 
-If the sheet does not have a primary key or unique index with non-null columns, the status bar shows a warning upon opening the file or updating data. If a unique, nullable index exists, show a warning when editing null values. When updating rows without a unique key, status bar shows the number of rows updated.
+If the sheet does not have a unique index with not null columns or nulls not distinct, the status bar shows a warning upon opening the file or updating data. The associated records are read-only.
 
 If an update fails, status bar shows error message.
 
@@ -145,6 +143,8 @@ Undo/redo.
 ## Non-goals
 
 Transactions and multicolumn sort. This is an editor, not a sql editor or a psql replacement.
+
+Support for SELECT statements. Incredibly difficult to trace a select column to its source table and largely not useful.
 
 DDL. This is for editing data, not schemas. DDL is best done with SQL.
 
