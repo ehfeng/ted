@@ -9,15 +9,21 @@ import (
 	"strings"
 )
 
-type Table struct {
-	Name         string
-	LookupKey    []string // empty if no primary key
-	Columns      []Column
-	Rows         [][]interface{}
-	TempFilePath string               // path to temporary file containing full dataset
-	TuiChan      <-chan []interface{} // channel for TUI updates
-	FileChan     <-chan []interface{} // channel for file writing
-	StopChan     chan struct{}        // channel to stop streaming
+// database: table, attribute, record
+// sheet: sheet, column, row
+type Sheet struct {
+	DBType  DatabaseType
+	Columns []Column
+
+	table      string
+	lookupKey  []string // empty if no primary key
+	attributes []string
+	records    [][]interface{} // has more than just column
+	filePath   string          // path to temporary file containing full dataset
+
+	TuiChan  <-chan []interface{} // channel for TUI updates
+	FileChan <-chan []interface{} // channel for file writing
+	StopChan chan struct{}        // channel to stop streaming
 }
 
 type Column struct {
@@ -27,37 +33,13 @@ type Column struct {
 	Nullable bool
 }
 
-func parseTableSpec(tableSpec string) (string, []string) {
-	if tableSpec == "" {
-		return "", nil
-	}
-
-	parts := strings.Split(tableSpec, ".")
-	if len(parts) == 1 {
-		return parts[0], nil
-	}
-
-	tableName := parts[0]
-	if len(parts) > 1 && parts[1] != "" {
-		columns := strings.Split(parts[1], ",")
-		for i, col := range columns {
-			columns[i] = strings.TrimSpace(col)
-		}
-		return tableName, columns
-	}
-
-	return tableName, nil
-}
-
-func loadTable(db *sql.DB, dbType DatabaseType, tableSpec string, terminalHeight int) (*Table, error) {
-	tableName, columns := parseTableSpec(tableSpec)
-
+func loadTable(db *sql.DB, dbType DatabaseType, tableName string, columns []string, terminalHeight int) (*Sheet, error) {
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
 	}
 
-	table := &Table{
-		Name: tableName,
+	table := &Sheet{
+		table: tableName,
 	}
 
 	if err := loadTableSchema(db, dbType, table); err != nil {
@@ -71,12 +53,12 @@ func loadTable(db *sql.DB, dbType DatabaseType, tableSpec string, terminalHeight
 	return table, nil
 }
 
-func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Table) error {
+func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Sheet) error {
 	var query string
 
 	switch dbType {
 	case SQLite:
-		query = fmt.Sprintf("PRAGMA table_info(%s)", table.Name)
+		query = fmt.Sprintf("PRAGMA table_info(%s)", table.table)
 	case PostgreSQL:
 		query = `SELECT column_name, data_type, is_nullable 
 				FROM information_schema.columns 
@@ -89,7 +71,7 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Table) error {
 				ORDER BY ordinal_position`
 	}
 
-	rows, err := db.Query(query, table.Name)
+	rows, err := db.Query(query, table.table)
 	if err != nil {
 		return err
 	}
@@ -130,7 +112,7 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Table) error {
 
 	// For PostgreSQL and MySQL, we need separate queries to get primary key info
 	if dbType == PostgreSQL || dbType == MySQL {
-		pkCols, err := getPrimaryKeyColumns(db, dbType, table.Name)
+		pkCols, err := getPrimaryKeyColumns(db, dbType, table.table)
 		if err != nil {
 			return err
 		}
@@ -139,18 +121,18 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Table) error {
 
 	// If no primary key found, try to find the simplest unique constraint
 	if len(primaryKeyColumns) == 0 {
-		uniqueCols, err := getSimplestUniqueConstraint(db, dbType, table.Name)
+		uniqueCols, err := getSimplestUniqueConstraint(db, dbType, table.table)
 		if err != nil {
 			return err
 		}
 		primaryKeyColumns = uniqueCols
 	}
 
-	table.LookupKey = primaryKeyColumns
+	table.lookupKey = primaryKeyColumns
 	return nil
 }
 
-func loadTableData(db *sql.DB, table *Table, requestedColumns []string, terminalHeight int) error {
+func loadTableData(db *sql.DB, table *Sheet, requestedColumns []string, terminalHeight int) error {
 	var columnNames []string
 
 	if len(requestedColumns) > 0 {
@@ -176,7 +158,7 @@ func loadTableData(db *sql.DB, table *Table, requestedColumns []string, terminal
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
-	table.TempFilePath = tempFile.Name()
+	table.filePath = tempFile.Name()
 
 	// Use passed terminal height for buffer sizing
 	tuiBufferSize := max(50, terminalHeight*2) // Buffer for 2 screens worth
@@ -226,7 +208,7 @@ func loadTableData(db *sql.DB, table *Table, requestedColumns []string, terminal
 			close(fileChan)
 		}()
 
-		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columnNames, ", "), table.Name)
+		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columnNames, ", "), table.table)
 
 		rows, err := db.Query(query)
 		if err != nil {
@@ -323,7 +305,7 @@ func loadTableData(db *sql.DB, table *Table, requestedColumns []string, terminal
 	}()
 
 	<-done
-	table.Rows = initialBatch
+	table.records = initialBatch
 
 	return nil
 }

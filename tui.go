@@ -18,7 +18,7 @@ type Editor struct {
 	app          *tview.Application
 	pages        *tview.Pages
 	table        *HeaderTable
-	data         *Table
+	data         *Sheet
 	db           *sql.DB
 	dbType       DatabaseType
 	config       *Config
@@ -30,7 +30,7 @@ type Editor struct {
 	selectedCols map[int]bool
 }
 
-func runEditor(config *Config, tableSpec string) error {
+func runEditor(config *Config, tablename string, columns []string) error {
 	db, dbType, err := config.connect()
 	if err != nil {
 		return err
@@ -39,17 +39,17 @@ func runEditor(config *Config, tableSpec string) error {
 
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
-	
-	data, err := loadTable(db, dbType, tableSpec, terminalHeight)
+
+	data, err := loadTable(db, dbType, tablename, columns, terminalHeight)
 	if err != nil {
 		return err
 	}
 
 	// Register cleanup functions for signal handling
 	cleanupFunc := func() {
-		if data.TempFilePath != "" {
-			if err := os.Remove(data.TempFilePath); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to cleanup temp file %s: %v\n", data.TempFilePath, err)
+		if data.filePath != "" {
+			if err := os.Remove(data.filePath); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to cleanup temp file %s: %v\n", data.filePath, err)
 			}
 		}
 		if data.StopChan != nil {
@@ -73,7 +73,7 @@ func runEditor(config *Config, tableSpec string) error {
 		db:           db,
 		dbType:       dbType,
 		config:       config,
-		tableSpec:    tableSpec,
+		tableSpec:    tablename,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
 	}
@@ -101,7 +101,7 @@ func (e *Editor) setupTable() {
 	}
 
 	// Configure the table
-	e.table.SetHeaders(headers).SetData(e.data.Rows).SetSelectable(true)
+	e.table.SetHeaders(headers).SetData(e.data.records).SetSelectable(true)
 }
 
 func (e *Editor) setupKeyBindings() {
@@ -136,7 +136,7 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(newRow, col)
 			return nil
 		case key == tcell.KeyPgDn:
-			newRow := min(len(e.data.Rows)-1, row+10)
+			newRow := min(len(e.data.records)-1, row+10)
 			e.table.Select(newRow, col)
 			return nil
 		case rune == ' ' && mod&tcell.ModShift != 0:
@@ -178,7 +178,7 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(0, col)
 			return nil
 		case key == tcell.KeyDown && mod&tcell.ModMeta != 0:
-			e.table.Select(len(e.data.Rows)-1, col)
+			e.table.Select(len(e.data.records)-1, col)
 			return nil
 		}
 
@@ -198,7 +198,7 @@ func (e *Editor) navigateTab(reverse bool) {
 	} else {
 		if col < len(e.data.Columns)-1 {
 			e.table.Select(row, col+1)
-		} else if row < len(e.data.Rows)-1 {
+		} else if row < len(e.data.records)-1 {
 			e.table.Select(row+1, 0)
 		}
 	}
@@ -359,7 +359,7 @@ func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, co
 	totalTableWidth += 1 + (len(e.data.Columns)-1)*3 + 1
 
 	// Calculate the maximum available width for the textarea
-	maxAvailableWidth := totalTableWidth - leftOffset - 1 // Leave 1 unit margin
+	maxAvailableWidth := totalTableWidth - leftOffset + 1 // Account for right border
 
 	// First, try with cell width to see if content fits
 	textLines := strings.Split(currentText, "\n")
@@ -456,8 +456,8 @@ func (e *Editor) exitEditMode() {
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
-	if row >= 0 && row < len(e.data.Rows) && col >= 0 && col < len(e.data.Rows[row]) {
-		e.data.Rows[row][col] = newValue
+	if row >= 0 && row < len(e.data.records) && col >= 0 && col < len(e.data.records[row]) {
+		e.data.records[row][col] = newValue
 		e.table.UpdateCell(row, col, newValue)
 	}
 
@@ -510,7 +510,11 @@ func (e *Editor) unhighlightColumn(col int) {
 
 func (e *Editor) refreshData() {
 	terminalHeight := getTerminalHeight()
-	data, err := loadTable(e.db, e.dbType, e.tableSpec, terminalHeight)
+	columns := []string{}
+	for _, col := range e.data.Columns {
+		columns = append(columns, col.Name)
+	}
+	data, err := loadTable(e.db, e.dbType, e.tableSpec, columns, terminalHeight)
 	if err != nil {
 		return
 	}
@@ -520,18 +524,18 @@ func (e *Editor) refreshData() {
 }
 
 func (e *Editor) moveRow(row, direction int) {
-	if row == 0 || row < 1 || row > len(e.data.Rows) {
+	if row == 0 || row < 1 || row > len(e.data.records) {
 		return
 	}
 
 	dataIdx := row - 1
 	newIdx := dataIdx + direction
 
-	if newIdx < 0 || newIdx >= len(e.data.Rows) {
+	if newIdx < 0 || newIdx >= len(e.data.records) {
 		return
 	}
 
-	e.data.Rows[dataIdx], e.data.Rows[newIdx] = e.data.Rows[newIdx], e.data.Rows[dataIdx]
+	e.data.records[dataIdx], e.data.records[newIdx] = e.data.records[newIdx], e.data.records[dataIdx]
 	e.setupTable()
 	e.table.Select(row+direction, e.currentCol)
 }
@@ -548,8 +552,8 @@ func (e *Editor) moveColumn(col, direction int) {
 
 	e.data.Columns[col], e.data.Columns[newIdx] = e.data.Columns[newIdx], e.data.Columns[col]
 
-	for i := range e.data.Rows {
-		e.data.Rows[i][col], e.data.Rows[i][newIdx] = e.data.Rows[i][newIdx], e.data.Rows[i][col]
+	for i := range e.data.records {
+		e.data.records[i][col], e.data.records[i][newIdx] = e.data.records[i][newIdx], e.data.records[i][col]
 	}
 
 	e.setupTable()
@@ -617,13 +621,13 @@ func getTerminalHeight() int {
 		Xpixel uint16
 		Ypixel uint16
 	}
-	
+
 	ws := &winsize{}
 	retCode, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
 		uintptr(syscall.Stdin),
 		uintptr(syscall.TIOCGWINSZ),
 		uintptr(unsafe.Pointer(ws)))
-		
+
 	if int(retCode) == -1 {
 		// If we can't get terminal size, return a reasonable default
 		_ = errno // avoid unused variable error

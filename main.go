@@ -20,21 +20,19 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "ted [database] [table.columns]",
+	Use:   "ted [database] [table]",
 	Short: "ted is a tabular editor for databases",
 	Long: `ted is a spreadsheet-like editor for database tables, allowing for easy viewing and editing of table data.
 
 Examples:
-  ted test users.id,name
+  ted test users
   ted mydb.sqlite users
-  ted -h localhost -p 5432 -U myuser mydb users.id,name,email`,
+  ted -h localhost -p 5432 -U myuser mydb users`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		dbname := args[0]
-		tableSpec := ""
-		if len(args) > 1 {
-			tableSpec = args[1]
-		}
+		tablename := args[1]
+		columns := []string{} // TODO derive from config
 
 		config := &Config{
 			Database: getValue(database, dbname),
@@ -45,7 +43,7 @@ Examples:
 			Command:  command,
 		}
 
-		if err := runEditor(config, tableSpec); err != nil {
+		if err := runEditor(config, tablename, columns); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -86,7 +84,7 @@ func main() {
 	// Set up signal handling for graceful cleanup
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	
+
 	go func() {
 		<-sigChan
 		runCleanup()
