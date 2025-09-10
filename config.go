@@ -52,7 +52,7 @@ func (c *Config) buildConnectionString() (string, DatabaseType, error) {
 
 	case PostgreSQL:
 		connStr := fmt.Sprintf("dbname=%s", c.Database)
-		
+
 		if c.Host != "" {
 			connStr += fmt.Sprintf(" host=%s", c.Host)
 		}
@@ -70,7 +70,7 @@ func (c *Config) buildConnectionString() (string, DatabaseType, error) {
 			connStr += fmt.Sprintf(" password=%s", c.Password)
 		}
 		connStr += " sslmode=disable"
-		
+
 		return connStr, dbType, nil
 
 	case MySQL:
@@ -82,13 +82,13 @@ func (c *Config) buildConnectionString() (string, DatabaseType, error) {
 				connStr = currentUser.Username
 			}
 		}
-		
+
 		if c.Password != "" {
 			connStr += ":" + c.Password
 		}
-		
+
 		connStr += "@"
-		
+
 		if c.Host != "" && c.Port != "" {
 			connStr += fmt.Sprintf("tcp(%s:%s)", c.Host, c.Port)
 		} else if c.Host != "" {
@@ -96,9 +96,9 @@ func (c *Config) buildConnectionString() (string, DatabaseType, error) {
 		} else {
 			connStr += "tcp(localhost:3306)"
 		}
-		
+
 		connStr += "/" + c.Database
-		
+
 		return connStr, dbType, nil
 
 	default:

@@ -16,17 +16,23 @@ ted [dbname] [tbl]
 ted test users
 ```
 
-`dbname` can either be a database file (sqlite or duckdb) or a database name. If the file is not present, try the name with default parameters in Postgres and MySQL.
+`dbname` can either be a database file (sqlite or duckdb) or a database name. If the file is not present, try the name with default parameters in Postgres and MySQL. The where clause lets you filter down the table.
 
 ## Common flags
 
-You can directly provide connection data with flags.
+### Connection info
 
 - `-d` or `--database`
 - `-h` or `--host`
 - `-p` or `--port`
-- `-U` or `--username`
-- `-W` or `--password`
+- `-u` or `--username`
+- `--password`
+
+### SQL clauses
+
+- `-W` or `--where`
+- `-O` or `--order-by`
+- `-L` or `--limit`
 
 ## Supported keyboard shortcuts
 
@@ -46,13 +52,13 @@ You can directly provide connection data with flags.
 1. enter: edit/down/new row (if at bottom)
 1. esc: exit from editing, discarding changes
 1. shift+enter: edit/up (if at top)
-1. shift+space: select row (for deletion)
-1. ctrl+space: select column (for deletion)
+1. alt+del: delete row
 1. cmd+r: refresh data
 1. cmd+f: find
-1. alt+↑/↓: moves row up/down
+1. alt+↑/↓: rearranges row order
 1. alt+←/→: rearranges column order
-1. ctrl+←/→: increase/decrease column width
+1. ctrl+←/→: increase/decrease column width (zero hides)
+1. ctrl+del: hides column
 
 ## Table UI
 
@@ -115,9 +121,9 @@ databases:
     users: # table
       frozen: [id, name]
       columns: # order and width
-        id # default
-        name: 0 # hidden
+        name # default
         preferences: 20
+        id: 0 # hidden
 
 null: <null> # default is \N
 ```
@@ -144,7 +150,7 @@ Undo/redo.
 
 Transactions and multicolumn sort. This is an editor, not a sql editor or a psql replacement.
 
-Support for SELECT statements. Incredibly difficult to trace a select column to its source table and largely not useful.
+Support for views. Incredibly difficult to trace a view column to its source table. Editing via views is not useful. `WHERE`, `ORDER BY` and `LIMIT` are supported as flags, which should cover most cases.
 
 DDL. This is for editing data, not schemas. DDL is best done with SQL.
 

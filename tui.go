@@ -18,11 +18,9 @@ type Editor struct {
 	app          *tview.Application
 	pages        *tview.Pages
 	table        *HeaderTable
-	data         *Sheet
+	sheet        *Sheet
 	db           *sql.DB
-	dbType       DatabaseType
 	config       *Config
-	tableSpec    string
 	currentRow   int
 	currentCol   int
 	editMode     bool
@@ -30,7 +28,7 @@ type Editor struct {
 	selectedCols map[int]bool
 }
 
-func runEditor(config *Config, tablename string, columns []string) error {
+func runEditor(config *Config, tablename string) error {
 	db, dbType, err := config.connect()
 	if err != nil {
 		return err
@@ -40,21 +38,26 @@ func runEditor(config *Config, tablename string, columns []string) error {
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
 
-	data, err := loadTable(db, dbType, tablename, columns, terminalHeight)
+	var selectedColumns []Column // TODO derive from config
+	sheet, err := NewSheet(db, dbType, tablename, selectedColumns, terminalHeight)
 	if err != nil {
 		return err
+	}
+	// TODO sheet.celectedColumns should not include rowid for sqlite
+	if sheet.DBType == SQLite {
+
 	}
 
 	// Register cleanup functions for signal handling
 	cleanupFunc := func() {
-		if data.filePath != "" {
-			if err := os.Remove(data.filePath); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to cleanup temp file %s: %v\n", data.filePath, err)
+		if sheet.filePath != "" {
+			if err := os.Remove(sheet.filePath); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to cleanup temp file %s: %v\n", sheet.filePath, err)
 			}
 		}
-		if data.StopChan != nil {
+		if sheet.StopChan != nil {
 			select {
-			case data.StopChan <- struct{}{}:
+			case sheet.StopChan <- struct{}{}:
 			default:
 			}
 		}
@@ -69,11 +72,9 @@ func runEditor(config *Config, tablename string, columns []string) error {
 		app:          tview.NewApplication(),
 		pages:        tview.NewPages(),
 		table:        NewHeaderTable(),
-		data:         data,
+		sheet:        sheet,
 		db:           db,
-		dbType:       dbType,
 		config:       config,
-		tableSpec:    tablename,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
 	}
@@ -92,8 +93,8 @@ func runEditor(config *Config, tablename string, columns []string) error {
 
 func (e *Editor) setupTable() {
 	// Create headers for HeaderTable
-	headers := make([]HeaderColumn, len(e.data.Columns))
-	for i, col := range e.data.Columns {
+	headers := make([]HeaderColumn, len(e.sheet.columns))
+	for i, col := range e.sheet.columns {
 		headers[i] = HeaderColumn{
 			Name:  col.Name,
 			Width: col.Width,
@@ -101,7 +102,7 @@ func (e *Editor) setupTable() {
 	}
 
 	// Configure the table
-	e.table.SetHeaders(headers).SetData(e.data.records).SetSelectable(true)
+	e.table.SetHeaders(headers).SetData(e.sheet.records).SetSelectable(true)
 }
 
 func (e *Editor) setupKeyBindings() {
@@ -129,14 +130,14 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, 0)
 			return nil
 		case key == tcell.KeyEnd:
-			e.table.Select(row, len(e.data.Columns)-1)
+			e.table.Select(row, len(e.sheet.columns)-1)
 			return nil
 		case key == tcell.KeyPgUp:
 			newRow := max(0, row-10)
 			e.table.Select(newRow, col)
 			return nil
 		case key == tcell.KeyPgDn:
-			newRow := min(len(e.data.records)-1, row+10)
+			newRow := min(len(e.sheet.records)-1, row+10)
 			e.table.Select(newRow, col)
 			return nil
 		case rune == ' ' && mod&tcell.ModShift != 0:
@@ -172,13 +173,13 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, 0)
 			return nil
 		case key == tcell.KeyRight && mod&tcell.ModMeta != 0:
-			e.table.Select(row, len(e.data.Columns)-1)
+			e.table.Select(row, len(e.sheet.columns)-1)
 			return nil
 		case key == tcell.KeyUp && mod&tcell.ModMeta != 0:
 			e.table.Select(0, col)
 			return nil
 		case key == tcell.KeyDown && mod&tcell.ModMeta != 0:
-			e.table.Select(len(e.data.records)-1, col)
+			e.table.Select(len(e.sheet.records)-1, col)
 			return nil
 		}
 
@@ -193,12 +194,12 @@ func (e *Editor) navigateTab(reverse bool) {
 		if col > 0 {
 			e.table.Select(row, col-1)
 		} else if row > 0 {
-			e.table.Select(row-1, len(e.data.Columns)-1)
+			e.table.Select(row-1, len(e.sheet.columns)-1)
 		}
 	} else {
-		if col < len(e.data.Columns)-1 {
+		if col < len(e.sheet.columns)-1 {
 			e.table.Select(row, col+1)
-		} else if row < len(e.data.records)-1 {
+		} else if row < len(e.sheet.records)-1 {
 			e.table.Select(row+1, 0)
 		}
 	}
@@ -352,11 +353,11 @@ func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, co
 
 	// Calculate total table width for maximum textarea width
 	totalTableWidth := 0
-	for i := 0; i < len(e.data.Columns); i++ {
+	for i := 0; i < len(e.sheet.columns); i++ {
 		totalTableWidth += e.table.GetColumnWidth(i)
 	}
 	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
-	totalTableWidth += 1 + (len(e.data.Columns)-1)*3 + 1
+	totalTableWidth += 1 + (len(e.sheet.columns)-1)*3 + 1
 
 	// Calculate the maximum available width for the textarea
 	maxAvailableWidth := totalTableWidth - leftOffset + 1 // Account for right border
@@ -456,8 +457,8 @@ func (e *Editor) exitEditMode() {
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
-	if row >= 0 && row < len(e.data.records) && col >= 0 && col < len(e.data.records[row]) {
-		e.data.records[row][col] = newValue
+	if row >= 0 && row < len(e.sheet.records) && col >= 0 && col < len(e.sheet.records[row]) {
+		e.sheet.records[row][col] = newValue
 		e.table.UpdateCell(row, col, newValue)
 	}
 
@@ -509,51 +510,48 @@ func (e *Editor) unhighlightColumn(col int) {
 }
 
 func (e *Editor) refreshData() {
-	terminalHeight := getTerminalHeight()
-	columns := []string{}
-	for _, col := range e.data.Columns {
-		columns = append(columns, col.Name)
-	}
-	data, err := loadTable(e.db, e.dbType, e.tableSpec, columns, terminalHeight)
-	if err != nil {
-		return
-	}
+	panic("not implemented")
+	// terminalHeight := getTerminalHeight()
+	// data, err := NewSheet(e.db, e.sheet.DBType, e.sheet.table, e.sheet.columns, terminalHeight)
+	// if err != nil {
+	// 	return
+	// }
 
-	e.data = data
-	e.setupTable()
+	// e.sheet = data
+	// e.setupTable()
 }
 
 func (e *Editor) moveRow(row, direction int) {
-	if row == 0 || row < 1 || row > len(e.data.records) {
+	if row == 0 || row < 1 || row > len(e.sheet.records) {
 		return
 	}
 
 	dataIdx := row - 1
 	newIdx := dataIdx + direction
 
-	if newIdx < 0 || newIdx >= len(e.data.records) {
+	if newIdx < 0 || newIdx >= len(e.sheet.records) {
 		return
 	}
 
-	e.data.records[dataIdx], e.data.records[newIdx] = e.data.records[newIdx], e.data.records[dataIdx]
+	e.sheet.records[dataIdx], e.sheet.records[newIdx] = e.sheet.records[newIdx], e.sheet.records[dataIdx]
 	e.setupTable()
 	e.table.Select(row+direction, e.currentCol)
 }
 
 func (e *Editor) moveColumn(col, direction int) {
-	if col < 0 || col >= len(e.data.Columns) {
+	if col < 0 || col >= len(e.sheet.columns) {
 		return
 	}
 
 	newIdx := col + direction
-	if newIdx < 0 || newIdx >= len(e.data.Columns) {
+	if newIdx < 0 || newIdx >= len(e.sheet.columns) {
 		return
 	}
 
-	e.data.Columns[col], e.data.Columns[newIdx] = e.data.Columns[newIdx], e.data.Columns[col]
+	e.sheet.columns[col], e.sheet.columns[newIdx] = e.sheet.columns[newIdx], e.sheet.columns[col]
 
-	for i := range e.data.records {
-		e.data.records[i][col], e.data.records[i][newIdx] = e.data.records[i][newIdx], e.data.records[i][col]
+	for i := range e.sheet.records {
+		e.sheet.records[i][col], e.sheet.records[i][newIdx] = e.sheet.records[i][newIdx], e.sheet.records[i][col]
 	}
 
 	e.setupTable()
@@ -561,12 +559,12 @@ func (e *Editor) moveColumn(col, direction int) {
 }
 
 func (e *Editor) adjustColumnWidth(col, delta int) {
-	if col < 0 || col >= len(e.data.Columns) {
+	if col < 0 || col >= len(e.sheet.columns) {
 		return
 	}
 
-	newWidth := max(3, e.data.Columns[col].Width+delta)
-	e.data.Columns[col].Width = newWidth
+	newWidth := max(3, e.sheet.columns[col].Width+delta)
+	e.sheet.columns[col].Width = newWidth
 
 	// Update the table column width and re-render
 	e.table.SetColumnWidth(col, newWidth)
@@ -600,17 +598,27 @@ func formatCellValue(value interface{}) string {
 }
 
 func (e *Editor) isMultilineColumnType(col int) bool {
-	if e.data == nil || col < 0 || col >= len(e.data.Columns) {
+	if e.sheet == nil || col < 0 || col >= len(e.sheet.columns) {
 		return false
 	}
 
-	columnType := strings.ToLower(e.data.Columns[col].Type)
+	column := e.sheet.columns[col]
+	var attrType string
+	for _, attr := range e.sheet.attributes {
+		if attr.Name == column.Name {
+			attrType = attr.Type
+			break
+		}
+	}
+
+	// Normalize type for consistent matching
+	attrType = strings.ToLower(attrType)
 
 	// Check for text-compatible data types that support multiline content
-	return strings.Contains(columnType, "char") ||
-		strings.Contains(columnType, "varchar") ||
-		strings.Contains(columnType, "text") ||
-		columnType == "json" // json but not jsonb
+	return strings.Contains(attrType, "char") ||
+		strings.Contains(attrType, "varchar") ||
+		strings.Contains(attrType, "text") ||
+		attrType == "json" // json but not jsonb
 }
 
 // getTerminalHeight returns the height of the terminal in rows

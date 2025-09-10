@@ -32,7 +32,6 @@ Examples:
 	Run: func(cmd *cobra.Command, args []string) {
 		dbname := args[0]
 		tablename := args[1]
-		columns := []string{} // TODO derive from config
 
 		config := &Config{
 			Database: getValue(database, dbname),
@@ -43,7 +42,7 @@ Examples:
 			Command:  command,
 		}
 
-		if err := runEditor(config, tablename, columns); err != nil {
+		if err := runEditor(config, tablename); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

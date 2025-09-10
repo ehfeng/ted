@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -11,46 +12,98 @@ import (
 
 // database: table, attribute, record
 // sheet: sheet, column, row
+// selected may also contain rowid for sqlite
 type Sheet struct {
-	DBType  DatabaseType
-	Columns []Column
-
-	table      string
-	lookupKey  []string // empty if no primary key
-	attributes []string
-	records    [][]interface{} // has more than just column
-	filePath   string          // path to temporary file containing full dataset
-
+	// sheet
+	DBType   DatabaseType
+	columns  []Column
 	TuiChan  <-chan []interface{} // channel for TUI updates
 	FileChan <-chan []interface{} // channel for file writing
 	StopChan chan struct{}        // channel to stop streaming
+
+	// results
+	table      string
+	lookupKey  []string // empty if no primary key
+	attributes []attribute
+	uniques    [][]int  // unique columns (can be multicolumn)
+	references [][]int  // foreign key columns (can be multicolumn)
+	selected   []string // queried columns
+	records    [][]interface{}
+	filePath   string // path to temporary file containing full dataset
+
 }
 
 type Column struct {
-	Name     string
-	Type     string
-	Width    int
-	Nullable bool
+	Name  string
+	Width int
 }
 
-func loadTable(db *sql.DB, dbType DatabaseType, tableName string, columns []string, terminalHeight int) (*Sheet, error) {
+type attribute struct {
+	Name      string
+	Type      string // TODO what if it's an enum
+	Nullable  bool
+	Generated bool // computed column, read-only
+}
+
+func NewSheet(db *sql.DB, dbType DatabaseType, tableName string,
+	configCols []Column, terminalHeight int) (*Sheet, error) {
+
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
 	}
 
-	table := &Sheet{
+	sheet := &Sheet{
 		table: tableName,
 	}
 
-	if err := loadTableSchema(db, dbType, table); err != nil {
+	if err := loadTableSchema(db, dbType, sheet); err != nil {
 		return nil, fmt.Errorf("failed to load table schema: %w", err)
 	}
 
-	if err := loadTableData(db, table, columns, terminalHeight); err != nil {
+	selected := []string{}
+	if configCols == nil {
+		log.Println(sheet.attributes)
+		for _, attr := range sheet.attributes {
+			selected = append(selected, attr.Name)
+			// sqlite rowid should not be shown if not specified
+			if dbType == SQLite && attr.Name != "rowid" {
+				sheet.columns = append(sheet.columns, Column{Name: attr.Name, Width: 8})
+			}
+		}
+	} else {
+		// Create map of selected column names for efficient lookup
+		selectedMap := make(map[string]bool)
+		for _, col := range configCols {
+			selectedMap[col.Name] = true
+		}
+
+		// Add intersection of selectedColumns and lookupKey first
+		for _, key := range sheet.lookupKey {
+			if selectedMap[key] {
+				selected = append(selected, key)
+			}
+		}
+
+		// Add remaining selected columns that aren't in lookupKey
+		for _, col := range configCols {
+			isLookupKey := false
+			for _, key := range sheet.lookupKey {
+				if col.Name == key {
+					isLookupKey = true
+					break
+				}
+			}
+			if !isLookupKey {
+				selected = append(selected, col.Name)
+			}
+		}
+	}
+
+	if err := loadTableData(db, sheet, selected, terminalHeight); err != nil {
 		return nil, fmt.Errorf("failed to load table data: %w", err)
 	}
 
-	return table, nil
+	return sheet, nil
 }
 
 func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Sheet) error {
@@ -80,7 +133,7 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Sheet) error {
 	var primaryKeyColumns []string
 
 	for rows.Next() {
-		var col Column
+		var attr attribute
 		var nullable string
 
 		switch dbType {
@@ -88,22 +141,21 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Sheet) error {
 			var cid int
 			var dfltValue sql.NullString
 			var pk int
-			err = rows.Scan(&cid, &col.Name, &col.Type, &nullable, &dfltValue, &pk)
-			col.Nullable = nullable != "1"
+			err = rows.Scan(&cid, &attr.Name, &attr.Type, &nullable, &dfltValue, &pk)
+			attr.Nullable = nullable != "1"
 			if pk == 1 {
-				primaryKeyColumns = append(primaryKeyColumns, col.Name)
+				primaryKeyColumns = append(primaryKeyColumns, attr.Name)
 			}
 		case PostgreSQL, MySQL:
-			err = rows.Scan(&col.Name, &col.Type, &nullable)
-			col.Nullable = strings.ToLower(nullable) == "yes"
+			err = rows.Scan(&attr.Name, &attr.Type, &nullable)
+			attr.Nullable = strings.ToLower(nullable) == "yes"
 		}
 
 		if err != nil {
 			return err
 		}
 
-		col.Width = max(len(col.Name), 8)
-		table.Columns = append(table.Columns, col)
+		table.attributes = append(table.attributes, attr)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -121,37 +173,30 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Sheet) error {
 
 	// If no primary key found, try to find the simplest unique constraint
 	if len(primaryKeyColumns) == 0 {
-		uniqueCols, err := getSimplestUniqueConstraint(db, dbType, table.table)
-		if err != nil {
-			return err
+		if dbType == SQLite {
+			// SQLite always has rowid unless WITHOUT ROWID is used
+			primaryKeyColumns = []string{"rowid"}
+			table.attributes = append(table.attributes, attribute{
+				Name:     "rowid",
+				Type:     "INTEGER",
+				Nullable: false,
+			})
+
+		} else {
+			uniqueCols, err := getSimplestUniqueConstraint(db, dbType, table.table)
+			if err != nil {
+				return err
+			}
+			primaryKeyColumns = uniqueCols
 		}
-		primaryKeyColumns = uniqueCols
 	}
 
 	table.lookupKey = primaryKeyColumns
 	return nil
 }
 
-func loadTableData(db *sql.DB, table *Sheet, requestedColumns []string, terminalHeight int) error {
-	var columnNames []string
-
-	if len(requestedColumns) > 0 {
-		columnNames = requestedColumns
-		filteredCols := make([]Column, 0)
-		for _, reqCol := range requestedColumns {
-			for _, col := range table.Columns {
-				if col.Name == reqCol {
-					filteredCols = append(filteredCols, col)
-					break
-				}
-			}
-		}
-		table.Columns = filteredCols
-	} else {
-		for _, col := range table.Columns {
-			columnNames = append(columnNames, col.Name)
-		}
-	}
+func loadTableData(db *sql.DB, table *Sheet, selectColumns []string,
+	terminalHeight int) error {
 
 	// Create temporary file for full dataset
 	tempFile, err := os.CreateTemp("", "ted_data_*.csv")
@@ -164,8 +209,8 @@ func loadTableData(db *sql.DB, table *Sheet, requestedColumns []string, terminal
 	tuiBufferSize := max(50, terminalHeight*2) // Buffer for 2 screens worth
 
 	// Create channels for streaming
-	tuiChan := make(chan []interface{}, tuiBufferSize) // Buffered based on terminal size
-	fileChan := make(chan []interface{}, 1000)         // Larger buffer for file writing
+	tuiChan := make(chan []interface{}, tuiBufferSize) // based on terminal size
+	fileChan := make(chan []interface{}, 1000)
 	stopChan := make(chan struct{})
 
 	// Set up channels in table
@@ -175,8 +220,8 @@ func loadTableData(db *sql.DB, table *Sheet, requestedColumns []string, terminal
 
 	// Write CSV header to temp file
 	csvWriter := csv.NewWriter(tempFile)
-	headers := make([]string, len(columnNames))
-	copy(headers, columnNames)
+	headers := make([]string, len(selectColumns))
+	copy(headers, selectColumns)
 	if err := csvWriter.Write(headers); err != nil {
 		tempFile.Close()
 		return fmt.Errorf("failed to write CSV headers: %w", err)
@@ -208,7 +253,7 @@ func loadTableData(db *sql.DB, table *Sheet, requestedColumns []string, terminal
 			close(fileChan)
 		}()
 
-		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columnNames, ", "), table.table)
+		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectColumns, ", "), table.table)
 
 		rows, err := db.Query(query)
 		if err != nil {
@@ -225,8 +270,8 @@ func loadTableData(db *sql.DB, table *Sheet, requestedColumns []string, terminal
 			default:
 			}
 
-			values := make([]interface{}, len(columnNames))
-			scanArgs := make([]interface{}, len(columnNames))
+			values := make([]interface{}, len(selectColumns))
+			scanArgs := make([]interface{}, len(selectColumns))
 			for i := range values {
 				scanArgs[i] = &values[i]
 			}
