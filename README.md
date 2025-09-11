@@ -4,7 +4,7 @@ ted is a tabular editor. It displays database tables as markdown table and provi
 
 ```
 ┌──────────┬──────┬──────────┬────────────┬────────────┬─────┐
-│       id │ name │ email    │ created_at │ updated_at │ org…│
+│       id │ name◂│▸email    │ created_at │ updated_at │ org…│
 ┝━━━━━━━━━━┿━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━┥
 │        4 │ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │  32 │
 │        5 │ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │   4 │
@@ -59,6 +59,13 @@ ted test users
 1. alt+←/→: rearranges column order
 1. ctrl+←/→: increase/decrease column width (zero hides)
 1. ctrl+del: hides column
+
+## Mouse
+
+Lets you interact with elements, selecting cells, resizing or unhiding columns. Selecting a range of cells lets you copy a csv to clipboard.
+
+1. opt+click
+1. opt+shift+click: (select range)
 
 ## Table UI
 
@@ -123,12 +130,14 @@ databases:
       columns: # order and width
         name # default
         preferences: 20
-        id: 0 # hidden
+        project_cache: 0
 
 null: <null> # default is \N
 ```
 
-`.ted.yaml` can be used to store table column order and width.
+`.ted.yaml` can be used to store table column order and width. All columns should appear by default with a width of 8. You can only hide columns, which displays like hidden spreadsheet columns: `◂│▸`. Those unicode characters are `cmd+click`-able to show column.
+
+All columns selected by default. Extra data from table columns shouldn't matter _that_ for this use case.
 
 ### Example
 
@@ -142,20 +151,20 @@ databases:
 
 ## Nice to have's
 
-Support for editing rows in a view or query as long as the primary key is included. This requires query parsing to determine which rows are read-only (computed or join values cannot be edited) and how to change the relevant rows (which columns are that value's primary key).
+Undo/redo with `cmd+z` and `cmd+shift+z` shortcuts.
 
-Undo/redo.
+If primary key does not exist, use sqlite/duckdb `rowid` or postgres `ctid`. This approach is vulnerable to non-exclusive access (updates) or VACUUMs. Also requires modifying update `RETURNING *, rowid|ctid`. It does not work for mysql or clickhouse. Throw a warning in the status bar if using this approach.
 
 ## Non-goals
 
-Transactions and multicolumn sort. This is an editor, not a sql editor or a psql replacement.
+Transactions. This is an editor, not a sql editor or a psql replacement.
+
+Column filtering or sorting. You're re-implementing SQL at this point.
 
 Support for views. Incredibly difficult to trace a view column to its source table. Editing via views is not useful. `WHERE`, `ORDER BY` and `LIMIT` are supported as flags, which should cover most cases.
 
 DDL. This is for editing data, not schemas. DDL is best done with SQL.
 
 Real-time database updates. This is not possible without modifying the database (adding triggers). You also do not want to lock the table from external writes: this should not be necessary in local development and is never a good idea in production.
-
-Column filtering or sorting. You're re-implementing SQL at this point.
 
 Pasting. Unclear how you'd map things, especially if focus is not on the first column.

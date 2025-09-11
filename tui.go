@@ -14,10 +14,15 @@ import (
 	"github.com/rivo/tview"
 )
 
+const (
+	DefaultColumnWidth = 8
+)
+
 type Editor struct {
 	app          *tview.Application
 	pages        *tview.Pages
 	table        *HeaderTable
+	columns      []Column
 	sheet        *Sheet
 	db           *sql.DB
 	config       *Config
@@ -38,14 +43,10 @@ func runEditor(config *Config, tablename string) error {
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
 
-	var selectedColumns []Column // TODO derive from config
-	sheet, err := NewSheet(db, dbType, tablename, selectedColumns, terminalHeight)
+	var configColumns []Column // TODO derive from config
+	sheet, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight)
 	if err != nil {
 		return err
-	}
-	// TODO sheet.celectedColumns should not include rowid for sqlite
-	if sheet.DBType == SQLite {
-
 	}
 
 	// Register cleanup functions for signal handling
@@ -62,16 +63,21 @@ func runEditor(config *Config, tablename string) error {
 			}
 		}
 	}
-
 	addCleanup(cleanupFunc)
 
-	// Also ensure cleanup on normal function exit
-	defer cleanupFunc()
+	columns := make([]Column, len(sheet.attributes))
+	for i, attr := range sheet.attributes {
+		columns[i] = Column{
+			Name:  attr.Name,
+			Width: DefaultColumnWidth,
+		}
+	}
 
 	editor := &Editor{
 		app:          tview.NewApplication(),
 		pages:        tview.NewPages(),
 		table:        NewHeaderTable(),
+		columns:      columns,
 		sheet:        sheet,
 		db:           db,
 		config:       config,
@@ -93,8 +99,8 @@ func runEditor(config *Config, tablename string) error {
 
 func (e *Editor) setupTable() {
 	// Create headers for HeaderTable
-	headers := make([]HeaderColumn, len(e.sheet.columns))
-	for i, col := range e.sheet.columns {
+	headers := make([]HeaderColumn, len(e.columns))
+	for i, col := range e.columns {
 		headers[i] = HeaderColumn{
 			Name:  col.Name,
 			Width: col.Width,
@@ -130,7 +136,7 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, 0)
 			return nil
 		case key == tcell.KeyEnd:
-			e.table.Select(row, len(e.sheet.columns)-1)
+			e.table.Select(row, len(e.columns)-1)
 			return nil
 		case key == tcell.KeyPgUp:
 			newRow := max(0, row-10)
@@ -173,7 +179,7 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, 0)
 			return nil
 		case key == tcell.KeyRight && mod&tcell.ModMeta != 0:
-			e.table.Select(row, len(e.sheet.columns)-1)
+			e.table.Select(row, len(e.columns)-1)
 			return nil
 		case key == tcell.KeyUp && mod&tcell.ModMeta != 0:
 			e.table.Select(0, col)
@@ -194,10 +200,10 @@ func (e *Editor) navigateTab(reverse bool) {
 		if col > 0 {
 			e.table.Select(row, col-1)
 		} else if row > 0 {
-			e.table.Select(row-1, len(e.sheet.columns)-1)
+			e.table.Select(row-1, len(e.columns)-1)
 		}
 	} else {
-		if col < len(e.sheet.columns)-1 {
+		if col < len(e.columns)-1 {
 			e.table.Select(row, col+1)
 		} else if row < len(e.sheet.records)-1 {
 			e.table.Select(row+1, 0)
@@ -353,11 +359,11 @@ func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, co
 
 	// Calculate total table width for maximum textarea width
 	totalTableWidth := 0
-	for i := 0; i < len(e.sheet.columns); i++ {
+	for i := 0; i < len(e.columns); i++ {
 		totalTableWidth += e.table.GetColumnWidth(i)
 	}
 	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
-	totalTableWidth += 1 + (len(e.sheet.columns)-1)*3 + 1
+	totalTableWidth += 1 + (len(e.columns)-1)*3 + 1
 
 	// Calculate the maximum available width for the textarea
 	maxAvailableWidth := totalTableWidth - leftOffset + 1 // Account for right border
@@ -512,7 +518,7 @@ func (e *Editor) unhighlightColumn(col int) {
 func (e *Editor) refreshData() {
 	panic("not implemented")
 	// terminalHeight := getTerminalHeight()
-	// data, err := NewSheet(e.db, e.sheet.DBType, e.sheet.table, e.sheet.columns, terminalHeight)
+	// data, err := NewSheet(e.db, e.sheet.DBType, e.sheet.table, e.columns, terminalHeight)
 	// if err != nil {
 	// 	return
 	// }
@@ -539,16 +545,16 @@ func (e *Editor) moveRow(row, direction int) {
 }
 
 func (e *Editor) moveColumn(col, direction int) {
-	if col < 0 || col >= len(e.sheet.columns) {
+	if col < 0 || col >= len(e.columns) {
 		return
 	}
 
 	newIdx := col + direction
-	if newIdx < 0 || newIdx >= len(e.sheet.columns) {
+	if newIdx < 0 || newIdx >= len(e.columns) {
 		return
 	}
 
-	e.sheet.columns[col], e.sheet.columns[newIdx] = e.sheet.columns[newIdx], e.sheet.columns[col]
+	e.columns[col], e.columns[newIdx] = e.columns[newIdx], e.columns[col]
 
 	for i := range e.sheet.records {
 		e.sheet.records[i][col], e.sheet.records[i][newIdx] = e.sheet.records[i][newIdx], e.sheet.records[i][col]
@@ -559,12 +565,12 @@ func (e *Editor) moveColumn(col, direction int) {
 }
 
 func (e *Editor) adjustColumnWidth(col, delta int) {
-	if col < 0 || col >= len(e.sheet.columns) {
+	if col < 0 || col >= len(e.columns) {
 		return
 	}
 
-	newWidth := max(3, e.sheet.columns[col].Width+delta)
-	e.sheet.columns[col].Width = newWidth
+	newWidth := max(3, e.columns[col].Width+delta)
+	e.columns[col].Width = newWidth
 
 	// Update the table column width and re-render
 	e.table.SetColumnWidth(col, newWidth)
@@ -598,11 +604,11 @@ func formatCellValue(value interface{}) string {
 }
 
 func (e *Editor) isMultilineColumnType(col int) bool {
-	if e.sheet == nil || col < 0 || col >= len(e.sheet.columns) {
+	if e.sheet == nil || col < 0 || col >= len(e.columns) {
 		return false
 	}
 
-	column := e.sheet.columns[col]
+	column := e.columns[col]
 	var attrType string
 	for _, attr := range e.sheet.attributes {
 		if attr.Name == column.Name {
