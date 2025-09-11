@@ -30,9 +30,9 @@ ted test users
 
 ### SQL clauses
 
-- `-W` or `--where`
-- `-O` or `--order-by`
-- `-L` or `--limit`
+- `-w` or `--where`
+- `-o` or `--order-by`
+- `-l` or `--limit`
 
 ## Supported keyboard shortcuts
 
@@ -168,3 +168,13 @@ DDL. This is for editing data, not schemas. DDL is best done with SQL.
 Real-time database updates. This is not possible without modifying the database (adding triggers). You also do not want to lock the table from external writes: this should not be necessary in local development and is never a good idea in production.
 
 Pasting. Unclear how you'd map things, especially if focus is not on the first column.
+
+## Development
+
+```sh
+watchexec --restart --exts go,mod,sum -- 'go install'
+ted test.db users 2>/tmp/ted.log
+tail -f /tmp/ted.log
+`
+
+

@@ -11,12 +11,15 @@ import (
 )
 
 var (
-	database string
-	host     string
-	port     string
-	username string
-	password string
-	command  string
+    database string
+    host     string
+    port     string
+    username string
+    password string
+    command  string
+    where    string
+    orderBy  string
+    limitN   int
 )
 
 var rootCmd = &cobra.Command{
@@ -33,14 +36,17 @@ Examples:
 		dbname := args[0]
 		tablename := args[1]
 
-		config := &Config{
-			Database: getValue(database, dbname),
-			Host:     host,
-			Port:     port,
-			Username: username,
-			Password: password,
-			Command:  command,
-		}
+        config := &Config{
+            Database: getValue(database, dbname),
+            Host:     host,
+            Port:     port,
+            Username: username,
+            Password: password,
+            Command:  command,
+            Where:    where,
+            OrderBy:  orderBy,
+            Limit:    limitN,
+        }
 
 		if err := runEditor(config, tablename); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -50,12 +56,15 @@ Examples:
 }
 
 func init() {
-	rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
-	rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
-	rootCmd.Flags().StringVarP(&port, "port", "p", "", "Database port")
-	rootCmd.Flags().StringVarP(&username, "username", "U", "", "Database username")
-	rootCmd.Flags().StringVarP(&password, "password", "W", "", "Database password")
-	rootCmd.Flags().StringVarP(&command, "command", "c", "", "SQL command to execute")
+    rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
+    rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
+    rootCmd.Flags().StringVarP(&port, "port", "p", "", "Database port")
+    rootCmd.Flags().StringVarP(&username, "username", "U", "", "Database username")
+    rootCmd.Flags().StringVarP(&password, "password", "W", "", "Database password")
+    rootCmd.Flags().StringVarP(&command, "command", "c", "", "SQL command to execute")
+    rootCmd.Flags().StringVarP(&where, "where", "w", "", "WHERE clause to filter rows (without the keyword)")
+    rootCmd.Flags().StringVarP(&orderBy, "order-by", "o", "", "ORDER BY clause to sort rows (without the keyword)")
+    rootCmd.Flags().IntVarP(&limitN, "limit", "l", 0, "LIMIT number of rows to fetch")
 }
 
 func getValue(flag, arg string) string {

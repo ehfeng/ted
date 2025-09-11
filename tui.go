@@ -44,7 +44,7 @@ func runEditor(config *Config, tablename string) error {
 	terminalHeight := getTerminalHeight()
 
 	var configColumns []Column // TODO derive from config
-	sheet, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight)
+    sheet, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight, config.Where, config.OrderBy, config.Limit)
 	if err != nil {
 		return err
 	}

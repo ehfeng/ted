@@ -13,12 +13,15 @@ import (
 )
 
 type Config struct {
-	Database string
-	Host     string
-	Port     string
-	Username string
-	Password string
-	Command  string
+    Database string
+    Host     string
+    Port     string
+    Username string
+    Password string
+    Command  string
+    Where    string
+    OrderBy  string
+    Limit    int
 }
 
 type DatabaseType int

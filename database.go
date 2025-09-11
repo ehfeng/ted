@@ -14,11 +14,11 @@ import (
 // database: table, attribute, record
 // sheet: sheet, column, row
 type Sheet struct {
-	// sheet
-	DBType   DatabaseType
-	TuiChan  <-chan []interface{} // channel for TUI updates
-	FileChan <-chan []interface{} // channel for file writing
-	StopChan chan struct{}        // channel to stop streaming
+    // sheet
+    DBType   DatabaseType
+    TuiChan  <-chan []interface{} // channel for TUI updates
+    FileChan <-chan []interface{} // channel for file writing
+    StopChan chan struct{}        // channel to stop streaming
 
 	// results
 	table      string
@@ -26,8 +26,13 @@ type Sheet struct {
 	attributes []attribute
 	uniques    [][]int // TODO unique columns (can be multicolumn)
 	references [][]int // TODO foreign key columns (can be multicolumn)
-	records    [][]interface{}
-	filePath   string // path to temporary file containing full dataset
+    records    [][]interface{}
+    filePath   string // path to temporary file containing full dataset
+
+    // optional filters
+    whereClause string
+    orderBy     string
+    limit       int
 
 }
 
@@ -46,16 +51,19 @@ type attribute struct {
 }
 
 func NewSheet(db *sql.DB, dbType DatabaseType, tableName string,
-	configCols []Column, terminalHeight int) (*Sheet, error) {
+    configCols []Column, terminalHeight int, whereClause string, orderBy string, limit int) (*Sheet, error) {
 
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
 	}
 
-	sheet := &Sheet{
-		DBType: dbType,
-		table:  tableName,
-	}
+    sheet := &Sheet{
+        DBType:      dbType,
+        table:       tableName,
+        whereClause: whereClause,
+        orderBy:     orderBy,
+        limit:       limit,
+    }
 
 	if err := loadTableSchema(db, dbType, sheet); err != nil {
 		return nil, fmt.Errorf("failed to load table schema: %w", err)
@@ -94,9 +102,9 @@ func NewSheet(db *sql.DB, dbType DatabaseType, tableName string,
 			}
 		}
 	}
-	if err := loadTableData(db, sheet, selected, terminalHeight); err != nil {
-		return nil, fmt.Errorf("failed to load table data: %w", err)
-	}
+    if err := loadTableData(db, sheet, selected, terminalHeight); err != nil {
+        return nil, fmt.Errorf("failed to load table data: %w", err)
+    }
 	log.Println("sheet", sheet)
 	return sheet, nil
 }
@@ -230,7 +238,16 @@ func loadTableData(db *sql.DB, sheet *Sheet, selectColumns []string,
 			close(fileChan)
 		}()
 
-		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectColumns, ", "), sheet.table)
+        query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectColumns, ", "), sheet.table)
+        if strings.TrimSpace(sheet.whereClause) != "" {
+            query = query + " WHERE " + sheet.whereClause
+        }
+        if strings.TrimSpace(sheet.orderBy) != "" {
+            query = query + " ORDER BY " + sheet.orderBy
+        }
+        if sheet.limit > 0 {
+            query = fmt.Sprintf("%s LIMIT %d", query, sheet.limit)
+        }
 
 		rows, err := db.Query(query)
 		if err != nil {
