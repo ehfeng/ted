@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -24,7 +23,6 @@ type Editor struct {
 	table        *HeaderTable
 	columns      []Column
 	sheet        *Sheet
-	db           *sql.DB
 	config       *Config
 	currentRow   int
 	currentCol   int
@@ -44,7 +42,7 @@ func runEditor(config *Config, tablename string) error {
 	terminalHeight := getTerminalHeight()
 
 	var configColumns []Column // TODO derive from config
-    sheet, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight, config.Where, config.OrderBy, config.Limit)
+	sheet, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight, config.Where, config.OrderBy, config.Limit)
 	if err != nil {
 		return err
 	}
@@ -79,7 +77,6 @@ func runEditor(config *Config, tablename string) error {
 		table:        NewHeaderTable(),
 		columns:      columns,
 		sheet:        sheet,
-		db:           db,
 		config:       config,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
@@ -238,12 +235,6 @@ func (e *Editor) enterEditMode(row, col int) {
 		e.pages.RemovePage("editor")
 		modal = e.createCellEditOverlayWithText(textAreaBox, row, col, currentText)
 		e.pages.AddPage("editor", modal, true, true)
-
-		// Log the calculated dimensions from the overlay
-		if flex, ok := modal.(*tview.Flex); ok {
-			_, _, width, height := flex.GetRect()
-			log.Printf("Modal dimensions - width: %d, height: %d", width, height)
-		}
 	}
 
 	// Handle textarea input capture for save/cancel
@@ -463,11 +454,22 @@ func (e *Editor) exitEditMode() {
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
-	if row >= 0 && row < len(e.sheet.records) && col >= 0 && col < len(e.sheet.records[row]) {
-		e.sheet.records[row][col] = newValue
-		e.table.UpdateCell(row, col, newValue)
+	// Basic bounds check against current data
+	if row < 0 || row >= len(e.sheet.records) || col < 0 || col >= len(e.sheet.records[row]) {
+		e.exitEditMode()
+		return
 	}
 
+	// Delegate DB work to database.go
+	updated, err := e.sheet.UpdateDBValue(row, e.columns[col].Name, newValue)
+	if err != nil {
+		log.Printf("update failed: %v", err)
+		e.exitEditMode()
+		return
+	}
+	// Update in-memory data and refresh table
+	copy(e.sheet.records[row], updated)
+	e.table.SetData(e.sheet.records)
 	e.exitEditMode()
 }
 

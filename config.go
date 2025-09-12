@@ -13,15 +13,15 @@ import (
 )
 
 type Config struct {
-    Database string
-    Host     string
-    Port     string
-    Username string
-    Password string
-    Command  string
-    Where    string
-    OrderBy  string
-    Limit    int
+	Database string
+	Host     string
+	Port     string
+	Username string
+	Password string
+	Command  string
+	Where    string
+	OrderBy  string
+	Limit    int
 }
 
 type DatabaseType int
@@ -31,7 +31,48 @@ const (
 	PostgreSQL
 	MySQL
 	DuckDB
+	Clickhouse
 )
+
+type databaseFeature struct {
+	systemId              string
+	embedded              bool
+	returning             bool
+	positionalPlaceholder bool
+}
+
+var databaseFeatures = map[DatabaseType]databaseFeature{
+	SQLite: {
+		systemId:              "rowid",
+		embedded:              true,
+		returning:             true,
+		positionalPlaceholder: false,
+	},
+	PostgreSQL: {
+		systemId:              "ctid",
+		embedded:              false,
+		returning:             true,
+		positionalPlaceholder: true,
+	},
+	MySQL: {
+		systemId:              "",
+		embedded:              false,
+		returning:             false,
+		positionalPlaceholder: false,
+	},
+	DuckDB: {
+		systemId:              "rowid",
+		embedded:              true,
+		returning:             true,
+		positionalPlaceholder: false,
+	},
+	Clickhouse: {
+		systemId:              "",
+		embedded:              false,
+		returning:             false,
+		positionalPlaceholder: false,
+	},
+}
 
 func (c *Config) detectDatabaseType() DatabaseType {
 	if strings.HasSuffix(c.Database, ".sqlite") || strings.HasSuffix(c.Database, ".db") {

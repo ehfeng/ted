@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
-	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -13,27 +12,34 @@ import (
 
 // database: table, attribute, record
 // sheet: sheet, column, row
+// TODO implement tview.TableContent interface
+// instead of T pipe, pipe to file and then allow tview.TableContent to read from file once
+// enough rows to fill the terminal height
+// row id should be file line number, different than lookup key
 type Sheet struct {
-    // sheet
-    DBType   DatabaseType
-    TuiChan  <-chan []interface{} // channel for TUI updates
-    FileChan <-chan []interface{} // channel for file writing
-    StopChan chan struct{}        // channel to stop streaming
+	// sheet
+	DB       *sql.DB
+	DBType   DatabaseType
+	TuiChan  <-chan []interface{} // channel for TUI updates
+	FileChan <-chan []interface{} // channel for file writing
+	StopChan chan struct{}        // channel to stop streaming
 
 	// results
 	table      string
 	lookupKey  []string // empty if no primary key
 	attributes []attribute
 	uniques    [][]int // TODO unique columns (can be multicolumn)
-	references [][]int // TODO foreign key columns (can be multicolumn)
-    records    [][]interface{}
-    filePath   string // path to temporary file containing full dataset
+	// references holds, for each foreign key constraint on this table,
+	// the indices of this table's columns participating in that foreign key
+	// (multi-column constraints are ordered according to their defined sequence).
+	references [][]int
+	records    [][]interface{}
+	filePath   string // path to temporary file containing full dataset
 
-    // optional filters
-    whereClause string
-    orderBy     string
-    limit       int
-
+	// optional filters
+	whereClause string
+	orderBy     string
+	limit       int
 }
 
 // this is a config concept
@@ -51,19 +57,20 @@ type attribute struct {
 }
 
 func NewSheet(db *sql.DB, dbType DatabaseType, tableName string,
-    configCols []Column, terminalHeight int, whereClause string, orderBy string, limit int) (*Sheet, error) {
+	configCols []Column, terminalHeight int, whereClause string, orderBy string, limit int) (*Sheet, error) {
 
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
 	}
 
-    sheet := &Sheet{
-        DBType:      dbType,
-        table:       tableName,
-        whereClause: whereClause,
-        orderBy:     orderBy,
-        limit:       limit,
-    }
+	sheet := &Sheet{
+		DB:          db,
+		DBType:      dbType,
+		table:       tableName,
+		whereClause: whereClause,
+		orderBy:     orderBy,
+		limit:       limit,
+	}
 
 	if err := loadTableSchema(db, dbType, sheet); err != nil {
 		return nil, fmt.Errorf("failed to load table schema: %w", err)
@@ -102,10 +109,9 @@ func NewSheet(db *sql.DB, dbType DatabaseType, tableName string,
 			}
 		}
 	}
-    if err := loadTableData(db, sheet, selected, terminalHeight); err != nil {
-        return nil, fmt.Errorf("failed to load table data: %w", err)
-    }
-	log.Println("sheet", sheet)
+	if err := loadTableData(db, sheet, selected, terminalHeight); err != nil {
+		return nil, fmt.Errorf("failed to load table data: %w", err)
+	}
 	return sheet, nil
 }
 
@@ -171,11 +177,152 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, table *Sheet) error {
 	}
 	primaryKeyColumns = lookupCols
 
-	// TODO if postgres, try using ctid. if sqlite or duckdb, try using rowid.
+	// TODO if lookup key not found, use databaseFeature.systemId if available
 
 	// If not nullable unique constraint is found, error
 	if len(primaryKeyColumns) == 0 {
 		return fmt.Errorf("no primary key found")
+	}
+	table.lookupKey = make([]string, len(primaryKeyColumns))
+	copy(table.lookupKey, primaryKeyColumns)
+
+	// Build a quick name->index map for attribute lookup
+	attrIndex := make(map[string]int, len(table.attributes))
+	for i, a := range table.attributes {
+		attrIndex[a.Name] = i
+	}
+
+	// Populate foreign key column indices (supports multicolumn FKs)
+	switch dbType {
+	case SQLite:
+		// PRAGMA foreign_key_list returns one row per referencing column
+		// cols: id, seq, table, from, to, on_update, on_delete, match
+		fkRows, err := db.Query(fmt.Sprintf("PRAGMA foreign_key_list(%s)", table.table))
+		if err == nil {
+			type fkCol struct {
+				seq int
+				col string
+			}
+			byID := map[int][]fkCol{}
+			for fkRows.Next() {
+				var id, seq int
+				var refTable, fromCol, toCol, onUpd, onDel, match string
+				if scanErr := fkRows.Scan(&id, &seq, &refTable, &fromCol, &toCol, &onUpd, &onDel, &match); scanErr != nil {
+					continue
+				}
+				byID[id] = append(byID[id], fkCol{seq: seq, col: fromCol})
+			}
+			fkRows.Close()
+			// Assemble ordered index slices
+			for _, cols := range byID {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].seq < cols[j].seq })
+				idxs := make([]int, 0, len(cols))
+				valid := true
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						idxs = append(idxs, idx)
+					} else {
+						valid = false
+						break
+					}
+				}
+				if valid && len(idxs) > 0 {
+					table.references = append(table.references, idxs)
+				}
+			}
+		}
+
+	case PostgreSQL:
+		// Use pg_catalog to get correct column order within FK
+		schema := "public"
+		rel := table.table
+		if dot := strings.IndexByte(rel, '.'); dot != -1 {
+			schema = rel[:dot]
+			rel = rel[dot+1:]
+		}
+		fkQuery := `
+            SELECT con.oid::text AS id, att.attname AS col, u.ord AS ord
+            FROM pg_constraint con
+            JOIN unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord) ON true
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = u.attnum
+            WHERE con.contype = 'f' AND rel.relname = $1 AND nsp.nspname = $2
+            ORDER BY con.oid, u.ord`
+		fkRows, err := db.Query(fkQuery, rel, schema)
+		if err == nil {
+			type fkCol struct {
+				ord int
+				col string
+			}
+			byID := map[string][]fkCol{}
+			for fkRows.Next() {
+				var id, col string
+				var ord int
+				if scanErr := fkRows.Scan(&id, &col, &ord); scanErr != nil {
+					continue
+				}
+				byID[id] = append(byID[id], fkCol{ord: ord, col: col})
+			}
+			fkRows.Close()
+			for _, cols := range byID {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
+				idxs := make([]int, 0, len(cols))
+				valid := true
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						idxs = append(idxs, idx)
+					} else {
+						valid = false
+						break
+					}
+				}
+				if valid && len(idxs) > 0 {
+					table.references = append(table.references, idxs)
+				}
+			}
+		}
+
+	case MySQL:
+		// Use information_schema to identify FK columns with ordering
+		fkQuery := `
+            SELECT CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`
+		fkRows, err := db.Query(fkQuery, table.table)
+		if err == nil {
+			type fkCol struct {
+				ord int
+				col string
+			}
+			byName := map[string][]fkCol{}
+			for fkRows.Next() {
+				var cname, col string
+				var ord int
+				if scanErr := fkRows.Scan(&cname, &col, &ord); scanErr != nil {
+					continue
+				}
+				byName[cname] = append(byName[cname], fkCol{ord: ord, col: col})
+			}
+			fkRows.Close()
+			for _, cols := range byName {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
+				idxs := make([]int, 0, len(cols))
+				valid := true
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						idxs = append(idxs, idx)
+					} else {
+						valid = false
+						break
+					}
+				}
+				if valid && len(idxs) > 0 {
+					table.references = append(table.references, idxs)
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -230,7 +377,6 @@ func loadTableData(db *sql.DB, sheet *Sheet, selectColumns []string,
 			}
 		}
 	}()
-
 	// Start goroutine for data streaming
 	go func(maxTuiRows int) {
 		defer func() {
@@ -238,16 +384,16 @@ func loadTableData(db *sql.DB, sheet *Sheet, selectColumns []string,
 			close(fileChan)
 		}()
 
-        query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectColumns, ", "), sheet.table)
-        if strings.TrimSpace(sheet.whereClause) != "" {
-            query = query + " WHERE " + sheet.whereClause
-        }
-        if strings.TrimSpace(sheet.orderBy) != "" {
-            query = query + " ORDER BY " + sheet.orderBy
-        }
-        if sheet.limit > 0 {
-            query = fmt.Sprintf("%s LIMIT %d", query, sheet.limit)
-        }
+		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectColumns, ", "), sheet.table)
+		if strings.TrimSpace(sheet.whereClause) != "" {
+			query = query + " WHERE " + sheet.whereClause
+		}
+		if strings.TrimSpace(sheet.orderBy) != "" {
+			query = query + " ORDER BY " + sheet.orderBy
+		}
+		if sheet.limit > 0 {
+			query = fmt.Sprintf("%s LIMIT %d", query, sheet.limit)
+		}
 
 		rows, err := db.Query(query)
 		if err != nil {
@@ -717,4 +863,238 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// quoteIdent safely quotes an identifier (table/column) for the target DB.
+// - PostgreSQL/SQLite: uses double quotes, escaping embedded quotes
+// - MySQL: uses backticks, escaping embedded backticks
+func quoteIdent(dbType DatabaseType, ident string) string {
+	switch dbType {
+	case MySQL:
+		// Escape backticks by doubling them
+		escaped := strings.ReplaceAll(ident, "`", "``")
+		return "`" + escaped + "`"
+	case PostgreSQL, SQLite, DuckDB:
+		// Escape double quotes by doubling them
+		escaped := strings.ReplaceAll(ident, "\"", "\"\"")
+		return "\"" + escaped + "\""
+	default:
+		escaped := strings.ReplaceAll(ident, "\"", "\"\"")
+		return "\"" + escaped + "\""
+	}
+}
+
+// quoteQualified splits on '.' and quotes each identifier part independently.
+func quoteQualified(dbType DatabaseType, qualified string) string {
+	parts := strings.Split(qualified, ".")
+	for i, p := range parts {
+		parts[i] = quoteIdent(dbType, p)
+	}
+	return strings.Join(parts, ".")
+}
+
+// UpdateDBValue updates a single cell in the underlying database using the
+// sheet's lookupKey columns to identify the row. It returns the refreshed row
+// values ordered by sheet.selectCols. If no row is updated, returns an error.
+func (sheet *Sheet) UpdateDBValue(rowIdx int, colName string, newValue string) ([]interface{}, error) {
+	if rowIdx < 0 || rowIdx >= len(sheet.records) {
+		return nil, fmt.Errorf("index out of range")
+	}
+	if len(sheet.lookupKey) == 0 {
+		return nil, fmt.Errorf("no lookup key configured")
+	}
+
+	// Convert string to appropriate DB value
+	toDBValue := func(colName, raw string) interface{} {
+		// Find attribute metadata
+		var attrType string
+		for _, a := range sheet.attributes {
+			if a.Name == colName {
+				attrType = strings.ToLower(a.Type)
+				break
+			}
+		}
+		if raw == "\\N" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	// Placeholder builder
+	placeholder := func(i int) string {
+		switch sheet.DBType {
+		case PostgreSQL:
+			return fmt.Sprintf("$%d", i)
+		default:
+			return "?"
+		}
+	}
+
+	// Build SET and WHERE clauses and args
+	valueArg := toDBValue(colName, newValue)
+	keyArgs := make([]interface{}, 0, len(sheet.lookupKey))
+	whereParts := make([]string, 0, len(sheet.lookupKey))
+	for i := range sheet.lookupKey {
+		lookupKeyCol := sheet.lookupKey[i]
+		qKeyName := quoteIdent(sheet.DBType, lookupKeyCol)
+		var ph string
+		if sheet.DBType == PostgreSQL {
+			ph = placeholder(2 + i)
+		} else {
+			ph = placeholder(0)
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, ph))
+		colIdx := -1
+		for j, attr := range sheet.attributes {
+			if attr.Name == lookupKeyCol {
+				colIdx = j
+				break
+			}
+		}
+		keyArgs = append(keyArgs, sheet.records[rowIdx][colIdx])
+	}
+
+	// SET clause placeholder
+	var setClause string
+	quotedTarget := quoteIdent(sheet.DBType, colName)
+	if sheet.DBType == PostgreSQL {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(1))
+	} else {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(0))
+	}
+
+	returningCols := make([]string, len(sheet.attributes))
+	for i, attr := range sheet.attributes {
+		returningCols[i] = quoteIdent(sheet.DBType, attr.Name)
+	}
+
+	if len(sheet.lookupKey) == 1 {
+		if sheet.lookupKey[0] == "rowid" {
+			returningCols = append(returningCols, "rowid")
+		}
+		if sheet.lookupKey[0] == "ctid" {
+			returningCols = append(returningCols, "ctid")
+		}
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	// Build full query
+	var query string
+	useReturning := databaseFeatures[sheet.DBType].returning
+	quotedTable := quoteQualified(sheet.DBType, sheet.table)
+	if useReturning {
+		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+		// Combine args: value + keys
+		args := make([]interface{}, 0, 1+len(keyArgs))
+		args = append(args, valueArg)
+		args = append(args, keyArgs...)
+
+		// Scan into pointers to capture returned values
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(returningCols))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+
+		if err := sheet.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("update failed: %w", err)
+		}
+		return rowVals, nil
+	} else {
+		// For database servers that don't support RETURNING, use a transaction
+		// to perform the UPDATE followed by a SELECT of the updated row.
+		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
+
+		// Begin transaction
+		tx, err := sheet.DB.Begin()
+		if err != nil {
+			return nil, fmt.Errorf("begin tx failed: %w", err)
+		}
+
+		// Execute update inside the transaction
+		args := make([]interface{}, 0, 1+len(keyArgs))
+		args = append(args, valueArg)
+		args = append(args, keyArgs...)
+		res, err := tx.Exec(query, args...)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("update failed: %w", err)
+		}
+		if ra, _ := res.RowsAffected(); ra == 0 {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("no rows updated")
+		}
+
+		// Re-select the updated row within the same transaction
+		selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s", returning, quotedTable, strings.Join(whereParts, " AND "))
+		row := tx.QueryRow(selQuery, keyArgs...)
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(rowVals))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+		if err := row.Scan(scanArgs...); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit failed: %w", err)
+		}
+		return rowVals, nil
+	}
+
+	// Exec path (e.g., MySQL)
+	args := make([]interface{}, 0, 1+len(keyArgs))
+	args = append(args, valueArg)
+	args = append(args, keyArgs...)
+	res, err := sheet.DB.Exec(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("update failed: %w", err)
+	}
+	if ra, _ := res.RowsAffected(); ra == 0 {
+		return nil, fmt.Errorf("no rows updated")
+	}
+	// Re-select row values
+	selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s", returning, quotedTable, strings.Join(whereParts, " AND "))
+	rows, err := sheet.DB.Query(selQuery, keyArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("reselect failed: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(rowVals))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+		if err := rows.Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+		return rowVals, nil
+	}
+	return nil, fmt.Errorf("no rows returned after update")
 }
