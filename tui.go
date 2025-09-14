@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -221,20 +220,15 @@ func (e *Editor) enterEditMode(row, col int) {
 
 	textArea.SetBorder(false)
 
-	// Wrap textarea in a box with dark blue background
-	textAreaBox := tview.NewFlex().
-		AddItem(textArea, 0, 1, true)
-
 	// Store references for dynamic resizing
 	var modal tview.Primitive
 
 	// Function to resize textarea based on current content
 	resizeTextarea := func() {
-		currentText := textArea.GetText()
-
 		e.pages.RemovePage("editor")
-		modal = e.createCellEditOverlayWithText(textAreaBox, row, col, currentText)
+		modal = e.createCellEditOverlay(textArea, row, col, textArea.GetText())
 		e.pages.AddPage("editor", modal, true, true)
+		textArea.SetOffset(0, 0)
 	}
 
 	// Handle textarea input capture for save/cancel
@@ -271,13 +265,10 @@ func (e *Editor) enterEditMode(row, col int) {
 	})
 
 	// Set up dynamic resizing on text changes
-	textArea.SetChangedFunc(func() {
-		resizeTextarea()
-		textArea.SetOffset(0, 0)
-	})
+	textArea.SetChangedFunc(resizeTextarea)
 
 	// Position the textarea to align with the cell
-	modal = e.createCellEditOverlay(textAreaBox, row, col)
+	modal = e.createCellEditOverlay(textArea, row, col, currentText)
 	e.pages.AddPage("editor", modal, true, true)
 
 	// Set up native cursor positioning using terminal escapes
@@ -317,19 +308,10 @@ func (e *Editor) enterEditMode(row, col int) {
 	e.editMode = true
 }
 
-func (e *Editor) createCellEditOverlay(textArea tview.Primitive, row, col int) tview.Primitive {
+func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, currentText string) tview.Primitive {
 	// Get the current text to calculate minimum size
-	currentValue := e.table.GetCell(row, col)
-	currentText := formatCellValue(currentValue)
+	currentText = formatCellValue(currentText)
 
-	return e.createCellEditOverlayInternal(textArea, row, col, currentText)
-}
-
-func (e *Editor) createCellEditOverlayWithText(textArea tview.Primitive, row, col int, currentText string) tview.Primitive {
-	return e.createCellEditOverlayInternal(textArea, row, col, currentText)
-}
-
-func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, col int, currentText string) tview.Primitive {
 	// Calculate the position where the cell content appears on screen
 	// HeaderTable structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
 	tableRow := row + 3 // Convert data row to table display row
@@ -345,7 +327,7 @@ func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, co
 	// Calculate vertical position relative to table
 	topOffset := tableRow
 
-	// Calculate minimum textarea size based on content
+	// Calculate minimum textarea size based on column width
 	cellWidth := e.table.GetColumnWidth(col)
 
 	// Calculate total table width for maximum textarea width
@@ -371,11 +353,10 @@ func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, co
 	// Calculate desired width based on content
 	desiredWidth := max(cellWidth, longestLine) + 2
 	textAreaWidth := min(desiredWidth, maxAvailableWidth)
-
 	// If we're using the capped width, recalculate text lines with the actual textarea width
-	if textAreaWidth < desiredWidth {
-		textLines = splitTextToLines(currentText, textAreaWidth-2) // Account for padding
-	}
+	// if textAreaWidth < desiredWidth {
+	// 	textLines = splitTextToLines(currentText, textAreaWidth-2) // Account for padding
+	// }
 
 	// Minimum height: number of lines needed, minimum 1
 	textAreaHeight := max(len(textLines), 1)
@@ -390,7 +371,7 @@ func (e *Editor) createCellEditOverlayInternal(textArea tview.Primitive, row, co
 			AddItem(nil, topOffset, 0, false).
 			AddItem(tview.NewFlex().
 				AddItem(leftPadding, 1, 0, false).           // Left padding (red)
-				AddItem(textArea, textAreaWidth-2, 0, true). // Text area
+				AddItem(textArea, textAreaWidth-1, 0, true). // Text area
 				AddItem(rightPadding, 1, 0, false),          // Right padding (green)
 				textAreaHeight, 0, true).
 			AddItem(nil, 0, 1, false), textAreaWidth, 0, true).
@@ -463,7 +444,6 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 	// Delegate DB work to database.go
 	updated, err := e.sheet.UpdateDBValue(row, e.columns[col].Name, newValue)
 	if err != nil {
-		log.Printf("update failed: %v", err)
 		e.exitEditMode()
 		return
 	}
