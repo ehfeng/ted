@@ -20,6 +20,8 @@ var (
     where    string
     orderBy  string
     limitN   int
+    usePostgres bool
+    useMySQL    bool
 )
 
 var rootCmd = &cobra.Command{
@@ -36,6 +38,24 @@ Examples:
 		dbname := args[0]
 		tablename := args[1]
 
+        var dbTypeOverride *DatabaseType
+        // Validate mutually exclusive flags
+        if usePostgres && useMySQL {
+            fmt.Fprintln(os.Stderr, "Error: --pg and --mysql/--my are mutually exclusive")
+            os.Exit(1)
+        }
+        if database != "" && (usePostgres || useMySQL) {
+            fmt.Fprintln(os.Stderr, "Error: -d/--database cannot be used with --pg or --mysql/--my")
+            os.Exit(1)
+        }
+        if usePostgres {
+            t := PostgreSQL
+            dbTypeOverride = &t
+        } else if useMySQL {
+            t := MySQL
+            dbTypeOverride = &t
+        }
+
         config := &Config{
             Database: getValue(database, dbname),
             Host:     host,
@@ -46,6 +66,7 @@ Examples:
             Where:    where,
             OrderBy:  orderBy,
             Limit:    limitN,
+            DBTypeOverride: dbTypeOverride,
         }
 
 		if err := runEditor(config, tablename); err != nil {
@@ -65,6 +86,10 @@ func init() {
     rootCmd.Flags().StringVarP(&where, "where", "w", "", "WHERE clause to filter rows (without the keyword)")
     rootCmd.Flags().StringVarP(&orderBy, "order-by", "o", "", "ORDER BY clause to sort rows (without the keyword)")
     rootCmd.Flags().IntVarP(&limitN, "limit", "l", 0, "LIMIT number of rows to fetch")
+    // Database type shorthands
+    rootCmd.Flags().BoolVar(&usePostgres, "pg", false, "Use PostgreSQL for server connections")
+    rootCmd.Flags().BoolVar(&useMySQL, "mysql", false, "Use MySQL for server connections")
+    rootCmd.Flags().BoolVar(&useMySQL, "my", false, "Use MySQL for server connections (shorthand)")
 }
 
 func getValue(flag, arg string) string {

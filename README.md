@@ -16,7 +16,7 @@ ted [dbname] [tbl]
 ted test users
 ```
 
-`dbname` can either be a database file (sqlite or duckdb) or a database name. If the file is not present, try the name with default parameters in Postgres and MySQL. The where clause lets you filter down the table.
+`dbname` can either be a database file (sqlite or duckdb) or a database name. The where clause lets you filter down the table.
 
 ## Common flags
 
@@ -33,6 +33,13 @@ ted test users
 - `-w` or `--where`
 - `-o` or `--order-by`
 - `-l` or `--limit`
+
+### Database shorthands
+
+Only needed for database servers
+
+- `--pg`
+- `--my` or `--mysql`
 
 ## Supported keyboard shortcuts
 
@@ -64,6 +71,8 @@ ted test users
 
 Lets you interact with elements, selecting cells, resizing or unhiding columns. Selecting a range of cells lets you copy a csv to clipboard.
 
+1. scroll
+1. double click to edit, select words, paragraph
 1. opt+click
 1. opt+shift+click: (select range)
 
@@ -155,6 +164,8 @@ Undo/redo with `cmd+z` and `cmd+shift+z` shortcuts.
 
 If primary key does not exist, use sqlite/duckdb `rowid` or postgres `ctid`. This approach is vulnerable to non-exclusive access (updates) or VACUUMs. Also requires modifying update `RETURNING *, rowid|ctid`. It does not work for mysql or clickhouse. Throw a warning in the status bar if using this approach.
 
+Tabs, split views
+
 ## Non-goals
 
 Transactions. This is an editor, not a sql editor or a psql replacement.
@@ -167,7 +178,7 @@ DDL. This is for editing data, not schemas. DDL is best done with SQL.
 
 Real-time database updates. This is not possible without modifying the database (adding triggers). You also do not want to lock the table from external writes: this should not be necessary in local development and is never a good idea in production.
 
-Pasting. Unclear how you'd map things, especially if focus is not on the first column.
+Pasting cells (separate from pasting values). Unclear how you'd map things, especially if focus is not on the first column.
 
 ## Development
 

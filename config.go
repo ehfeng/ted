@@ -13,15 +13,17 @@ import (
 )
 
 type Config struct {
-	Database string
-	Host     string
-	Port     string
-	Username string
-	Password string
-	Command  string
-	Where    string
-	OrderBy  string
-	Limit    int
+    Database string
+    Host     string
+    Port     string
+    Username string
+    Password string
+    Command  string
+    Where    string
+    OrderBy  string
+    Limit    int
+    // DBTypeOverride allows explicitly selecting the database type via flags
+    DBTypeOverride *DatabaseType
 }
 
 type DatabaseType int
@@ -75,11 +77,14 @@ var databaseFeatures = map[DatabaseType]databaseFeature{
 }
 
 func (c *Config) detectDatabaseType() DatabaseType {
-	if strings.HasSuffix(c.Database, ".sqlite") || strings.HasSuffix(c.Database, ".db") {
-		return SQLite
-	}
-	if strings.HasSuffix(c.Database, ".duckdb") {
-		return DuckDB
+    if c.DBTypeOverride != nil {
+        return *c.DBTypeOverride
+    }
+    if strings.HasSuffix(c.Database, ".sqlite") || strings.HasSuffix(c.Database, ".db") {
+        return SQLite
+    }
+    if strings.HasSuffix(c.Database, ".duckdb") {
+        return DuckDB
 	}
 	return PostgreSQL
 }
