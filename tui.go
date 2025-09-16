@@ -178,6 +178,38 @@ func (e *Editor) setupCommandPalette() {
 	e.setPaletteMode(PaletteModeDefault, false)
 
 	e.commandPalette.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		key := event.Key()
+		rune := event.Rune()
+		mod := event.Modifiers()
+
+		if e.consumeKittyCSI(key, rune, mod) {
+			return nil
+		}
+		if !e.kittySequenceActive {
+			if key == tcell.KeyRune && mod&tcell.ModCtrl != 0 && rune == '`' {
+				e.kittySequenceBuffer = "ctrl+`"
+			} else {
+				e.kittySequenceBuffer = ""
+			}
+		}
+		if !e.kittySequenceActive && e.kittySequenceBuffer == "ctrl+`" {
+			e.kittySequenceBuffer = ""
+			e.setPaletteMode(PaletteModeSQL, true)
+			return nil
+		}
+
+		switch {
+		case (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeFind, true)
+			return nil
+		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeCommand, true)
+			return nil
+		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeSQL, true)
+			return nil
+		}
+
 		switch event.Key() {
 		case tcell.KeyEnter:
 			command := e.commandPalette.GetText()
@@ -606,15 +638,11 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	e.commandPalette.SetLabel(mode.Glyph())
 	// Clear input when switching modes
 	e.commandPalette.SetText("")
-	style := e.placeholderStyleDefault
-	switch mode {
-	case PaletteModeCommand, PaletteModeSQL, PaletteModeFind:
-		style = e.placeholderStyleItalic
-	}
+	style := e.placeholderStyleItalic
 	e.commandPalette.SetPlaceholderStyle(style)
 	if e.editMode {
 		// Editing contexts manage their own placeholder text
-		e.commandPalette.SetPlaceholder("")
+		e.commandPalette.SetPlaceholder("UPDATE preview... (Esc to exit)")
 		if focus {
 			e.app.SetFocus(e.commandPalette)
 		}
@@ -646,6 +674,7 @@ func (e *Editor) updateEditPreview(newText string) {
 	}
 	colName := e.columns[e.currentCol].Name
 	preview := e.sheet.BuildUpdatePreview(e.currentRow, colName, newText)
+	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
 	e.commandPalette.SetPlaceholder(preview)
 }
 
