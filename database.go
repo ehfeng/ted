@@ -866,9 +866,18 @@ func min(a, b int) int {
 }
 
 // quoteIdent safely quotes an identifier (table/column) for the target DB.
-// - PostgreSQL/SQLite: uses double quotes, escaping embedded quotes
-// - MySQL: uses backticks, escaping embedded backticks
+// Attempts to minimize quoting by returning the identifier unquoted when it is
+// obviously safe to do so:
+// - comprised of lowercase letters, digits, and underscores
+// - does not start with a digit
+// - not a common SQL reserved keyword
+// Otherwise it applies database-appropriate quoting with escaping.
 func quoteIdent(dbType DatabaseType, ident string) string {
+	// Fast-path: return plain if it's clearly safe to be unquoted
+	if isSafeUnquotedIdent(ident) {
+		return ident
+	}
+
 	switch dbType {
 	case MySQL:
 		// Escape backticks by doubling them
@@ -884,6 +893,48 @@ func quoteIdent(dbType DatabaseType, ident string) string {
 	}
 }
 
+// isSafeUnquotedIdent returns true if ident can be used without quotes in a
+// portable way across supported databases (lowercase [a-z_][a-z0-9_]* and not a
+// common reserved keyword).
+func isSafeUnquotedIdent(ident string) bool {
+	if ident == "" {
+		return false
+	}
+	// First char must be lowercase letter or underscore
+	c0 := ident[0]
+	if !((c0 >= 'a' && c0 <= 'z') || c0 == '_') {
+		return false
+	}
+	// Remaining chars must be lowercase letters, digits, or underscore
+	for i := 1; i < len(ident); i++ {
+		c := ident[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	// Avoid common reserved keywords
+	if _, ok := commonReservedIdents[ident]; ok {
+		return false
+	}
+	return true
+}
+
+// Small, conservative set of common SQL reserved keywords to avoid unquoted.
+var commonReservedIdents = map[string]struct{}{
+	// DML/DDL
+	"select": {}, "insert": {}, "update": {}, "delete": {}, "into": {}, "values": {},
+	"create": {}, "alter": {}, "drop": {}, "table": {}, "index": {}, "view": {},
+	// Clauses
+	"from": {}, "where": {}, "group": {}, "order": {}, "by": {}, "having": {},
+	"limit": {}, "offset": {}, "join": {}, "inner": {}, "left": {}, "right": {}, "full": {}, "outer": {},
+	// Operators/Predicates
+	"and": {}, "or": {}, "not": {}, "in": {}, "is": {}, "like": {}, "between": {}, "exists": {},
+	// Literals
+	"null": {}, "true": {}, "false": {},
+	// Misc
+	"as": {}, "on": {},
+}
+
 // quoteQualified splits on '.' and quotes each identifier part independently.
 func quoteQualified(dbType DatabaseType, qualified string) string {
 	parts := strings.Split(qualified, ".")
@@ -891,6 +942,146 @@ func quoteQualified(dbType DatabaseType, qualified string) string {
 		parts[i] = quoteIdent(dbType, p)
 	}
 	return strings.Join(parts, ".")
+}
+
+// BuildUpdatePreview constructs a SQL UPDATE statement as a string with literal
+// values inlined for preview purposes. It mirrors UpdateDBValue but does not
+// execute any SQL. Intended only for UI preview.
+func (sheet *Sheet) BuildUpdatePreview(rowIdx int, colName string, newValue string) string {
+	if rowIdx < 0 || rowIdx >= len(sheet.records) || len(sheet.lookupKey) == 0 {
+		return ""
+	}
+
+	// Convert raw text to DB-typed value (mirrors UpdateDBValue's toDBValue)
+	toDBValue := func(colName, raw string) interface{} {
+		var attrType string
+		for _, a := range sheet.attributes {
+			if a.Name == colName {
+				attrType = strings.ToLower(a.Type)
+				break
+			}
+		}
+		if raw == "\\N" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	// Render a literal value for preview (no placeholders)
+	literal := func(val interface{}, attrType string) string {
+		if val == nil {
+			return "NULL"
+		}
+		at := strings.ToLower(attrType)
+		switch v := val.(type) {
+		case bool:
+			if sheet.DBType == PostgreSQL {
+				if v {
+					return "TRUE"
+				}
+				return "FALSE"
+			}
+			if v {
+				return "1"
+			}
+			return "0"
+		case int64:
+			return strconv.FormatInt(v, 10)
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		case []byte:
+			s := string(v)
+			s = strings.ReplaceAll(s, "'", "''")
+			return "'" + s + "'"
+		case string:
+			// For non-numeric types, quote and escape
+			if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
+				return v
+			}
+			s := strings.ReplaceAll(v, "'", "''")
+			return "'" + s + "'"
+		default:
+			// Fallback to string formatting quoted
+			s := strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
+			return "'" + s + "'"
+		}
+	}
+
+	// Where clause with literal values
+	whereParts := make([]string, 0, len(sheet.lookupKey))
+	for _, lookupKeyCol := range sheet.lookupKey {
+		qKeyName := quoteIdent(sheet.DBType, lookupKeyCol)
+		// find attribute index
+		colIdx := -1
+		var attrType string
+		for j, attr := range sheet.attributes {
+			if attr.Name == lookupKeyCol {
+				colIdx = j
+				attrType = attr.Type
+				break
+			}
+		}
+		if colIdx == -1 {
+			return ""
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, literal(sheet.records[rowIdx][colIdx], attrType)))
+	}
+
+	// SET clause literal
+	var targetAttrType string
+	for _, a := range sheet.attributes {
+		if a.Name == colName {
+			targetAttrType = a.Type
+			break
+		}
+	}
+	valueArg := toDBValue(colName, newValue)
+	quotedTarget := quoteIdent(sheet.DBType, colName)
+	setClause := fmt.Sprintf("%s = %s", quotedTarget, literal(valueArg, targetAttrType))
+
+	returningCols := make([]string, len(sheet.attributes))
+	for i, attr := range sheet.attributes {
+		returningCols[i] = quoteIdent(sheet.DBType, attr.Name)
+	}
+	if len(sheet.lookupKey) == 1 {
+		if sheet.lookupKey[0] == "rowid" {
+			returningCols = append(returningCols, "rowid")
+		}
+		if sheet.lookupKey[0] == "ctid" {
+			returningCols = append(returningCols, "ctid")
+		}
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	quotedTable := quoteQualified(sheet.DBType, sheet.table)
+	useReturning := databaseFeatures[sheet.DBType].returning
+	if useReturning {
+		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+	}
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
 }
 
 // UpdateDBValue updates a single cell in the underlying database using the

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -17,20 +18,52 @@ const (
 )
 
 type Editor struct {
-	app          *tview.Application
-	pages        *tview.Pages
-	table        *HeaderTable
-	columns      []Column
-	sheet        *Sheet
-	config       *Config
-	currentRow   int
-	currentCol   int
-	editMode     bool
-	selectedRows map[int]bool
-	selectedCols map[int]bool
+	app            *tview.Application
+	pages          *tview.Pages
+	table          *HeaderTable
+	columns        []Column
+	sheet          *Sheet
+	config         *Config
+	currentRow     int
+	currentCol     int
+	editMode       bool
+	selectedRows   map[int]bool
+	selectedCols   map[int]bool
+	statusBar      *tview.TextView
+	commandPalette *tview.InputField
+	layout         *tview.Flex
+	paletteMode    PaletteMode
+	preEditMode    PaletteMode
+}
+
+// PaletteMode represents the current mode of the command palette
+type PaletteMode int
+
+const (
+	PaletteModeCommand PaletteMode = iota
+	PaletteModeSQL
+	PaletteModeFind
+	PaletteModeUpdate
+)
+
+func (m PaletteMode) Glyph() string {
+	switch m {
+	case PaletteModeCommand:
+		return "> "
+	case PaletteModeSQL:
+		return "` "
+	case PaletteModeFind:
+		return "/ "
+	case PaletteModeUpdate:
+		return "= "
+	default:
+		return "> "
+	}
 }
 
 func runEditor(config *Config, tablename string) error {
+	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
+
 	db, dbType, err := config.connect()
 	if err != nil {
 		return err
@@ -79,12 +112,17 @@ func runEditor(config *Config, tablename string) error {
 		config:       config,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
+		paletteMode:  PaletteModeCommand,
+		preEditMode:  PaletteModeCommand,
 	}
 
 	editor.setupTable()
 	editor.setupKeyBindings()
+	editor.setupStatusBar()
+	editor.setupCommandPalette()
+	editor.setupLayout()
 
-	editor.pages.AddPage("table", editor.table, true, true)
+	editor.pages.AddPage("table", editor.layout, true, true)
 
 	if err := editor.app.SetRoot(editor.pages, true).EnableMouse(true).Run(); err != nil {
 		return err
@@ -107,12 +145,74 @@ func (e *Editor) setupTable() {
 	e.table.SetHeaders(headers).SetData(e.sheet.records).SetSelectable(true)
 }
 
+func (e *Editor) setupStatusBar() {
+	e.statusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(true).
+		SetWrap(false)
+
+	e.statusBar.SetBackgroundColor(tcell.ColorLightGray)
+	e.statusBar.SetTextColor(tcell.ColorBlack)
+	e.statusBar.SetText("Ready")
+}
+
+func (e *Editor) setupCommandPalette() {
+	inputField := tview.NewInputField()
+	e.commandPalette = inputField.
+		SetLabel("").
+		SetFieldBackgroundColor(tcell.ColorBlack).
+		SetFieldTextColor(tcell.ColorWhite)
+
+	e.commandPalette.SetBackgroundColor(tcell.ColorBlack)
+	// Default help when not focused and not editing
+	e.commandPalette.SetPlaceholder("Ctrl+P: Command   Ctrl+`: SQL   Ctrl+F: Find")
+
+	// Default to command mode glyph
+	e.setPaletteMode(PaletteModeCommand, false)
+
+	e.commandPalette.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEnter:
+			command := e.commandPalette.GetText()
+			switch e.getPaletteMode() {
+			case PaletteModeCommand:
+				e.executeCommand(command)
+			case PaletteModeSQL:
+				// Placeholder for future SQL execution
+				if strings.TrimSpace(command) != "" {
+					e.SetStatusLog("SQL: " + strings.TrimSpace(command))
+				}
+			case PaletteModeFind:
+				// Placeholder for future find implementation
+				if strings.TrimSpace(command) != "" {
+					e.SetStatusLog("Find: " + strings.TrimSpace(command))
+				}
+			}
+			e.commandPalette.SetText("")
+			e.app.SetFocus(e.table)
+			return nil
+		case tcell.KeyEscape:
+			e.commandPalette.SetText("")
+			e.app.SetFocus(e.table)
+			return nil
+		}
+		return event
+	})
+}
+
+func (e *Editor) setupLayout() {
+	e.layout = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(e.table, 0, 1, true).
+		AddItem(e.statusBar, 1, 0, false).
+		AddItem(e.commandPalette, 1, 0, false)
+}
+
 func (e *Editor) setupKeyBindings() {
 	e.table.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		key := event.Key()
 		rune := event.Rune()
 		mod := event.Modifiers()
-
+		log.Printf("table.SetInputCapture key=%v rune=%v (%d) rune=='f'=%v ctrl=%v", key, rune, rune, rune == 'f', mod&tcell.ModCtrl != 0)
 		row, col := e.table.GetSelection()
 
 		switch {
@@ -120,6 +220,11 @@ func (e *Editor) setupKeyBindings() {
 			e.enterEditMode(row, col)
 			return nil
 		case key == tcell.KeyEscape:
+			if e.app.GetFocus() == e.commandPalette {
+				e.commandPalette.SetText("")
+				e.app.SetFocus(e.table)
+				return nil
+			}
 			e.exitEditMode()
 			return nil
 		case key == tcell.KeyTab:
@@ -148,10 +253,17 @@ func (e *Editor) setupKeyBindings() {
 		case rune == ' ' && mod&tcell.ModCtrl != 0:
 			e.toggleColSelection(col)
 			return nil
-		case rune == 'r' && mod&tcell.ModCtrl != 0:
+		case (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0: // Ctrl+R sends DC2 (18) or 'r' depending on terminal
 			e.refreshData()
 			return nil
-		case rune == 'f' && mod&tcell.ModCtrl != 0:
+		case (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0: // Ctrl+F sends ACK (6) or 'f' depending on terminal
+			e.setPaletteMode(PaletteModeFind, true)
+			return nil
+		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0: // Ctrl+P sends DLE (16) or 'p' depending on terminal
+			e.setPaletteMode(PaletteModeCommand, true)
+			return nil
+		case rune == '`' && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeSQL, true)
 			return nil
 		case key == tcell.KeyUp && mod&tcell.ModAlt != 0:
 			e.moveRow(row, -1)
@@ -212,6 +324,9 @@ func (e *Editor) enterEditMode(row, col int) {
 	currentValue := e.table.GetCell(row, col)
 	currentText := formatCellValue(currentValue)
 
+	// Remember the palette mode so we can restore it after editing
+	e.preEditMode = e.getPaletteMode()
+
 	// Create textarea for editing with proper styling
 	textArea := tview.NewTextArea().
 		SetText(currentText, true).
@@ -222,6 +337,8 @@ func (e *Editor) enterEditMode(row, col int) {
 
 	// Store references for dynamic resizing
 	var modal tview.Primitive
+	e.currentRow = row
+	e.currentCol = col
 
 	// Function to resize textarea based on current content
 	resizeTextarea := func() {
@@ -264,8 +381,11 @@ func (e *Editor) enterEditMode(row, col int) {
 		return event
 	})
 
-	// Set up dynamic resizing on text changes
-	textArea.SetChangedFunc(resizeTextarea)
+	// Set up dynamic resizing on text changes and update SQL preview
+	textArea.SetChangedFunc(func() {
+		resizeTextarea()
+		e.updateEditPreview(textArea.GetText())
+	})
 
 	// Position the textarea to align with the cell
 	modal = e.createCellEditOverlay(textArea, row, col, currentText)
@@ -306,6 +426,10 @@ func (e *Editor) enterEditMode(row, col int) {
 
 	e.app.SetFocus(textArea)
 	e.editMode = true
+
+	// Show initial UPDATE preview in palette while editing
+	e.setPaletteMode(PaletteModeUpdate, false)
+	e.updateEditPreview(currentText)
 }
 
 func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, currentText string) tview.Primitive {
@@ -378,48 +502,6 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, c
 		AddItem(nil, 0, 1, false)
 }
 
-func splitTextToLines(text string, maxWidth int) []string {
-	if text == "" {
-		return []string{""}
-	}
-
-	// Split by newlines first
-	paragraphs := strings.Split(text, "\n")
-	var lines []string
-
-	for _, paragraph := range paragraphs {
-		if paragraph == "" {
-			lines = append(lines, "")
-			continue
-		}
-
-		// Wrap lines that are too long
-		for len(paragraph) > maxWidth {
-			// Find a good break point (prefer spaces)
-			breakPoint := maxWidth
-			for i := maxWidth - 1; i > maxWidth/2 && i < len(paragraph); i-- {
-				if paragraph[i] == ' ' {
-					breakPoint = i
-					break
-				}
-			}
-
-			lines = append(lines, paragraph[:breakPoint])
-			paragraph = strings.TrimLeft(paragraph[breakPoint:], " ")
-		}
-
-		if len(paragraph) > 0 {
-			lines = append(lines, paragraph)
-		}
-	}
-
-	return lines
-}
-
-func (e *Editor) setCursor(x, y int) {
-	fmt.Printf("\033[%d;%dH", y+1, x+1)
-}
-
 func (e *Editor) setCursorStyle(style int) {
 	fmt.Printf("\033[%d q", style)
 }
@@ -431,7 +513,57 @@ func (e *Editor) exitEditMode() {
 		e.setCursorStyle(0)         // Reset to default cursor style
 		e.app.SetFocus(e.table)
 		e.editMode = false
+		// Restore the palette mode that was active before editing began
+		e.setPaletteMode(e.preEditMode, false)
 	}
+}
+
+// Mode management helpers
+func (e *Editor) getPaletteMode() PaletteMode {
+	return e.paletteMode
+}
+
+func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
+	log.Println("setPaletteMode", mode, focus)
+	e.paletteMode = mode
+	e.commandPalette.SetLabel(mode.Glyph())
+	// Clear input when switching modes
+	e.commandPalette.SetText("")
+	if e.editMode {
+		// In edit mode, preview overrides placeholder text
+		// updateEditPreview will set placeholder appropriately
+	} else {
+		if focus {
+			switch mode {
+			case PaletteModeCommand:
+				e.commandPalette.SetPlaceholder("Command…")
+			case PaletteModeSQL:
+				e.commandPalette.SetPlaceholder("SQL…")
+			case PaletteModeFind:
+				e.commandPalette.SetPlaceholder("Find…")
+			case PaletteModeUpdate:
+				e.commandPalette.SetPlaceholder("Update…")
+			}
+		} else {
+			e.commandPalette.SetPlaceholder("Ctrl+P: Command   Ctrl+`: SQL   Ctrl+F: Find")
+		}
+	}
+	if focus {
+		e.app.SetFocus(e.commandPalette)
+	}
+}
+
+// Update the command palette to show a SQL UPDATE preview while editing
+func (e *Editor) updateEditPreview(newText string) {
+	if e.sheet == nil || !e.editMode {
+		return
+	}
+	colName := e.columns[e.currentCol].Name
+	preview := e.sheet.BuildUpdatePreview(e.currentRow, colName, newText)
+	if preview == "" {
+		return
+	}
+	e.commandPalette.SetPlaceholder(preview)
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
@@ -630,4 +762,67 @@ func getTerminalHeight() int {
 		return 24 // Standard terminal height
 	}
 	return int(ws.Row)
+}
+
+// Status bar API methods
+func (e *Editor) SetStatusMessage(message string) {
+	if e.statusBar != nil {
+		e.statusBar.SetText(message)
+		e.app.Draw()
+	}
+}
+
+func (e *Editor) SetStatusError(message string) {
+	if e.statusBar != nil {
+		e.statusBar.SetText("[red]ERROR: " + message + "[white]")
+		e.app.Draw()
+	}
+}
+
+func (e *Editor) SetStatusLog(message string) {
+	if e.statusBar != nil {
+		e.statusBar.SetText("[blue]LOG: " + message + "[white]")
+		e.app.Draw()
+	}
+}
+
+// Command execution
+func (e *Editor) executeCommand(command string) {
+	if command == "" {
+		return
+	}
+
+	// Split command into parts
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return
+	}
+
+	cmd := parts[0]
+	args := parts[1:]
+
+	switch cmd {
+	case "quit", "q":
+		e.app.Stop()
+	case "refresh", "r":
+		e.SetStatusMessage("Refreshing data...")
+		e.refreshData()
+		e.SetStatusMessage("Data refreshed")
+	case "help", "h":
+		e.SetStatusMessage("Commands: quit, refresh, help")
+	case "log":
+		if len(args) > 0 {
+			e.SetStatusLog(strings.Join(args, " "))
+		} else {
+			e.SetStatusMessage("Usage: log <message>")
+		}
+	case "error":
+		if len(args) > 0 {
+			e.SetStatusError(strings.Join(args, " "))
+		} else {
+			e.SetStatusMessage("Usage: error <message>")
+		}
+	default:
+		e.SetStatusError("Unknown command: " + cmd)
+	}
 }
