@@ -18,29 +18,32 @@ const (
 )
 
 type Editor struct {
-	app            *tview.Application
-	pages          *tview.Pages
-	table          *HeaderTable
-	columns        []Column
-	sheet          *Sheet
-	config         *Config
-	currentRow     int
-	currentCol     int
-	editMode       bool
-	selectedRows   map[int]bool
-	selectedCols   map[int]bool
-	statusBar      *tview.TextView
-	commandPalette *tview.InputField
-	layout         *tview.Flex
-	paletteMode    PaletteMode
-	preEditMode    PaletteMode
+	app                     *tview.Application
+	pages                   *tview.Pages
+	table                   *HeaderTable
+	columns                 []Column
+	sheet                   *Sheet
+	config                  *Config
+	currentRow              int
+	currentCol              int
+	editMode                bool
+	selectedRows            map[int]bool
+	selectedCols            map[int]bool
+	statusBar               *tview.TextView
+	commandPalette          *tview.InputField
+	layout                  *tview.Flex
+	paletteMode             PaletteMode
+	preEditMode             PaletteMode
+	placeholderStyleDefault tcell.Style
+	placeholderStyleItalic  tcell.Style
 }
 
 // PaletteMode represents the current mode of the command palette
 type PaletteMode int
 
 const (
-	PaletteModeCommand PaletteMode = iota
+	PaletteModeDefault PaletteMode = iota
+	PaletteModeCommand
 	PaletteModeSQL
 	PaletteModeFind
 	PaletteModeUpdate
@@ -48,6 +51,8 @@ const (
 
 func (m PaletteMode) Glyph() string {
 	switch m {
+	case PaletteModeDefault:
+		return "# "
 	case PaletteModeCommand:
 		return "> "
 	case PaletteModeSQL:
@@ -112,8 +117,8 @@ func runEditor(config *Config, tablename string) error {
 		config:       config,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
-		paletteMode:  PaletteModeCommand,
-		preEditMode:  PaletteModeCommand,
+		paletteMode:  PaletteModeDefault,
+		preEditMode:  PaletteModeDefault,
 	}
 
 	editor.setupTable()
@@ -164,11 +169,11 @@ func (e *Editor) setupCommandPalette() {
 		SetFieldTextColor(tcell.ColorWhite)
 
 	e.commandPalette.SetBackgroundColor(tcell.ColorBlack)
-	// Default help when not focused and not editing
-	e.commandPalette.SetPlaceholder("Ctrl+P: Command   Ctrl+`: SQL   Ctrl+F: Find")
+	e.placeholderStyleDefault = e.commandPalette.GetPlaceholderStyle()
+	e.placeholderStyleItalic = e.placeholderStyleDefault.Italic(true)
 
-	// Default to command mode glyph
-	e.setPaletteMode(PaletteModeCommand, false)
+	// Default palette mode shows keybinding help
+	e.setPaletteMode(PaletteModeDefault, false)
 
 	e.commandPalette.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
@@ -188,11 +193,11 @@ func (e *Editor) setupCommandPalette() {
 					e.SetStatusLog("Find: " + strings.TrimSpace(command))
 				}
 			}
-			e.commandPalette.SetText("")
+			e.setPaletteMode(PaletteModeDefault, false)
 			e.app.SetFocus(e.table)
 			return nil
 		case tcell.KeyEscape:
-			e.commandPalette.SetText("")
+			e.setPaletteMode(PaletteModeDefault, false)
 			e.app.SetFocus(e.table)
 			return nil
 		}
@@ -221,7 +226,7 @@ func (e *Editor) setupKeyBindings() {
 			return nil
 		case key == tcell.KeyEscape:
 			if e.app.GetFocus() == e.commandPalette {
-				e.commandPalette.SetText("")
+				e.setPaletteMode(PaletteModeDefault, false)
 				e.app.SetFocus(e.table)
 				return nil
 			}
@@ -513,8 +518,8 @@ func (e *Editor) exitEditMode() {
 		e.setCursorStyle(0)         // Reset to default cursor style
 		e.app.SetFocus(e.table)
 		e.editMode = false
-		// Restore the palette mode that was active before editing began
-		e.setPaletteMode(e.preEditMode, false)
+		// Return palette to default mode after editing
+		e.setPaletteMode(PaletteModeDefault, false)
 	}
 }
 
@@ -524,28 +529,31 @@ func (e *Editor) getPaletteMode() PaletteMode {
 }
 
 func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
-	log.Println("setPaletteMode", mode, focus)
 	e.paletteMode = mode
 	e.commandPalette.SetLabel(mode.Glyph())
 	// Clear input when switching modes
 	e.commandPalette.SetText("")
+	style := e.placeholderStyleDefault
+	switch mode {
+	case PaletteModeCommand, PaletteModeSQL, PaletteModeFind:
+		style = e.placeholderStyleItalic
+	}
+	e.commandPalette.SetPlaceholderStyle(style)
 	if e.editMode {
 		// In edit mode, preview overrides placeholder text
 		// updateEditPreview will set placeholder appropriately
 	} else {
-		if focus {
-			switch mode {
-			case PaletteModeCommand:
-				e.commandPalette.SetPlaceholder("Command…")
-			case PaletteModeSQL:
-				e.commandPalette.SetPlaceholder("SQL…")
-			case PaletteModeFind:
-				e.commandPalette.SetPlaceholder("Find…")
-			case PaletteModeUpdate:
-				e.commandPalette.SetPlaceholder("Update…")
-			}
-		} else {
+		switch mode {
+		case PaletteModeDefault:
 			e.commandPalette.SetPlaceholder("Ctrl+P: Command   Ctrl+`: SQL   Ctrl+F: Find")
+		case PaletteModeCommand:
+			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
+		case PaletteModeSQL:
+			e.commandPalette.SetPlaceholder("SQL… (Esc to exit)")
+		case PaletteModeFind:
+			e.commandPalette.SetPlaceholder("Find… (Esc to exit)")
+		case PaletteModeUpdate:
+			e.commandPalette.SetPlaceholder("Update…")
 		}
 	}
 	if focus {
