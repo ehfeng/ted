@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -34,8 +33,11 @@ type Editor struct {
 	layout                  *tview.Flex
 	paletteMode             PaletteMode
 	preEditMode             PaletteMode
+	originalEditText        string
 	placeholderStyleDefault tcell.Style
 	placeholderStyleItalic  tcell.Style
+	kittySequenceActive     bool
+	kittySequenceBuffer     string
 }
 
 // PaletteMode represents the current mode of the command palette
@@ -217,8 +219,24 @@ func (e *Editor) setupKeyBindings() {
 		key := event.Key()
 		rune := event.Rune()
 		mod := event.Modifiers()
-		log.Printf("table.SetInputCapture key=%v rune=%v (%d) rune=='f'=%v ctrl=%v", key, rune, rune, rune == 'f', mod&tcell.ModCtrl != 0)
 		row, col := e.table.GetSelection()
+
+		if e.consumeKittyCSI(key, rune, mod) {
+			return nil
+		}
+		if !e.kittySequenceActive {
+			if key == tcell.KeyRune && mod&tcell.ModCtrl != 0 && rune == '`' {
+				e.kittySequenceBuffer = "ctrl+`"
+			} else {
+				e.kittySequenceBuffer = ""
+			}
+		}
+
+		if !e.kittySequenceActive && e.kittySequenceBuffer == "ctrl+`" {
+			e.kittySequenceBuffer = ""
+			e.setPaletteMode(PaletteModeSQL, true)
+			return nil
+		}
 
 		switch {
 		case key == tcell.KeyEnter:
@@ -267,7 +285,7 @@ func (e *Editor) setupKeyBindings() {
 		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0: // Ctrl+P sends DLE (16) or 'p' depending on terminal
 			e.setPaletteMode(PaletteModeCommand, true)
 			return nil
-		case rune == '`' && mod&tcell.ModCtrl != 0:
+		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0: // Ctrl+` sends BEL (0) or '`' depending on terminal
 			e.setPaletteMode(PaletteModeSQL, true)
 			return nil
 		case key == tcell.KeyUp && mod&tcell.ModAlt != 0:
@@ -312,6 +330,45 @@ func (e *Editor) setupKeyBindings() {
 	})
 }
 
+func (e *Editor) consumeKittyCSI(key tcell.Key, r rune, mod tcell.ModMask) bool {
+	if e.kittySequenceActive {
+		if key != tcell.KeyRune {
+			e.kittySequenceActive = false
+			e.kittySequenceBuffer = ""
+			return false
+		}
+
+		if r == 'u' {
+			seq := e.kittySequenceBuffer
+			e.kittySequenceActive = false
+			e.kittySequenceBuffer = ""
+			parts := strings.SplitN(seq, ";", 2)
+			if len(parts) == 2 {
+				codepoint, err1 := strconv.Atoi(parts[0])
+				modifier, err2 := strconv.Atoi(parts[1])
+				if err1 == nil && err2 == nil {
+					mask := modifier - 1
+					if mask&4 != 0 && codepoint == 96 {
+						e.setPaletteMode(PaletteModeSQL, true)
+					}
+				}
+			}
+			return true
+		}
+
+		e.kittySequenceBuffer += string(r)
+		return true
+	}
+
+	if key == tcell.KeyRune && r == '[' {
+		e.kittySequenceActive = true
+		e.kittySequenceBuffer = ""
+		return true
+	}
+
+	return false
+}
+
 func (e *Editor) navigateTab(reverse bool) {
 	row, col := e.table.GetSelection()
 
@@ -346,6 +403,8 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 
 	// Remember the palette mode so we can restore it after editing
 	e.preEditMode = e.getPaletteMode()
+	originalValue := e.table.GetCell(row, col)
+	e.originalEditText = formatCellValue(originalValue)
 
 	// Create textarea for editing with proper styling
 	textArea := tview.NewTextArea().
@@ -447,9 +506,7 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 	e.app.SetFocus(textArea)
 	e.editMode = true
 
-	// Show initial UPDATE preview in palette while editing
 	e.setPaletteMode(PaletteModeUpdate, false)
-	e.updateEditPreview(currentText)
 }
 
 func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, currentText string) tview.Primitive {
@@ -535,6 +592,7 @@ func (e *Editor) exitEditMode() {
 		e.editMode = false
 		// Return palette to default mode after editing
 		e.setPaletteMode(PaletteModeDefault, false)
+		e.originalEditText = ""
 	}
 }
 
@@ -555,8 +613,12 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	}
 	e.commandPalette.SetPlaceholderStyle(style)
 	if e.editMode {
-		// In edit mode, preview overrides placeholder text
-		// updateEditPreview will set placeholder appropriately
+		// Editing contexts manage their own placeholder text
+		e.commandPalette.SetPlaceholder("")
+		if focus {
+			e.app.SetFocus(e.commandPalette)
+		}
+		return
 	} else {
 		switch mode {
 		case PaletteModeDefault:
@@ -568,7 +630,8 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 		case PaletteModeFind:
 			e.commandPalette.SetPlaceholder("Find… (Esc to exit)")
 		case PaletteModeUpdate:
-			e.commandPalette.SetPlaceholder("Update…")
+			// No placeholder in update mode
+			e.commandPalette.SetPlaceholder("")
 		}
 	}
 	if focus {
@@ -583,9 +646,6 @@ func (e *Editor) updateEditPreview(newText string) {
 	}
 	colName := e.columns[e.currentCol].Name
 	preview := e.sheet.BuildUpdatePreview(e.currentRow, colName, newText)
-	if preview == "" {
-		return
-	}
 	e.commandPalette.SetPlaceholder(preview)
 }
 
