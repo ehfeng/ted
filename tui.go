@@ -183,6 +183,12 @@ func (e *Editor) setupKeyBindings() {
 		case key == tcell.KeyDown && mod&tcell.ModMeta != 0:
 			e.table.Select(len(e.sheet.records)-1, col)
 			return nil
+		default:
+			if key == tcell.KeyRune && rune != 0 &&
+				mod&(tcell.ModAlt|tcell.ModCtrl|tcell.ModMeta) == 0 {
+				e.enterEditModeWithInitialValue(row, col, string(rune))
+				return nil
+			}
 		}
 
 		return event
@@ -208,13 +214,21 @@ func (e *Editor) navigateTab(reverse bool) {
 }
 
 func (e *Editor) enterEditMode(row, col int) {
-	// Get current value from data
 	currentValue := e.table.GetCell(row, col)
 	currentText := formatCellValue(currentValue)
+	e.enterEditModeWithInitialValue(row, col, currentText)
+}
 
-	// Create textarea for editing with proper styling
+func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string) {
+	if row < 0 || row >= len(e.sheet.records) {
+		return
+	}
+	if col < 0 || col >= len(e.columns) || col >= len(e.sheet.records[row]) {
+		return
+	}
+
 	textArea := tview.NewTextArea().
-		SetText(currentText, true).
+		SetText(initialText, true).
 		SetWrap(true).
 		SetOffset(0, 0)
 
@@ -268,7 +282,7 @@ func (e *Editor) enterEditMode(row, col int) {
 	textArea.SetChangedFunc(resizeTextarea)
 
 	// Position the textarea to align with the cell
-	modal = e.createCellEditOverlay(textArea, row, col, currentText)
+	modal = e.createCellEditOverlay(textArea, row, col, initialText)
 	e.pages.AddPage("editor", modal, true, true)
 
 	// Set up native cursor positioning using terminal escapes
