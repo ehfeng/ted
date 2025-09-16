@@ -22,6 +22,7 @@ type Editor struct {
 	table                   *HeaderTable
 	columns                 []Column
 	sheet                   *Sheet
+	data                    [][]interface{}
 	config                  *Config
 	currentRow              int
 	currentCol              int
@@ -81,7 +82,7 @@ func runEditor(config *Config, tablename string) error {
 	terminalHeight := getTerminalHeight()
 
 	var configColumns []Column // TODO derive from config
-	sheet, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight, config.Where, config.OrderBy, config.Limit)
+	sheet, initialData, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight, config.Where, config.OrderBy, config.Limit)
 	if err != nil {
 		return err
 	}
@@ -116,6 +117,7 @@ func runEditor(config *Config, tablename string) error {
 		table:        NewHeaderTable(),
 		columns:      columns,
 		sheet:        sheet,
+		data:         initialData,
 		config:       config,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
@@ -149,7 +151,7 @@ func (e *Editor) setupTable() {
 	}
 
 	// Configure the table
-	e.table.SetHeaders(headers).SetData(e.sheet.records).SetSelectable(true)
+	e.table.SetHeaders(headers).SetData(e.data).SetSelectable(true)
 }
 
 func (e *Editor) setupStatusBar() {
@@ -299,7 +301,10 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(newRow, col)
 			return nil
 		case key == tcell.KeyPgDn:
-			newRow := min(len(e.sheet.records)-1, row+10)
+			if len(e.data) == 0 {
+				return nil
+			}
+			newRow := min(len(e.data)-1, row+10)
 			e.table.Select(newRow, col)
 			return nil
 		case rune == ' ' && mod&tcell.ModShift != 0:
@@ -348,7 +353,10 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(0, col)
 			return nil
 		case key == tcell.KeyDown && mod&tcell.ModMeta != 0:
-			e.table.Select(len(e.sheet.records)-1, col)
+			if len(e.data) == 0 {
+				return nil
+			}
+			e.table.Select(len(e.data)-1, col)
 			return nil
 		default:
 			if key == tcell.KeyRune && rune != 0 &&
@@ -413,7 +421,7 @@ func (e *Editor) navigateTab(reverse bool) {
 	} else {
 		if col < len(e.columns)-1 {
 			e.table.Select(row, col+1)
-		} else if row < len(e.sheet.records)-1 {
+		} else if row < len(e.data)-1 {
 			e.table.Select(row+1, 0)
 		}
 	}
@@ -426,10 +434,10 @@ func (e *Editor) enterEditMode(row, col int) {
 }
 
 func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string) {
-	if row < 0 || row >= len(e.sheet.records) {
+	if row < 0 || row >= len(e.data) {
 		return
 	}
-	if col < 0 || col >= len(e.columns) || col >= len(e.sheet.records[row]) {
+	if col < 0 || col >= len(e.columns) || col >= len(e.data[row]) {
 		return
 	}
 
@@ -673,27 +681,34 @@ func (e *Editor) updateEditPreview(newText string) {
 		return
 	}
 	colName := e.columns[e.currentCol].Name
-	preview := e.sheet.BuildUpdatePreview(e.currentRow, colName, newText)
+	if e.currentRow < 0 || e.currentRow >= len(e.data) {
+		return
+	}
+	preview := e.sheet.BuildUpdatePreview(e.data[e.currentRow], colName, newText)
 	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
 	e.commandPalette.SetPlaceholder(preview)
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
 	// Basic bounds check against current data
-	if row < 0 || row >= len(e.sheet.records) || col < 0 || col >= len(e.sheet.records[row]) {
+	if row < 0 || row >= len(e.data) || col < 0 || col >= len(e.data[row]) {
 		e.exitEditMode()
 		return
 	}
 
 	// Delegate DB work to database.go
-	updated, err := e.sheet.UpdateDBValue(row, e.columns[col].Name, newValue)
+	updated, err := e.sheet.UpdateDBValue(e.data[row], e.columns[col].Name, newValue)
 	if err != nil {
 		e.exitEditMode()
 		return
 	}
 	// Update in-memory data and refresh table
-	copy(e.sheet.records[row], updated)
-	e.table.SetData(e.sheet.records)
+	if len(updated) == len(e.data[row]) {
+		copy(e.data[row], updated)
+	} else {
+		e.data[row] = updated
+	}
+	e.table.SetData(e.data)
 	e.exitEditMode()
 }
 
@@ -754,18 +769,18 @@ func (e *Editor) refreshData() {
 }
 
 func (e *Editor) moveRow(row, direction int) {
-	if row == 0 || row < 1 || row > len(e.sheet.records) {
+	if row == 0 || row < 1 || row > len(e.data) {
 		return
 	}
 
 	dataIdx := row - 1
 	newIdx := dataIdx + direction
 
-	if newIdx < 0 || newIdx >= len(e.sheet.records) {
+	if newIdx < 0 || newIdx >= len(e.data) {
 		return
 	}
 
-	e.sheet.records[dataIdx], e.sheet.records[newIdx] = e.sheet.records[newIdx], e.sheet.records[dataIdx]
+	e.data[dataIdx], e.data[newIdx] = e.data[newIdx], e.data[dataIdx]
 	e.setupTable()
 	e.table.Select(row+direction, e.currentCol)
 }
@@ -782,8 +797,8 @@ func (e *Editor) moveColumn(col, direction int) {
 
 	e.columns[col], e.columns[newIdx] = e.columns[newIdx], e.columns[col]
 
-	for i := range e.sheet.records {
-		e.sheet.records[i][col], e.sheet.records[i][newIdx] = e.sheet.records[i][newIdx], e.sheet.records[i][col]
+	for i := range e.data {
+		e.data[i][col], e.data[i][newIdx] = e.data[i][newIdx], e.data[i][col]
 	}
 
 	e.setupTable()
