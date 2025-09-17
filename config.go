@@ -13,17 +13,17 @@ import (
 )
 
 type Config struct {
-    Database string
-    Host     string
-    Port     string
-    Username string
-    Password string
-    Command  string
-    Where    string
-    OrderBy  string
-    Limit    int
-    // DBTypeOverride allows explicitly selecting the database type via flags
-    DBTypeOverride *DatabaseType
+	Database string
+	Host     string
+	Port     string
+	Username string
+	Password string
+	Command  string
+	Where    string
+	OrderBy  string
+	Limit    int
+	// DBTypeOverride allows explicitly selecting the database type via flags
+	DBTypeOverride *DatabaseType
 }
 
 type DatabaseType int
@@ -34,6 +34,10 @@ const (
 	MySQL
 	DuckDB
 	Clickhouse
+	Snowflake
+	Cockroach
+	BigQuery
+	Redshift
 )
 
 type databaseFeature struct {
@@ -76,15 +80,27 @@ var databaseFeatures = map[DatabaseType]databaseFeature{
 	},
 }
 
+var databaseIcons = map[DatabaseType]string{
+	SQLite:     "🪶",
+	PostgreSQL: "🐘",
+	MySQL:      "🐬",
+	DuckDB:     "🦆",
+	Clickhouse: "⬛",
+	Snowflake:  "❄️",
+	Cockroach:  "🪳",
+	BigQuery:   "🔍",
+	Redshift:   "🟥",
+}
+
 func (c *Config) detectDatabaseType() DatabaseType {
-    if c.DBTypeOverride != nil {
-        return *c.DBTypeOverride
-    }
-    if strings.HasSuffix(c.Database, ".sqlite") || strings.HasSuffix(c.Database, ".db") {
-        return SQLite
-    }
-    if strings.HasSuffix(c.Database, ".duckdb") {
-        return DuckDB
+	if c.DBTypeOverride != nil {
+		return *c.DBTypeOverride
+	}
+	if strings.HasSuffix(c.Database, ".sqlite") || strings.HasSuffix(c.Database, ".db") {
+		return SQLite
+	}
+	if strings.HasSuffix(c.Database, ".duckdb") {
+		return DuckDB
 	}
 	return PostgreSQL
 }

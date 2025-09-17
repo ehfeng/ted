@@ -11,17 +11,17 @@ import (
 )
 
 var (
-    database string
-    host     string
-    port     string
-    username string
-    password string
-    command  string
-    where    string
-    orderBy  string
-    limitN   int
-    usePostgres bool
-    useMySQL    bool
+	database    string
+	host        string
+	port        string
+	username    string
+	password    string
+	command     string
+	where       string
+	orderBy     string
+	limitN      int
+	usePostgres bool
+	useMySQL    bool
 )
 
 var rootCmd = &cobra.Command{
@@ -38,38 +38,38 @@ Examples:
 		dbname := args[0]
 		tablename := args[1]
 
-        var dbTypeOverride *DatabaseType
-        // Validate mutually exclusive flags
-        if usePostgres && useMySQL {
-            fmt.Fprintln(os.Stderr, "Error: --pg and --mysql/--my are mutually exclusive")
-            os.Exit(1)
-        }
-        if database != "" && (usePostgres || useMySQL) {
-            fmt.Fprintln(os.Stderr, "Error: -d/--database cannot be used with --pg or --mysql/--my")
-            os.Exit(1)
-        }
-        if usePostgres {
-            t := PostgreSQL
-            dbTypeOverride = &t
-        } else if useMySQL {
-            t := MySQL
-            dbTypeOverride = &t
-        }
+		var dbTypeOverride *DatabaseType
+		// Validate mutually exclusive flags
+		if usePostgres && useMySQL {
+			fmt.Fprintln(os.Stderr, "Error: --pg and --mysql/--my are mutually exclusive")
+			os.Exit(1)
+		}
+		if database != "" && (usePostgres || useMySQL) {
+			fmt.Fprintln(os.Stderr, "Error: -d/--database cannot be used with --pg or --mysql/--my")
+			os.Exit(1)
+		}
+		if usePostgres {
+			t := PostgreSQL
+			dbTypeOverride = &t
+		} else if useMySQL {
+			t := MySQL
+			dbTypeOverride = &t
+		}
 
-        config := &Config{
-            Database: getValue(database, dbname),
-            Host:     host,
-            Port:     port,
-            Username: username,
-            Password: password,
-            Command:  command,
-            Where:    where,
-            OrderBy:  orderBy,
-            Limit:    limitN,
-            DBTypeOverride: dbTypeOverride,
-        }
+		config := &Config{
+			Database:       getValue(database, dbname),
+			Host:           host,
+			Port:           port,
+			Username:       username,
+			Password:       password,
+			Command:        command,
+			Where:          where,
+			OrderBy:        orderBy,
+			Limit:          limitN,
+			DBTypeOverride: dbTypeOverride,
+		}
 
-		if err := runEditor(config, tablename); err != nil {
+		if err := runEditor(config, dbname, tablename); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -77,19 +77,19 @@ Examples:
 }
 
 func init() {
-    rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
-    rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
-    rootCmd.Flags().StringVarP(&port, "port", "p", "", "Database port")
-    rootCmd.Flags().StringVarP(&username, "username", "U", "", "Database username")
-    rootCmd.Flags().StringVarP(&password, "password", "W", "", "Database password")
-    rootCmd.Flags().StringVarP(&command, "command", "c", "", "SQL command to execute")
-    rootCmd.Flags().StringVarP(&where, "where", "w", "", "WHERE clause to filter rows (without the keyword)")
-    rootCmd.Flags().StringVarP(&orderBy, "order-by", "o", "", "ORDER BY clause to sort rows (without the keyword)")
-    rootCmd.Flags().IntVarP(&limitN, "limit", "l", 0, "LIMIT number of rows to fetch")
-    // Database type shorthands
-    rootCmd.Flags().BoolVar(&usePostgres, "pg", false, "Use PostgreSQL for server connections")
-    rootCmd.Flags().BoolVar(&useMySQL, "mysql", false, "Use MySQL for server connections")
-    rootCmd.Flags().BoolVar(&useMySQL, "my", false, "Use MySQL for server connections (shorthand)")
+	rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
+	rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
+	rootCmd.Flags().StringVarP(&port, "port", "p", "", "Database port")
+	rootCmd.Flags().StringVarP(&username, "username", "U", "", "Database username")
+	rootCmd.Flags().StringVarP(&password, "password", "W", "", "Database password")
+	rootCmd.Flags().StringVarP(&command, "command", "c", "", "SQL command to execute")
+	rootCmd.Flags().StringVarP(&where, "where", "w", "", "WHERE clause to filter rows (without the keyword)")
+	rootCmd.Flags().StringVarP(&orderBy, "order-by", "o", "", "ORDER BY clause to sort rows (without the keyword)")
+	rootCmd.Flags().IntVarP(&limitN, "limit", "l", 0, "LIMIT number of rows to fetch")
+	// Database type shorthands
+	rootCmd.Flags().BoolVar(&usePostgres, "pg", false, "Use PostgreSQL for server connections")
+	rootCmd.Flags().BoolVar(&useMySQL, "mysql", false, "Use MySQL for server connections")
+	rootCmd.Flags().BoolVar(&useMySQL, "my", false, "Use MySQL for server connections (shorthand)")
 }
 
 func getValue(flag, arg string) string {

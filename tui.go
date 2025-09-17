@@ -68,7 +68,7 @@ func (m PaletteMode) Glyph() string {
 	}
 }
 
-func runEditor(config *Config, tablename string) error {
+func runEditor(config *Config, dbname, tablename string) error {
 	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
 
 	db, dbType, err := config.connect()
@@ -111,7 +111,7 @@ func runEditor(config *Config, tablename string) error {
 	}
 
 	editor := &Editor{
-		app:          tview.NewApplication(),
+		app:          tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s", dbname, tablename, databaseIcons[dbType])),
 		pages:        tview.NewPages(),
 		table:        NewHeaderTable(),
 		columns:      columns,
@@ -134,7 +134,6 @@ func runEditor(config *Config, tablename string) error {
 	if err := editor.app.SetRoot(editor.pages, true).EnableMouse(true).Run(); err != nil {
 		return err
 	}
-
 	return nil
 }
 
