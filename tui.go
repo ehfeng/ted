@@ -596,16 +596,14 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, c
 
 	// Create positioned overlay that aligns text with the original cell
 	leftPadding := tview.NewBox()
-	rightPadding := tview.NewBox()
 
 	return tview.NewFlex().
 		AddItem(nil, leftOffset, 0, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, topOffset, 0, false).
 			AddItem(tview.NewFlex().
-				AddItem(leftPadding, 1, 0, false).           // Left padding (red)
-				AddItem(textArea, textAreaWidth-1, 0, true). // Text area
-				AddItem(rightPadding, 1, 0, false),          // Right padding (green)
+				AddItem(leftPadding, 1, 0, false).           // Left padding
+				AddItem(textArea, textAreaWidth-1, 0, true), // Text area
 				textAreaHeight, 0, true).
 			AddItem(nil, 0, 1, false), textAreaWidth, 0, true).
 		AddItem(nil, 0, 1, false)
