@@ -2,6 +2,8 @@
 
 ted is a tabular editor. It displays database tables as markdown table and provides spreadsheet-like editing, including mouse support for selecting cells (with Opt key) or adjust column widths.
 
+![ted demo](ted.gif)
+
 ```
  ◔ created_at > now() - interval '7 days' ⊗
  ⇅ name DESC, org_id ASC ⊗
@@ -189,5 +191,4 @@ watchexec --restart --exts go,mod,sum -- 'go install'
 ted test.db users 2>/tmp/ted.log
 tail -f /tmp/ted.log
 `
-
 
