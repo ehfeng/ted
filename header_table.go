@@ -14,26 +14,22 @@ type HeaderColumn struct {
 // HeaderTable is a custom table component with proper header separator rendering
 type HeaderTable struct {
 	*tview.Box
-	
+
 	// Table data
 	headers []HeaderColumn
 	data    [][]interface{}
-	
+
 	// Display configuration
 	cellPadding   int
 	borderColor   tcell.Color
 	headerColor   tcell.Color
 	headerBgColor tcell.Color
 	separatorChar rune
-	
+
 	// Selection state
 	selectedRow int
 	selectedCol int
 	selectable  bool
-	
-	// Scroll state
-	rowOffset int
-	colOffset int
 }
 
 // NewHeaderTable creates a new header table component
@@ -49,7 +45,7 @@ func NewHeaderTable() *HeaderTable {
 		selectedCol:   0,
 		selectable:    true,
 	}
-	
+
 	ht.SetBorder(false) // We'll draw our own borders
 	return ht
 }
@@ -111,42 +107,42 @@ func (ht *HeaderTable) SetCell(row, col int, value interface{}) *HeaderTable {
 func (ht *HeaderTable) Draw(screen tcell.Screen) {
 	ht.Box.DrawForSubclass(screen, ht)
 	x, y, width, height := ht.GetInnerRect()
-	
+
 	if len(ht.headers) == 0 || width <= 0 || height <= 0 {
 		return
 	}
-	
+
 	// Calculate table dimensions
 	tableWidth := ht.calculateTableWidth()
 	if tableWidth > width {
 		tableWidth = width
 	}
-	
+
 	// Draw top border
 	ht.drawTopBorder(screen, x, y, tableWidth)
 	currentY := y + 1
-	
+
 	// Draw header row
 	if currentY < y+height {
 		ht.drawHeaderRow(screen, x, currentY, tableWidth)
 		currentY++
 	}
-	
+
 	// Draw header separator
 	if currentY < y+height {
 		ht.drawHeaderSeparator(screen, x, currentY, tableWidth)
 		currentY++
 	}
-	
+
 	// Draw data rows
 	dataRowsDrawn := 0
 	maxDataRows := height - 4 // Reserve space for borders and header
-	for i := ht.rowOffset; i < len(ht.data) && dataRowsDrawn < maxDataRows && currentY < y+height; i++ {
+	for i := 0; i < len(ht.data) && dataRowsDrawn < maxDataRows && currentY < y+height; i++ {
 		ht.drawDataRow(screen, x, currentY, tableWidth, i)
 		currentY++
 		dataRowsDrawn++
 	}
-	
+
 	// Draw bottom border
 	if currentY < y+height {
 		ht.drawBottomBorder(screen, x, currentY, tableWidth)
@@ -171,17 +167,17 @@ func (ht *HeaderTable) drawTopBorder(screen tcell.Screen, x, y, tableWidth int) 
 	// Left corner
 	screen.SetContent(x, y, '┌', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 	pos := x + 1
-	
+
 	// Column sections
 	for i, header := range ht.headers {
 		cellWidth := header.Width + 2*ht.cellPadding
-		
+
 		// Horizontal line for this column
 		for j := 0; j < cellWidth; j++ {
 			screen.SetContent(pos+j, y, '─', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 		}
 		pos += cellWidth
-		
+
 		// Junction or corner
 		if i < len(ht.headers)-1 {
 			screen.SetContent(pos, y, '┬', nil, tcell.StyleDefault.Foreground(ht.borderColor))
@@ -197,7 +193,7 @@ func (ht *HeaderTable) drawHeaderRow(screen tcell.Screen, x, y, tableWidth int) 
 	// Left border
 	screen.SetContent(x, y, '│', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 	pos := x + 1
-	
+
 	// Header cells
 	for i, header := range ht.headers {
 		// Padding before content
@@ -205,27 +201,27 @@ func (ht *HeaderTable) drawHeaderRow(screen tcell.Screen, x, y, tableWidth int) 
 			screen.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(ht.headerColor).Background(ht.headerBgColor))
 		}
 		pos += ht.cellPadding
-		
+
 		// Header text
 		headerText := padCellToWidth(header.Name, header.Width)
 		for j, ch := range headerText {
 			screen.SetContent(pos+j, y, ch, nil, tcell.StyleDefault.Foreground(ht.headerColor).Background(ht.headerBgColor))
 		}
 		pos += header.Width
-		
+
 		// Padding after content
 		for j := 0; j < ht.cellPadding; j++ {
 			screen.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(ht.headerColor).Background(ht.headerBgColor))
 		}
 		pos += ht.cellPadding
-		
+
 		// Column separator
 		if i < len(ht.headers)-1 {
 			screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 			pos++
 		}
 	}
-	
+
 	// Right border
 	screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 }
@@ -235,17 +231,17 @@ func (ht *HeaderTable) drawHeaderSeparator(screen tcell.Screen, x, y, tableWidth
 	// Left junction
 	screen.SetContent(x, y, '┝', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 	pos := x + 1
-	
+
 	// Column sections
 	for i, header := range ht.headers {
 		cellWidth := header.Width + 2*ht.cellPadding
-		
+
 		// Heavy horizontal line for this column
 		for j := 0; j < cellWidth; j++ {
 			screen.SetContent(pos+j, y, '━', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 		}
 		pos += cellWidth
-		
+
 		// Junction or right junction
 		if i < len(ht.headers)-1 {
 			screen.SetContent(pos, y, '┿', nil, tcell.StyleDefault.Foreground(ht.borderColor))
@@ -261,7 +257,7 @@ func (ht *HeaderTable) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx
 	// Left border
 	screen.SetContent(x, y, '│', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 	pos := x + 1
-	
+
 	// Data cells
 	for i, header := range ht.headers {
 		// Cell style (highlight if selected)
@@ -269,38 +265,38 @@ func (ht *HeaderTable) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx
 		if ht.selectable && rowIdx == ht.selectedRow && i == ht.selectedCol {
 			cellStyle = cellStyle.Background(tcell.ColorBlue).Foreground(tcell.ColorWhite)
 		}
-		
+
 		// Padding before content
 		for j := 0; j < ht.cellPadding; j++ {
 			screen.SetContent(pos+j, y, ' ', nil, cellStyle)
 		}
 		pos += ht.cellPadding
-		
+
 		// Cell data
 		var cellText string
 		if rowIdx < len(ht.data) && i < len(ht.data[rowIdx]) {
 			cellText = formatCellValue(ht.data[rowIdx][i])
 		}
 		cellText = padCellToWidth(cellText, header.Width)
-		
+
 		for j, ch := range cellText {
 			screen.SetContent(pos+j, y, ch, nil, cellStyle)
 		}
 		pos += header.Width
-		
+
 		// Padding after content
 		for j := 0; j < ht.cellPadding; j++ {
 			screen.SetContent(pos+j, y, ' ', nil, cellStyle)
 		}
 		pos += ht.cellPadding
-		
+
 		// Column separator
 		if i < len(ht.headers)-1 {
 			screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 			pos++
 		}
 	}
-	
+
 	// Right border
 	screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 }
@@ -310,17 +306,17 @@ func (ht *HeaderTable) drawBottomBorder(screen tcell.Screen, x, y, tableWidth in
 	// Left corner
 	screen.SetContent(x, y, '└', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 	pos := x + 1
-	
+
 	// Column sections
 	for i, header := range ht.headers {
 		cellWidth := header.Width + 2*ht.cellPadding
-		
+
 		// Horizontal line for this column
 		for j := 0; j < cellWidth; j++ {
 			screen.SetContent(pos+j, y, '─', nil, tcell.StyleDefault.Foreground(ht.borderColor))
 		}
 		pos += cellWidth
-		
+
 		// Junction or corner
 		if i < len(ht.headers)-1 {
 			screen.SetContent(pos, y, '┴', nil, tcell.StyleDefault.Foreground(ht.borderColor))
@@ -337,9 +333,9 @@ func (ht *HeaderTable) InputHandler() func(event *tcell.EventKey, setFocus func(
 		if !ht.selectable {
 			return
 		}
-		
+
 		key := event.Key()
-		
+
 		switch key {
 		case tcell.KeyUp:
 			if ht.selectedRow > 0 {
@@ -404,4 +400,3 @@ func padCellToWidth(text string, width int) string {
 	}
 	return text + spaces
 }
-

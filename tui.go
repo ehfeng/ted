@@ -1,8 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
-	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,28 +17,70 @@ const (
 	DefaultColumnWidth = 8
 )
 
+// database: table, attribute, record
+// sheet: sheet, column, row
+// row id should be file line number, different than lookup key
+type Relation struct {
+	DB     *sql.DB
+	DBType DatabaseType
+
+	// name metadata
+	name       string
+	lookupKey  []string
+	attributes []attribute
+	// references attributes indices
+	uniques    [][]int
+	references [][]int
+}
+
+// this is a config concept
+// width = 0 means column is not selected
+type column struct {
+	Name  string
+	Width int
+}
+
+type attribute struct {
+	Name      string
+	Type      string // TODO enum, composite types
+	Nullable  bool
+	Generated bool // TODO if computed column, read-only
+}
+
+// columns are display, relation.attributes are the database attributes
 type Editor struct {
-	app                     *tview.Application
-	pages                   *tview.Pages
-	table                   *HeaderTable
-	columns                 []Column
-	sheet                   *Sheet
-	config                  *Config
-	currentRow              int
-	currentCol              int
-	editMode                bool
-	selectedRows            map[int]bool
-	selectedCols            map[int]bool
+	app        *tview.Application
+	pages      *tview.Pages
+	table      *HeaderTable
+	columns    []column
+	dataHeight int
+	relation   *Relation
+	config     *Config
+
 	statusBar               *tview.TextView
 	commandPalette          *tview.InputField
 	layout                  *tview.Flex
 	paletteMode             PaletteMode
 	preEditMode             PaletteMode
-	originalEditText        string
 	placeholderStyleDefault tcell.Style
 	placeholderStyleItalic  tcell.Style
 	kittySequenceActive     bool
 	kittySequenceBuffer     string
+
+	// selection
+	currentRow       int
+	currentCol       int
+	editMode         bool
+	originalEditText string
+	selectedRows     map[int]bool
+	selectedCols     map[int]bool
+
+	// data
+	rows        *sql.Rows
+	pointer     int // pointer to the current record
+	records     [][]interface{}
+	whereClause string
+	orderBy     string
 }
 
 // PaletteMode represents the current mode of the command palette
@@ -68,6 +111,588 @@ func (m PaletteMode) Glyph() string {
 	}
 }
 
+func NewRelation(db *sql.DB, dbType DatabaseType, tableName string,
+	configCols []column, whereClause string, orderBy string, limit int) (*Relation, error) {
+
+	if tableName == "" {
+		return nil, fmt.Errorf("table name is required")
+	}
+
+	relation := &Relation{
+		DB:     db,
+		DBType: dbType,
+		name:   tableName,
+	}
+
+	if err := loadTableSchema(db, dbType, relation); err != nil {
+		return nil, fmt.Errorf("failed to load table schema: %w", err)
+	}
+
+	selected := []string{}
+	if configCols == nil {
+		for _, attr := range relation.attributes {
+			selected = append(selected, attr.Name)
+		}
+	} else {
+		// Create map of selected column names for efficient lookup
+		selectedMap := make(map[string]bool)
+		for _, col := range configCols {
+			selectedMap[col.Name] = true
+		}
+
+		// Add intersection of selectedColumns and lookupKey first
+		for _, key := range relation.lookupKey {
+			if selectedMap[key] {
+				selected = append(selected, key)
+			}
+		}
+
+		// Add remaining selected columns that aren't in lookupKey
+		for _, col := range configCols {
+			isLookupKey := false
+			for _, key := range relation.lookupKey {
+				if col.Name == key {
+					isLookupKey = true
+					break
+				}
+			}
+			if !isLookupKey {
+				selected = append(selected, col.Name)
+			}
+		}
+	}
+
+	// Return empty records for now - caller will populate
+	return relation, nil
+}
+
+func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error {
+	var query string
+
+	switch dbType {
+	case SQLite:
+		query = fmt.Sprintf("PRAGMA table_info(%s)", relation.name)
+	case PostgreSQL:
+		query = `SELECT column_name, data_type, is_nullable
+				FROM information_schema.columns
+				WHERE table_name = $1
+				ORDER BY ordinal_position`
+	case MySQL:
+		query = `SELECT column_name, data_type, is_nullable
+				FROM information_schema.columns
+				WHERE table_name = ?
+				ORDER BY ordinal_position`
+	}
+
+	rows, err := db.Query(query, relation.name)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var primaryKeyColumns []string
+	for rows.Next() {
+		var attr attribute
+		var nullable string
+
+		switch dbType {
+		case SQLite:
+			var cid int
+			var dfltValue sql.NullString
+			var pk int
+			err = rows.Scan(&cid, &attr.Name, &attr.Type, &nullable, &dfltValue, &pk)
+			attr.Nullable = nullable != "1"
+			if pk == 1 {
+				primaryKeyColumns = append(primaryKeyColumns, attr.Name)
+			}
+		case PostgreSQL, MySQL:
+			err = rows.Scan(&attr.Name, &attr.Type, &nullable)
+			attr.Nullable = strings.ToLower(nullable) == "yes"
+		}
+
+		if err != nil {
+			return err
+		}
+
+		relation.attributes = append(relation.attributes, attr)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Consolidated lookup key selection: choose shortest lookup key
+	lookupCols, err := getShortestLookupKey(db, dbType, relation.name)
+	if err != nil {
+		return err
+	}
+	primaryKeyColumns = lookupCols
+
+	// TODO if lookup key not found, use databaseFeature.systemId if available
+
+	// If not nullable unique constraint is found, error
+	if len(primaryKeyColumns) == 0 {
+		return fmt.Errorf("no primary key found")
+	}
+	relation.lookupKey = make([]string, len(primaryKeyColumns))
+	copy(relation.lookupKey, primaryKeyColumns)
+
+	// Build a quick name->index map for attribute lookup
+	attrIndex := make(map[string]int, len(relation.attributes))
+	for i, a := range relation.attributes {
+		attrIndex[a.Name] = i
+	}
+
+	// Populate foreign key column indices (supports multicolumn FKs)
+	switch dbType {
+	case SQLite:
+		// PRAGMA foreign_key_list returns one row per referencing column
+		// cols: id, seq, table, from, to, on_update, on_delete, match
+		fkRows, err := db.Query(fmt.Sprintf("PRAGMA foreign_key_list(%s)", relation.name))
+		if err == nil {
+			type fkCol struct {
+				seq int
+				col string
+			}
+			byID := map[int][]fkCol{}
+			for fkRows.Next() {
+				var id, seq int
+				var refTable, fromCol, toCol, onUpd, onDel, match string
+				if scanErr := fkRows.Scan(&id, &seq, &refTable, &fromCol, &toCol, &onUpd, &onDel, &match); scanErr != nil {
+					continue
+				}
+				byID[id] = append(byID[id], fkCol{seq: seq, col: fromCol})
+			}
+			fkRows.Close()
+			// Assemble ordered index slices
+			for _, cols := range byID {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].seq < cols[j].seq })
+				idxs := make([]int, 0, len(cols))
+				valid := true
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						idxs = append(idxs, idx)
+					} else {
+						valid = false
+						break
+					}
+				}
+				if valid && len(idxs) > 0 {
+					relation.references = append(relation.references, idxs)
+				}
+			}
+		}
+
+	case PostgreSQL:
+		// Use pg_catalog to get correct column order within FK
+		schema := "public"
+		rel := relation.name
+		if dot := strings.IndexByte(rel, '.'); dot != -1 {
+			schema = rel[:dot]
+			rel = rel[dot+1:]
+		}
+		fkQuery := `
+            SELECT con.oid::text AS id, att.attname AS col, u.ord AS ord
+            FROM pg_constraint con
+            JOIN unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord) ON true
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = u.attnum
+            WHERE con.contype = 'f' AND rel.relname = $1 AND nsp.nspname = $2
+            ORDER BY con.oid, u.ord`
+		fkRows, err := db.Query(fkQuery, rel, schema)
+		if err == nil {
+			type fkCol struct {
+				ord int
+				col string
+			}
+			byID := map[string][]fkCol{}
+			for fkRows.Next() {
+				var id, col string
+				var ord int
+				if scanErr := fkRows.Scan(&id, &col, &ord); scanErr != nil {
+					continue
+				}
+				byID[id] = append(byID[id], fkCol{ord: ord, col: col})
+			}
+			fkRows.Close()
+			for _, cols := range byID {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
+				idxs := make([]int, 0, len(cols))
+				valid := true
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						idxs = append(idxs, idx)
+					} else {
+						valid = false
+						break
+					}
+				}
+				if valid && len(idxs) > 0 {
+					relation.references = append(relation.references, idxs)
+				}
+			}
+		}
+
+	case MySQL:
+		// Use information_schema to identify FK columns with ordering
+		fkQuery := `
+            SELECT CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`
+		fkRows, err := db.Query(fkQuery, relation.name)
+		if err == nil {
+			type fkCol struct {
+				ord int
+				col string
+			}
+			byName := map[string][]fkCol{}
+			for fkRows.Next() {
+				var cname, col string
+				var ord int
+				if scanErr := fkRows.Scan(&cname, &col, &ord); scanErr != nil {
+					continue
+				}
+				byName[cname] = append(byName[cname], fkCol{ord: ord, col: col})
+			}
+			fkRows.Close()
+			for _, cols := range byName {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
+				idxs := make([]int, 0, len(cols))
+				valid := true
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						idxs = append(idxs, idx)
+					} else {
+						valid = false
+						break
+					}
+				}
+				if valid && len(idxs) > 0 {
+					relation.references = append(relation.references, idxs)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// BuildUpdatePreview constructs a SQL UPDATE statement as a string with literal
+// values inlined for preview purposes. It mirrors UpdateDBValue but does not
+// execute any SQL. Intended only for UI preview.
+func (sheet *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, colName string, newValue string) string {
+	if rowIdx < 0 || rowIdx >= len(records) || len(sheet.lookupKey) == 0 {
+		return ""
+	}
+
+	// Convert raw text to DB-typed value (mirrors UpdateDBValue's toDBValue)
+	toDBValue := func(colName, raw string) interface{} {
+		var attrType string
+		for _, a := range sheet.attributes {
+			if a.Name == colName {
+				attrType = strings.ToLower(a.Type)
+				break
+			}
+		}
+		if raw == "\\N" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	// Render a literal value for preview (no placeholders)
+	literal := func(val interface{}, attrType string) string {
+		if val == nil {
+			return "NULL"
+		}
+		at := strings.ToLower(attrType)
+		switch v := val.(type) {
+		case bool:
+			if sheet.DBType == PostgreSQL {
+				if v {
+					return "TRUE"
+				}
+				return "FALSE"
+			}
+			if v {
+				return "1"
+			}
+			return "0"
+		case int64:
+			return strconv.FormatInt(v, 10)
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		case []byte:
+			s := string(v)
+			s = strings.ReplaceAll(s, "'", "''")
+			return "'" + s + "'"
+		case string:
+			// For non-numeric types, quote and escape
+			if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
+				return v
+			}
+			s := strings.ReplaceAll(v, "'", "''")
+			return "'" + s + "'"
+		default:
+			// Fallback to string formatting quoted
+			s := strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
+			return "'" + s + "'"
+		}
+	}
+
+	// Where clause with literal values
+	whereParts := make([]string, 0, len(sheet.lookupKey))
+	for _, lookupKeyCol := range sheet.lookupKey {
+		qKeyName := quoteIdent(sheet.DBType, lookupKeyCol)
+		// find attribute index
+		colIdx := -1
+		var attrType string
+		for j, attr := range sheet.attributes {
+			if attr.Name == lookupKeyCol {
+				colIdx = j
+				attrType = attr.Type
+				break
+			}
+		}
+		if colIdx == -1 {
+			return ""
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, literal(records[rowIdx][colIdx], attrType)))
+	}
+
+	// SET clause literal
+	var targetAttrType string
+	for _, a := range sheet.attributes {
+		if a.Name == colName {
+			targetAttrType = a.Type
+			break
+		}
+	}
+	valueArg := toDBValue(colName, newValue)
+	quotedTarget := quoteIdent(sheet.DBType, colName)
+	setClause := fmt.Sprintf("%s = %s", quotedTarget, literal(valueArg, targetAttrType))
+
+	returningCols := make([]string, len(sheet.attributes))
+	for i, attr := range sheet.attributes {
+		returningCols[i] = quoteIdent(sheet.DBType, attr.Name)
+	}
+	if len(sheet.lookupKey) == 1 {
+		if sheet.lookupKey[0] == "rowid" {
+			returningCols = append(returningCols, "rowid")
+		}
+		if sheet.lookupKey[0] == "ctid" {
+			returningCols = append(returningCols, "ctid")
+		}
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	quotedTable := quoteQualified(sheet.DBType, sheet.name)
+	useReturning := databaseFeatures[sheet.DBType].returning
+	if useReturning {
+		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+	}
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
+}
+
+// UpdateDBValue updates a single cell in the underlying database using the
+// sheet's lookupKey columns to identify the row. It returns the refreshed row
+// values ordered by sheet.selectCols. If no row is updated, returns an error.
+func (sheet *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName string, newValue string) ([]interface{}, error) {
+	if rowIdx < 0 || rowIdx >= len(records) {
+		return nil, fmt.Errorf("index out of range")
+	}
+	if len(sheet.lookupKey) == 0 {
+		return nil, fmt.Errorf("no lookup key configured")
+	}
+
+	// Convert string to appropriate DB value
+	toDBValue := func(colName, raw string) interface{} {
+		// Find attribute metadata
+		var attrType string
+		for _, a := range sheet.attributes {
+			if a.Name == colName {
+				attrType = strings.ToLower(a.Type)
+				break
+			}
+		}
+		if raw == "\\N" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	// Placeholder builder
+	placeholder := func(i int) string {
+		switch sheet.DBType {
+		case PostgreSQL:
+			return fmt.Sprintf("$%d", i)
+		default:
+			return "?"
+		}
+	}
+
+	// Build SET and WHERE clauses and args
+	valueArg := toDBValue(colName, newValue)
+	keyArgs := make([]interface{}, 0, len(sheet.lookupKey))
+	whereParts := make([]string, 0, len(sheet.lookupKey))
+	for i := range sheet.lookupKey {
+		lookupKeyCol := sheet.lookupKey[i]
+		qKeyName := quoteIdent(sheet.DBType, lookupKeyCol)
+		var ph string
+		if sheet.DBType == PostgreSQL {
+			ph = placeholder(2 + i)
+		} else {
+			ph = placeholder(0)
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, ph))
+		colIdx := -1
+		for j, attr := range sheet.attributes {
+			if attr.Name == lookupKeyCol {
+				colIdx = j
+				break
+			}
+		}
+		keyArgs = append(keyArgs, records[rowIdx][colIdx])
+	}
+
+	// SET clause placeholder
+	var setClause string
+	quotedTarget := quoteIdent(sheet.DBType, colName)
+	if sheet.DBType == PostgreSQL {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(1))
+	} else {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(0))
+	}
+
+	returningCols := make([]string, len(sheet.attributes))
+	for i, attr := range sheet.attributes {
+		returningCols[i] = quoteIdent(sheet.DBType, attr.Name)
+	}
+
+	if len(sheet.lookupKey) == 1 {
+		if sheet.lookupKey[0] == "rowid" {
+			returningCols = append(returningCols, "rowid")
+		}
+		if sheet.lookupKey[0] == "ctid" {
+			returningCols = append(returningCols, "ctid")
+		}
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	// Build full query
+	var query string
+	useReturning := databaseFeatures[sheet.DBType].returning
+	quotedTable := quoteQualified(sheet.DBType, sheet.name)
+	if useReturning {
+		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+		// Combine args: value + keys
+		args := make([]interface{}, 0, 1+len(keyArgs))
+		args = append(args, valueArg)
+		args = append(args, keyArgs...)
+
+		// Scan into pointers to capture returned values
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(returningCols))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+
+		if err := sheet.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("update failed: %w", err)
+		}
+		return rowVals, nil
+	} else {
+		// For database servers that don't support RETURNING, use a transaction
+		// to perform the UPDATE followed by a SELECT of the updated row.
+		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
+
+		// Begin transaction
+		tx, err := sheet.DB.Begin()
+		if err != nil {
+			return nil, fmt.Errorf("begin tx failed: %w", err)
+		}
+
+		// Execute update inside the transaction
+		args := make([]interface{}, 0, 1+len(keyArgs))
+		args = append(args, valueArg)
+		args = append(args, keyArgs...)
+		res, err := tx.Exec(query, args...)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("update failed: %w", err)
+		}
+		if ra, _ := res.RowsAffected(); ra == 0 {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("no rows updated")
+		}
+
+		// Re-select the updated row within the same transaction
+		selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s", returning, quotedTable, strings.Join(whereParts, " AND "))
+		row := tx.QueryRow(selQuery, keyArgs...)
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(rowVals))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+		if err := row.Scan(scanArgs...); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit failed: %w", err)
+		}
+		return rowVals, nil
+	}
+}
+
 func runEditor(config *Config, dbname, tablename string) error {
 	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
 
@@ -79,32 +704,17 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
+	tableDataHeight := terminalHeight - 5 // 5 lines for status bar, command palette, and padding
 
-	var configColumns []Column // TODO derive from config
-	sheet, err := NewSheet(db, dbType, tablename, configColumns, terminalHeight, config.Where, config.OrderBy, config.Limit)
+	var configColumns []column // TODO derive from config
+	relation, err := NewRelation(db, dbType, tablename, configColumns, config.Where, config.OrderBy, config.Limit)
 	if err != nil {
 		return err
 	}
 
-	// Register cleanup functions for signal handling
-	cleanupFunc := func() {
-		if sheet.filePath != "" {
-			if err := os.Remove(sheet.filePath); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to cleanup temp file %s: %v\n", sheet.filePath, err)
-			}
-		}
-		if sheet.StopChan != nil {
-			select {
-			case sheet.StopChan <- struct{}{}:
-			default:
-			}
-		}
-	}
-	addCleanup(cleanupFunc)
-
-	columns := make([]Column, len(sheet.attributes))
-	for i, attr := range sheet.attributes {
-		columns[i] = Column{
+	columns := make([]column, len(relation.attributes))
+	for i, attr := range relation.attributes {
+		columns[i] = column{
 			Name:  attr.Name,
 			Width: DefaultColumnWidth,
 		}
@@ -115,12 +725,17 @@ func runEditor(config *Config, dbname, tablename string) error {
 		pages:        tview.NewPages(),
 		table:        NewHeaderTable(),
 		columns:      columns,
-		sheet:        sheet,
+		relation:     relation,
 		config:       config,
+		dataHeight:   tableDataHeight,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
 		paletteMode:  PaletteModeDefault,
 		preEditMode:  PaletteModeDefault,
+		pointer:      0,
+		records:      make([][]interface{}, tableDataHeight),
+		whereClause:  config.Where,
+		orderBy:      config.OrderBy,
 	}
 
 	editor.setupTable()
@@ -128,7 +743,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor.setupStatusBar()
 	editor.setupCommandPalette()
 	editor.setupLayout()
-
+	editor.refreshData()
 	editor.pages.AddPage("table", editor.layout, true, true)
 
 	if err := editor.app.SetRoot(editor.pages, true).EnableMouse(true).Run(); err != nil {
@@ -148,7 +763,7 @@ func (e *Editor) setupTable() {
 	}
 
 	// Configure the table
-	e.table.SetHeaders(headers).SetData(e.sheet.records).SetSelectable(true)
+	e.table.SetHeaders(headers).SetData(e.records).SetSelectable(true)
 }
 
 func (e *Editor) setupStatusBar() {
@@ -298,7 +913,7 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(newRow, col)
 			return nil
 		case key == tcell.KeyPgDn:
-			newRow := min(len(e.sheet.records)-1, row+10)
+			newRow := min(len(e.records)-1, row+10)
 			e.table.Select(newRow, col)
 			return nil
 		case rune == ' ' && mod&tcell.ModShift != 0:
@@ -347,7 +962,7 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(0, col)
 			return nil
 		case key == tcell.KeyDown && mod&tcell.ModMeta != 0:
-			e.table.Select(len(e.sheet.records)-1, col)
+			e.table.Select(len(e.records)-1, col)
 			return nil
 		default:
 			if key == tcell.KeyRune && rune != 0 &&
@@ -412,7 +1027,7 @@ func (e *Editor) navigateTab(reverse bool) {
 	} else {
 		if col < len(e.columns)-1 {
 			e.table.Select(row, col+1)
-		} else if row < len(e.sheet.records)-1 {
+		} else if row < len(e.records)-1 {
 			e.table.Select(row+1, 0)
 		}
 	}
@@ -425,10 +1040,10 @@ func (e *Editor) enterEditMode(row, col int) {
 }
 
 func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string) {
-	if row < 0 || row >= len(e.sheet.records) {
+	if row < 0 || row >= len(e.records) {
 		return
 	}
-	if col < 0 || col >= len(e.columns) || col >= len(e.sheet.records[row]) {
+	if col < 0 || col >= len(e.columns) || col >= len(e.records[row]) {
 		return
 	}
 
@@ -666,31 +1281,31 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 
 // Update the command palette to show a SQL UPDATE preview while editing
 func (e *Editor) updateEditPreview(newText string) {
-	if e.sheet == nil || !e.editMode {
+	if e.relation == nil || !e.editMode {
 		return
 	}
 	colName := e.columns[e.currentCol].Name
-	preview := e.sheet.BuildUpdatePreview(e.currentRow, colName, newText)
+	preview := e.relation.BuildUpdatePreview(e.records, e.currentRow, colName, newText)
 	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
 	e.commandPalette.SetPlaceholder(preview)
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
 	// Basic bounds check against current data
-	if row < 0 || row >= len(e.sheet.records) || col < 0 || col >= len(e.sheet.records[row]) {
+	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.records[row]) {
 		e.exitEditMode()
 		return
 	}
 
 	// Delegate DB work to database.go
-	updated, err := e.sheet.UpdateDBValue(row, e.columns[col].Name, newValue)
+	updated, err := e.relation.UpdateDBValue(e.records, row, e.columns[col].Name, newValue)
 	if err != nil {
 		e.exitEditMode()
 		return
 	}
 	// Update in-memory data and refresh table
-	copy(e.sheet.records[row], updated)
-	e.table.SetData(e.sheet.records)
+	copy(e.records[row], updated)
+	e.table.SetData(e.records)
 	e.exitEditMode()
 }
 
@@ -739,30 +1354,22 @@ func (e *Editor) unhighlightColumn(col int) {
 }
 
 func (e *Editor) refreshData() {
-	panic("not implemented")
-	// terminalHeight := getTerminalHeight()
-	// data, err := NewSheet(e.db, e.sheet.DBType, e.sheet.table, e.columns, terminalHeight)
-	// if err != nil {
-	// 	return
-	// }
-
-	// e.sheet = data
-	// e.setupTable()
+	// TODO if editor.rows is nil, start a select cols from table query and fill in editor.records, starting from e.pointer index
 }
 
 func (e *Editor) moveRow(row, direction int) {
-	if row == 0 || row < 1 || row > len(e.sheet.records) {
+	if row == 0 || row < 1 || row > len(e.records) {
 		return
 	}
 
 	dataIdx := row - 1
 	newIdx := dataIdx + direction
 
-	if newIdx < 0 || newIdx >= len(e.sheet.records) {
+	if newIdx < 0 || newIdx >= len(e.records) {
 		return
 	}
 
-	e.sheet.records[dataIdx], e.sheet.records[newIdx] = e.sheet.records[newIdx], e.sheet.records[dataIdx]
+	e.records[dataIdx], e.records[newIdx] = e.records[newIdx], e.records[dataIdx]
 	e.setupTable()
 	e.table.Select(row+direction, e.currentCol)
 }
@@ -779,8 +1386,8 @@ func (e *Editor) moveColumn(col, direction int) {
 
 	e.columns[col], e.columns[newIdx] = e.columns[newIdx], e.columns[col]
 
-	for i := range e.sheet.records {
-		e.sheet.records[i][col], e.sheet.records[i][newIdx] = e.sheet.records[i][newIdx], e.sheet.records[i][col]
+	for i := range e.records {
+		e.records[i][col], e.records[i][newIdx] = e.records[i][newIdx], e.records[i][col]
 	}
 
 	e.setupTable()
@@ -827,13 +1434,13 @@ func formatCellValue(value interface{}) string {
 }
 
 func (e *Editor) isMultilineColumnType(col int) bool {
-	if e.sheet == nil || col < 0 || col >= len(e.columns) {
+	if e.relation == nil || col < 0 || col >= len(e.columns) {
 		return false
 	}
 
 	column := e.columns[col]
 	var attrType string
-	for _, attr := range e.sheet.attributes {
+	for _, attr := range e.relation.attributes {
 		if attr.Name == column.Name {
 			attrType = attr.Type
 			break

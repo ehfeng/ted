@@ -13,6 +13,9 @@ ted is a tabular editor. It displays database tables as markdown table and provi
 │  4 │ │ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │ 3 │
 │  5 │ │ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │ 4 │
 └────┴┄┴──────┴──────────┴────────────┴────────────┴───┘
+
+█ Status bar ████████████████████████████████████████████
+  Command bar
 ```
 
 ```sh
@@ -76,8 +79,7 @@ cmd/ctrl for mac/windows
 
 Lets you interact with elements, selecting cells, resizing or unhiding columns. Selecting a range of cells lets you copy a csv to clipboard.
 
-1. click: select cell, change column sort
-1. hidden columns to expand them
+1. cmd+click: select cell, change column sort, hidden columns to expand them
 1. scroll
 
 ## Table UI
