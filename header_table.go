@@ -25,6 +25,7 @@ type HeaderTable struct {
 	headerColor   tcell.Color
 	headerBgColor tcell.Color
 	separatorChar rune
+	bottom        bool
 
 	// Selection state
 	selectedRow int
@@ -136,15 +137,18 @@ func (ht *HeaderTable) Draw(screen tcell.Screen) {
 
 	// Draw data rows
 	dataRowsDrawn := 0
-	maxDataRows := height - 4 // Reserve space for borders and header
+	maxDataRows := height - 3 // Reserve space for top border and header
+	if ht.bottom {
+		maxDataRows = height - 4 // Reserve additional space for bottom border
+	}
 	for i := 0; i < len(ht.data) && dataRowsDrawn < maxDataRows && currentY < y+height; i++ {
 		ht.drawDataRow(screen, x, currentY, tableWidth, i)
 		currentY++
 		dataRowsDrawn++
 	}
 
-	// Draw bottom border
-	if currentY < y+height {
+	// Draw bottom border (if enabled)
+	if ht.bottom && currentY < y+height {
 		ht.drawBottomBorder(screen, x, currentY, tableWidth)
 	}
 }

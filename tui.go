@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/gdamore/tcell/v2"
@@ -49,13 +50,12 @@ type attribute struct {
 
 // columns are display, relation.attributes are the database attributes
 type Editor struct {
-	app        *tview.Application
-	pages      *tview.Pages
-	table      *HeaderTable
-	columns    []column
-	dataHeight int
-	relation   *Relation
-	config     *Config
+	app      *tview.Application
+	pages    *tview.Pages
+	table    *HeaderTable
+	columns  []column
+	relation *Relation
+	config   *Config
 
 	statusBar               *tview.TextView
 	commandPalette          *tview.InputField
@@ -77,10 +77,14 @@ type Editor struct {
 
 	// data
 	rows        *sql.Rows
-	pointer     int // pointer to the current record
-	records     [][]interface{}
+	pointer     int             // pointer to the current record
+	records     [][]interface{} // columns are keyed off e.columns
 	whereClause string
 	orderBy     string
+
+	// timer for auto-closing rows
+	rowsTimer      *time.Timer
+	rowsTimerReset chan struct{}
 }
 
 // PaletteMode represents the current mode of the command palette
@@ -112,7 +116,7 @@ func (m PaletteMode) Glyph() string {
 }
 
 func NewRelation(db *sql.DB, dbType DatabaseType, tableName string,
-	configCols []column, whereClause string, orderBy string, limit int) (*Relation, error) {
+	configCols []column) (*Relation, error) {
 
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
@@ -707,7 +711,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	tableDataHeight := terminalHeight - 5 // 5 lines for status bar, command palette, and padding
 
 	var configColumns []column // TODO derive from config
-	relation, err := NewRelation(db, dbType, tablename, configColumns, config.Where, config.OrderBy, config.Limit)
+	relation, err := NewRelation(db, dbType, tablename, configColumns)
 	if err != nil {
 		return err
 	}
@@ -727,7 +731,6 @@ func runEditor(config *Config, dbname, tablename string) error {
 		columns:      columns,
 		relation:     relation,
 		config:       config,
-		dataHeight:   tableDataHeight,
 		selectedRows: make(map[int]bool),
 		selectedCols: make(map[int]bool),
 		paletteMode:  PaletteModeDefault,
@@ -1304,8 +1307,15 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 		return
 	}
 	// Update in-memory data and refresh table
-	copy(e.records[row], updated)
-	e.table.SetData(e.records)
+	ptr := (row + e.pointer) % len(e.records)
+	e.records[ptr] = updated
+
+	normalizedRecords := make([][]interface{}, len(e.records))
+	for i := 0; i < len(e.records); i++ {
+		ptr := (i + e.pointer) % len(e.records)
+		normalizedRecords[i] = e.records[ptr]
+	}
+	e.table.SetData(normalizedRecords)
 	e.exitEditMode()
 }
 
@@ -1354,7 +1364,155 @@ func (e *Editor) unhighlightColumn(col int) {
 }
 
 func (e *Editor) refreshData() {
-	// TODO if editor.rows is nil, start a select cols from table query and fill in editor.records, starting from e.pointer index
+	if e.rows != nil || e.relation == nil || e.relation.DB == nil {
+		return
+	}
+
+	colCount := len(e.columns)
+	if colCount == 0 || len(e.records) == 0 {
+		return
+	}
+
+	selectCols := make([]string, colCount)
+	for i, col := range e.columns {
+		selectCols[i] = quoteIdent(e.relation.DBType, col.Name)
+	}
+
+	var builder strings.Builder
+	builder.Grow(64 + colCount*16) // rough heuristic to minimize reallocations
+	builder.WriteString("SELECT ")
+	builder.WriteString(strings.Join(selectCols, ", "))
+	builder.WriteString(" FROM ")
+	builder.WriteString(quoteQualified(e.relation.DBType, e.relation.name))
+
+	if e.whereClause != "" {
+		builder.WriteString(" WHERE ")
+		builder.WriteString(e.whereClause)
+	}
+	if e.orderBy != "" {
+		builder.WriteString(" ORDER BY ")
+		builder.WriteString(e.orderBy)
+	}
+
+	rows, err := e.relation.DB.Query(builder.String())
+	if err != nil {
+		if e.statusBar != nil {
+			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+		}
+		return
+	}
+	e.rows = rows
+
+	for i := 0; i < len(e.records); i++ {
+		ptr := (i + e.pointer) % len(e.records)
+		e.records[ptr] = make([]interface{}, len(e.columns))
+		scanTargets := make([]interface{}, len(e.columns))
+		for j := 0; j < len(e.columns); j++ {
+			scanTargets[j] = &e.records[ptr][j]
+		}
+		if rows.Next() {
+			if err := rows.Scan(scanTargets...); err != nil {
+				rows.Close()
+				e.rows = nil
+				if e.statusBar != nil {
+					e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+				}
+				return
+			}
+		}
+	}
+	if err := e.rows.Err(); err != nil {
+		if e.statusBar != nil {
+			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+		}
+		return
+	}
+	// Start interruptible timer
+	e.rowsTimerReset = make(chan struct{})
+	e.rowsTimer = time.AfterFunc(100*time.Millisecond, func() {
+		e.app.QueueUpdateDraw(func() {
+			e.stopRowsTimer()
+		})
+	})
+
+	// Timer goroutine to handle resets
+	go func() {
+		resetChan := e.rowsTimerReset
+		timer := e.rowsTimer
+		for {
+			select {
+			case <-resetChan:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(100 * time.Millisecond)
+			case <-timer.C:
+				return
+			}
+		}
+	}()
+
+	normalizedRecords := make([][]interface{}, len(e.records))
+	for i := 0; i < len(e.records); i++ {
+		ptr := (i + e.pointer) % len(e.records)
+		normalizedRecords[i] = e.records[ptr]
+	}
+	e.table.SetData(normalizedRecords)
+}
+
+// nextRows fetches the next i rows from e.rows and resets the auto-close timer
+func (e *Editor) nextRows(i int) error {
+	if e.rows == nil {
+		// TODO re-initiate query
+	}
+
+	// Signal timer reset
+	if e.rowsTimerReset != nil {
+		select {
+		case e.rowsTimerReset <- struct{}{}:
+		default:
+		}
+	}
+
+	colCount := len(e.columns)
+	if colCount == 0 {
+		return nil
+	}
+
+	scanTargets := make([]interface{}, colCount)
+
+	for n := 0; n < i && e.rows.Next(); n++ {
+		row := make([]interface{}, colCount)
+		for j := 0; j < colCount; j++ {
+			scanTargets[j] = &row[j]
+		}
+		if err := e.rows.Scan(scanTargets...); err != nil {
+			return err
+		}
+		e.records = append(e.records, row)
+		e.pointer++
+	}
+
+	return e.rows.Err()
+}
+
+// stopRowsTimer stops the timer and closes the rows if active
+func (e *Editor) stopRowsTimer() {
+	if e.rowsTimer != nil {
+		e.rowsTimer.Stop()
+		e.rowsTimer = nil
+	}
+	if e.rowsTimerReset != nil {
+		close(e.rowsTimerReset)
+		e.rowsTimerReset = nil
+	}
+	if e.rows != nil {
+		_ = e.rows.Close()
+		e.rows = nil
+	}
 }
 
 func (e *Editor) moveRow(row, direction int) {

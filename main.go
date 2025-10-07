@@ -65,7 +65,6 @@ Examples:
 			Command:        command,
 			Where:          where,
 			OrderBy:        orderBy,
-			Limit:          limitN,
 			DBTypeOverride: dbTypeOverride,
 		}
 

@@ -21,7 +21,6 @@ type Config struct {
 	Command  string
 	Where    string
 	OrderBy  string
-	Limit    int
 	// DBTypeOverride allows explicitly selecting the database type via flags
 	DBTypeOverride *DatabaseType
 }
