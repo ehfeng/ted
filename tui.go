@@ -26,10 +26,12 @@ type Relation struct {
 	DBType DatabaseType
 
 	// name metadata
-	name       string
-	lookupKey  []string
-	attributes []attribute
-	// references attributes indices
+	name           string
+	lookupKey      []string
+	attributes     map[string]attribute
+	attributeOrder []string
+	attributeIndex map[string]int
+	// attributes indices
 	uniques    [][]int
 	references [][]int
 }
@@ -43,12 +45,12 @@ type column struct {
 
 type attribute struct {
 	Name      string
-	Type      string // TODO enum, composite types
+	Type      string
 	Nullable  bool
 	Generated bool // TODO if computed column, read-only
 }
 
-// columns are display, relation.attributes are the database attributes
+// columns are display, relation.attributes stores the database attributes
 type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
@@ -123,9 +125,11 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string,
 	}
 
 	relation := &Relation{
-		DB:     db,
-		DBType: dbType,
-		name:   tableName,
+		DB:             db,
+		DBType:         dbType,
+		name:           tableName,
+		attributes:     make(map[string]attribute),
+		attributeIndex: make(map[string]int),
 	}
 
 	if err := loadTableSchema(db, dbType, relation); err != nil {
@@ -134,9 +138,7 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string,
 
 	selected := []string{}
 	if configCols == nil {
-		for _, attr := range relation.attributes {
-			selected = append(selected, attr.Name)
-		}
+		selected = append(selected, relation.attributeOrder...)
 	} else {
 		// Create map of selected column names for efficient lookup
 		selectedMap := make(map[string]bool)
@@ -166,7 +168,6 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string,
 		}
 	}
 
-	// Return empty records for now - caller will populate
 	return relation, nil
 }
 
@@ -194,6 +195,10 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 	}
 	defer rows.Close()
 
+	relation.attributes = make(map[string]attribute)
+	relation.attributeOrder = relation.attributeOrder[:0]
+	relation.attributeIndex = make(map[string]int)
+
 	var primaryKeyColumns []string
 	for rows.Next() {
 		var attr attribute
@@ -218,7 +223,10 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 			return err
 		}
 
-		relation.attributes = append(relation.attributes, attr)
+		idx := len(relation.attributeOrder)
+		relation.attributeOrder = append(relation.attributeOrder, attr.Name)
+		relation.attributes[attr.Name] = attr
+		relation.attributeIndex[attr.Name] = idx
 	}
 
 	if err := rows.Err(); err != nil {
@@ -242,10 +250,7 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 	copy(relation.lookupKey, primaryKeyColumns)
 
 	// Build a quick name->index map for attribute lookup
-	attrIndex := make(map[string]int, len(relation.attributes))
-	for i, a := range relation.attributes {
-		attrIndex[a.Name] = i
-	}
+	attrIndex := relation.attributeIndex
 
 	// Populate foreign key column indices (supports multicolumn FKs)
 	switch dbType {
@@ -392,12 +397,9 @@ func (sheet *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, c
 
 	// Convert raw text to DB-typed value (mirrors UpdateDBValue's toDBValue)
 	toDBValue := func(colName, raw string) interface{} {
-		var attrType string
-		for _, a := range sheet.attributes {
-			if a.Name == colName {
-				attrType = strings.ToLower(a.Type)
-				break
-			}
+		attrType := ""
+		if attr, ok := sheet.attributes[colName]; ok {
+			attrType = strings.ToLower(attr.Type)
 		}
 		if raw == "\\N" {
 			return nil
@@ -472,37 +474,33 @@ func (sheet *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, c
 	whereParts := make([]string, 0, len(sheet.lookupKey))
 	for _, lookupKeyCol := range sheet.lookupKey {
 		qKeyName := quoteIdent(sheet.DBType, lookupKeyCol)
-		// find attribute index
-		colIdx := -1
-		var attrType string
-		for j, attr := range sheet.attributes {
-			if attr.Name == lookupKeyCol {
-				colIdx = j
-				attrType = attr.Type
-				break
-			}
-		}
-		if colIdx == -1 {
+		idx, ok := sheet.attributeIndex[lookupKeyCol]
+		if !ok || rowIdx >= len(records) {
 			return ""
 		}
-		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, literal(records[rowIdx][colIdx], attrType)))
+		row := records[rowIdx]
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		attr, ok := sheet.attributes[lookupKeyCol]
+		if !ok {
+			return ""
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, literal(row[idx], attr.Type)))
 	}
 
 	// SET clause literal
-	var targetAttrType string
-	for _, a := range sheet.attributes {
-		if a.Name == colName {
-			targetAttrType = a.Type
-			break
-		}
+	targetAttrType := ""
+	if attr, ok := sheet.attributes[colName]; ok {
+		targetAttrType = attr.Type
 	}
 	valueArg := toDBValue(colName, newValue)
 	quotedTarget := quoteIdent(sheet.DBType, colName)
 	setClause := fmt.Sprintf("%s = %s", quotedTarget, literal(valueArg, targetAttrType))
 
-	returningCols := make([]string, len(sheet.attributes))
-	for i, attr := range sheet.attributes {
-		returningCols[i] = quoteIdent(sheet.DBType, attr.Name)
+	returningCols := make([]string, len(sheet.attributeOrder))
+	for i, name := range sheet.attributeOrder {
+		returningCols[i] = quoteIdent(sheet.DBType, name)
 	}
 	if len(sheet.lookupKey) == 1 {
 		if sheet.lookupKey[0] == "rowid" {
@@ -535,13 +533,9 @@ func (sheet *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colNam
 
 	// Convert string to appropriate DB value
 	toDBValue := func(colName, raw string) interface{} {
-		// Find attribute metadata
-		var attrType string
-		for _, a := range sheet.attributes {
-			if a.Name == colName {
-				attrType = strings.ToLower(a.Type)
-				break
-			}
+		attrType := ""
+		if attr, ok := sheet.attributes[colName]; ok {
+			attrType = strings.ToLower(attr.Type)
 		}
 		if raw == "\\N" {
 			return nil
@@ -596,14 +590,15 @@ func (sheet *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colNam
 			ph = placeholder(0)
 		}
 		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, ph))
-		colIdx := -1
-		for j, attr := range sheet.attributes {
-			if attr.Name == lookupKeyCol {
-				colIdx = j
-				break
-			}
+		colIdx, ok := sheet.attributeIndex[lookupKeyCol]
+		if !ok || rowIdx >= len(records) {
+			return nil, fmt.Errorf("lookup key column %s not found in records", lookupKeyCol)
 		}
-		keyArgs = append(keyArgs, records[rowIdx][colIdx])
+		row := records[rowIdx]
+		if colIdx < 0 || colIdx >= len(row) {
+			return nil, fmt.Errorf("lookup key column %s not loaded", lookupKeyCol)
+		}
+		keyArgs = append(keyArgs, row[colIdx])
 	}
 
 	// SET clause placeholder
@@ -615,9 +610,9 @@ func (sheet *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colNam
 		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(0))
 	}
 
-	returningCols := make([]string, len(sheet.attributes))
-	for i, attr := range sheet.attributes {
-		returningCols[i] = quoteIdent(sheet.DBType, attr.Name)
+	returningCols := make([]string, len(sheet.attributeOrder))
+	for i, name := range sheet.attributeOrder {
+		returningCols[i] = quoteIdent(sheet.DBType, name)
 	}
 
 	if len(sheet.lookupKey) == 1 {
@@ -708,7 +703,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
-	tableDataHeight := terminalHeight - 5 // 5 lines for status bar, command palette, and padding
+	tableDataHeight := terminalHeight - 5 // 5 lines for header, status bar, command palette
 
 	var configColumns []column // TODO derive from config
 	relation, err := NewRelation(db, dbType, tablename, configColumns)
@@ -716,10 +711,10 @@ func runEditor(config *Config, dbname, tablename string) error {
 		return err
 	}
 
-	columns := make([]column, len(relation.attributes))
-	for i, attr := range relation.attributes {
+	columns := make([]column, len(relation.attributeOrder))
+	for i, name := range relation.attributeOrder {
 		columns[i] = column{
-			Name:  attr.Name,
+			Name:  name,
 			Width: DefaultColumnWidth,
 		}
 	}
@@ -1597,12 +1592,9 @@ func (e *Editor) isMultilineColumnType(col int) bool {
 	}
 
 	column := e.columns[col]
-	var attrType string
-	for _, attr := range e.relation.attributes {
-		if attr.Name == column.Name {
-			attrType = attr.Type
-			break
-		}
+	attrType := ""
+	if attr, ok := e.relation.attributes[column.Name]; ok {
+		attrType = attr.Type
 	}
 
 	// Normalize type for consistent matching
