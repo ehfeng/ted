@@ -14,8 +14,8 @@ ted is a tabular editor. It displays database tables as markdown table and provi
 │  5 │ │ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │ 4 │
 └────┴┄┴──────┴──────────┴────────────┴────────────┴───┘
 
-█ Status bar ████████████████████████████████████████████
-  Command bar
+█Status bar██████████████████████████████████████████████
+ Command bar
 ```
 
 ```sh
@@ -79,7 +79,7 @@ cmd/ctrl for mac/windows
 
 Lets you interact with elements, selecting cells, resizing or unhiding columns. Selecting a range of cells lets you copy a csv to clipboard.
 
-1. cmd+click: select cell, change column sort, hidden columns to expand them
+1. click: select cell, change column sort, adjust col widths, show hidden cols
 1. scroll
 
 ## Table UI
@@ -110,7 +110,7 @@ During viewing, show column data type, constraints. During editing, input-specif
 - date time format
 - references: preview
 
-When highlighting or editing foreign key references, the status bar shows a logfmt preview. Say we highlight `accounts.owner`, which references the users table: `users: id=1 name='Eric' plan='free'…`.
+When highlighting or editing foreign key references, the status bar shows a logfmt preview. Say we highlight `accounts.owner`, which references the users table: `users: id=1 name='Eric' plan='free'…`. Multi-column references only work if both columns are shown. Show info message (other column hidden) otherwise.
 
 If the sheet does not have a unique index with not null columns or nulls not distinct, the status bar shows a warning upon opening the file or updating data. The associated records are read-only.
 
@@ -140,17 +140,17 @@ databases:
     user: [user] # optional, assumes system username
     dbname: [dbname] # opt, assumes name
 
-    users: # table
-      frozen: [id, name]
-      columns: # order and width
-        name # default
-        preferences: 20
-        project_cache: 0
+    tables:
+      users: # table
+        columns: # order and width
+          name # default
+          preferences: 20
+          project_cache: 0 # hidden
 
 null: <null> # default is \N
 ```
 
-`.ted.yaml` can be used to store table column order and width. All columns should appear by default with a width of 8. You can only hide columns, which displays like hidden spreadsheet columns: `◂│▸`. Those unicode characters are `cmd+click`-able to show column.
+`.ted.yaml` can be used to store table column order and width. All columns should appear by default with a width of 8. You can only hide columns, which displays like hidden spreadsheet columns: `│⁚│`. Those unicode characters are clickable to show column.
 
 All columns selected by default. Extra data from table columns shouldn't matter _that_ for this use case.
 
