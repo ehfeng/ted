@@ -932,12 +932,6 @@ func (e *Editor) setupKeyBindings() {
 		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0: // Ctrl+` sends BEL (0) or '`' depending on terminal
 			e.setPaletteMode(PaletteModeSQL, true)
 			return nil
-		case key == tcell.KeyUp && mod&tcell.ModAlt != 0:
-			e.moveRow(row, -1)
-			return nil
-		case key == tcell.KeyDown && mod&tcell.ModAlt != 0:
-			e.moveRow(row, 1)
-			return nil
 		case key == tcell.KeyLeft && mod&tcell.ModAlt != 0:
 			e.moveColumn(col, -1)
 			return nil
@@ -1508,23 +1502,6 @@ func (e *Editor) stopRowsTimer() {
 		_ = e.rows.Close()
 		e.rows = nil
 	}
-}
-
-func (e *Editor) moveRow(row, direction int) {
-	if row == 0 || row < 1 || row > len(e.records) {
-		return
-	}
-
-	dataIdx := row - 1
-	newIdx := dataIdx + direction
-
-	if newIdx < 0 || newIdx >= len(e.records) {
-		return
-	}
-
-	e.records[dataIdx], e.records[newIdx] = e.records[newIdx], e.records[dataIdx]
-	e.setupTable()
-	e.table.Select(row+direction, e.currentCol)
 }
 
 func (e *Editor) moveColumn(col, direction int) {

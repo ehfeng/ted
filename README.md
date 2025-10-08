@@ -65,12 +65,11 @@ cmd/ctrl for mac/windows
 ### Data
 
 1. enter: edit/down/new row (if at bottom)
-1. esc: exit from editing, discarding changes
 1. shift+enter: edit/up (if at top)
+1. esc: exit from editing, discarding changes
 1. shift+del: delete row (shift+space selects row in Excel)
-1. cmd+r: refresh data
-1. cmd+f: find
-1. alt+↑/↓: rearranges row order
+1. ctrl+r: refresh data
+1. ctrl+f: LIKE 'token%` search
 1. alt+←/→: rearranges column order
 1. ctrl+del: hides column
 1. ctrl+</>: increase/decrease column width
