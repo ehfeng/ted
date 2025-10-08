@@ -28,34 +28,36 @@ type Relation struct {
 	// name metadata
 	name           string
 	lookupKey      []string
-	attributes     map[string]attribute
+	attributes     map[string]Attribute
 	attributeOrder []string
 	attributeIndex map[string]int
-	// attributes indices
-	uniques    [][]int
-	references [][]int
+	// { foreigntable: { attr index: foreign column } }
+	references map[string]map[int]string
 }
 
 // this is a config concept
-// width = 0 means column is not selected
-type column struct {
+// width = 0 means Column is not selected
+type Column struct {
 	Name  string
 	Width int
 }
 
-type attribute struct {
+type Attribute struct {
 	Name      string
 	Type      string
 	Nullable  bool
-	Generated bool // TODO if computed column, read-only
+	Reference string // foreign table name
+	Generated bool   // TODO if computed column, read-only
 }
 
 // columns are display, relation.attributes stores the database attributes
+// lookup key is unique: it's always selected
+// if a multicolumn reference is selected, all columns in the reference are selected
 type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
 	table    *HeaderTable
-	columns  []column
+	columns  []Column
 	relation *Relation
 	config   *Config
 
@@ -77,7 +79,7 @@ type Editor struct {
 	selectedRows     map[int]bool
 	selectedCols     map[int]bool
 
-	// data
+	// data, records is a circular buffer
 	rows        *sql.Rows
 	pointer     int             // pointer to the current record
 	records     [][]interface{} // columns are keyed off e.columns
@@ -118,7 +120,7 @@ func (m PaletteMode) Glyph() string {
 }
 
 func NewRelation(db *sql.DB, dbType DatabaseType, tableName string,
-	configCols []column) (*Relation, error) {
+	configCols []Column) (*Relation, error) {
 
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
@@ -128,8 +130,9 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string,
 		DB:             db,
 		DBType:         dbType,
 		name:           tableName,
-		attributes:     make(map[string]attribute),
+		attributes:     make(map[string]Attribute),
 		attributeIndex: make(map[string]int),
+		references:     make(map[string]map[int]string),
 	}
 
 	if err := loadTableSchema(db, dbType, relation); err != nil {
@@ -195,13 +198,13 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 	}
 	defer rows.Close()
 
-	relation.attributes = make(map[string]attribute)
+	relation.attributes = make(map[string]Attribute)
 	relation.attributeOrder = relation.attributeOrder[:0]
 	relation.attributeIndex = make(map[string]int)
 
 	var primaryKeyColumns []string
 	for rows.Next() {
-		var attr attribute
+		var attr Attribute
 		var nullable string
 
 		switch dbType {
@@ -260,8 +263,10 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 		fkRows, err := db.Query(fmt.Sprintf("PRAGMA foreign_key_list(%s)", relation.name))
 		if err == nil {
 			type fkCol struct {
-				seq int
-				col string
+				seq      int
+				col      string
+				toCol    string
+				refTable string
 			}
 			byID := map[int][]fkCol{}
 			for fkRows.Next() {
@@ -270,24 +275,28 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 				if scanErr := fkRows.Scan(&id, &seq, &refTable, &fromCol, &toCol, &onUpd, &onDel, &match); scanErr != nil {
 					continue
 				}
-				byID[id] = append(byID[id], fkCol{seq: seq, col: fromCol})
+				byID[id] = append(byID[id], fkCol{seq: seq, col: fromCol, toCol: toCol, refTable: refTable})
 			}
 			fkRows.Close()
-			// Assemble ordered index slices
+			// Build references map and update attributes
 			for _, cols := range byID {
 				sort.Slice(cols, func(i, j int) bool { return cols[i].seq < cols[j].seq })
-				idxs := make([]int, 0, len(cols))
-				valid := true
+				if len(cols) == 0 {
+					continue
+				}
+				refTable := cols[0].refTable
+				if relation.references[refTable] == nil {
+					relation.references[refTable] = make(map[int]string)
+				}
 				for _, c := range cols {
 					if idx, ok := attrIndex[c.col]; ok {
-						idxs = append(idxs, idx)
-					} else {
-						valid = false
-						break
+						relation.references[refTable][idx] = c.toCol
+						// Update attribute with reference info
+						if attr, exists := relation.attributes[c.col]; exists {
+							attr.Reference = refTable
+							relation.attributes[c.col] = attr
+						}
 					}
-				}
-				if valid && len(idxs) > 0 {
-					relation.references = append(relation.references, idxs)
 				}
 			}
 		}
@@ -301,44 +310,54 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 			rel = rel[dot+1:]
 		}
 		fkQuery := `
-            SELECT con.oid::text AS id, att.attname AS col, u.ord AS ord
+            SELECT con.oid::text AS id, att.attname AS col, u.ord AS ord,
+                   frel.relname AS ref_table, fatt.attname AS ref_col
             FROM pg_constraint con
             JOIN unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord) ON true
             JOIN pg_class rel ON rel.oid = con.conrelid
             JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
             JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = u.attnum
+            JOIN pg_class frel ON frel.oid = con.confrelid
+            JOIN unnest(con.confkey) WITH ORDINALITY AS fu(attnum, ord) ON fu.ord = u.ord
+            JOIN pg_attribute fatt ON fatt.attrelid = frel.oid AND fatt.attnum = fu.attnum
             WHERE con.contype = 'f' AND rel.relname = $1 AND nsp.nspname = $2
             ORDER BY con.oid, u.ord`
 		fkRows, err := db.Query(fkQuery, rel, schema)
 		if err == nil {
 			type fkCol struct {
-				ord int
-				col string
+				ord      int
+				col      string
+				refTable string
+				refCol   string
 			}
 			byID := map[string][]fkCol{}
 			for fkRows.Next() {
-				var id, col string
+				var id, col, refTable, refCol string
 				var ord int
-				if scanErr := fkRows.Scan(&id, &col, &ord); scanErr != nil {
+				if scanErr := fkRows.Scan(&id, &col, &ord, &refTable, &refCol); scanErr != nil {
 					continue
 				}
-				byID[id] = append(byID[id], fkCol{ord: ord, col: col})
+				byID[id] = append(byID[id], fkCol{ord: ord, col: col, refTable: refTable, refCol: refCol})
 			}
 			fkRows.Close()
 			for _, cols := range byID {
 				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
-				idxs := make([]int, 0, len(cols))
-				valid := true
+				if len(cols) == 0 {
+					continue
+				}
+				refTable := cols[0].refTable
+				if relation.references[refTable] == nil {
+					relation.references[refTable] = make(map[int]string)
+				}
 				for _, c := range cols {
 					if idx, ok := attrIndex[c.col]; ok {
-						idxs = append(idxs, idx)
-					} else {
-						valid = false
-						break
+						relation.references[refTable][idx] = c.refCol
+						// Update attribute with reference info
+						if attr, exists := relation.attributes[c.col]; exists {
+							attr.Reference = refTable
+							relation.attributes[c.col] = attr
+						}
 					}
-				}
-				if valid && len(idxs) > 0 {
-					relation.references = append(relation.references, idxs)
 				}
 			}
 		}
@@ -346,40 +365,47 @@ func loadTableSchema(db *sql.DB, dbType DatabaseType, relation *Relation) error 
 	case MySQL:
 		// Use information_schema to identify FK columns with ordering
 		fkQuery := `
-            SELECT CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION
+            SELECT CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION,
+                   REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
             FROM information_schema.KEY_COLUMN_USAGE
             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
             ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`
 		fkRows, err := db.Query(fkQuery, relation.name)
 		if err == nil {
 			type fkCol struct {
-				ord int
-				col string
+				ord      int
+				col      string
+				refTable string
+				refCol   string
 			}
 			byName := map[string][]fkCol{}
 			for fkRows.Next() {
-				var cname, col string
+				var cname, col, refTable, refCol string
 				var ord int
-				if scanErr := fkRows.Scan(&cname, &col, &ord); scanErr != nil {
+				if scanErr := fkRows.Scan(&cname, &col, &ord, &refTable, &refCol); scanErr != nil {
 					continue
 				}
-				byName[cname] = append(byName[cname], fkCol{ord: ord, col: col})
+				byName[cname] = append(byName[cname], fkCol{ord: ord, col: col, refTable: refTable, refCol: refCol})
 			}
 			fkRows.Close()
 			for _, cols := range byName {
 				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
-				idxs := make([]int, 0, len(cols))
-				valid := true
+				if len(cols) == 0 {
+					continue
+				}
+				refTable := cols[0].refTable
+				if relation.references[refTable] == nil {
+					relation.references[refTable] = make(map[int]string)
+				}
 				for _, c := range cols {
 					if idx, ok := attrIndex[c.col]; ok {
-						idxs = append(idxs, idx)
-					} else {
-						valid = false
-						break
+						relation.references[refTable][idx] = c.refCol
+						// Update attribute with reference info
+						if attr, exists := relation.attributes[c.col]; exists {
+							attr.Reference = refTable
+							relation.attributes[c.col] = attr
+						}
 					}
-				}
-				if valid && len(idxs) > 0 {
-					relation.references = append(relation.references, idxs)
 				}
 			}
 		}
@@ -705,15 +731,15 @@ func runEditor(config *Config, dbname, tablename string) error {
 	terminalHeight := getTerminalHeight()
 	tableDataHeight := terminalHeight - 5 // 5 lines for header, status bar, command palette
 
-	var configColumns []column // TODO derive from config
+	var configColumns []Column // TODO derive from config
 	relation, err := NewRelation(db, dbType, tablename, configColumns)
 	if err != nil {
 		return err
 	}
 
-	columns := make([]column, len(relation.attributeOrder))
+	columns := make([]Column, len(relation.attributeOrder))
 	for i, name := range relation.attributeOrder {
-		columns[i] = column{
+		columns[i] = Column{
 			Name:  name,
 			Width: DefaultColumnWidth,
 		}
@@ -1367,23 +1393,15 @@ func (e *Editor) refreshData() {
 		selectCols[i] = quoteIdent(e.relation.DBType, col.Name)
 	}
 
-	var builder strings.Builder
-	builder.Grow(64 + colCount*16) // rough heuristic to minimize reallocations
-	builder.WriteString("SELECT ")
-	builder.WriteString(strings.Join(selectCols, ", "))
-	builder.WriteString(" FROM ")
-	builder.WriteString(quoteQualified(e.relation.DBType, e.relation.name))
-
-	if e.whereClause != "" {
-		builder.WriteString(" WHERE ")
-		builder.WriteString(e.whereClause)
-	}
-	if e.orderBy != "" {
-		builder.WriteString(" ORDER BY ")
-		builder.WriteString(e.orderBy)
+	selectQuery, err := selectQuery(e.relation.DBType, e.relation.name, selectCols, e.whereClause, e.orderBy, nil)
+	if err != nil {
+		if e.statusBar != nil {
+			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+		}
+		return
 	}
 
-	rows, err := e.relation.DB.Query(builder.String())
+	rows, err := e.relation.DB.Query(selectQuery)
 	if err != nil {
 		if e.statusBar != nil {
 			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
@@ -1391,24 +1409,24 @@ func (e *Editor) refreshData() {
 		return
 	}
 	e.rows = rows
+	e.pointer = 0 // Reset pointer for fresh load
 
-	for i := 0; i < len(e.records); i++ {
-		ptr := (i + e.pointer) % len(e.records)
-		e.records[ptr] = make([]interface{}, len(e.columns))
+	// Load initial rows up to the preallocated size
+	for i := 0; i < len(e.records) && rows.Next(); i++ {
+		e.records[i] = make([]interface{}, len(e.columns))
 		scanTargets := make([]interface{}, len(e.columns))
 		for j := 0; j < len(e.columns); j++ {
-			scanTargets[j] = &e.records[ptr][j]
+			scanTargets[j] = &e.records[i][j]
 		}
-		if rows.Next() {
-			if err := rows.Scan(scanTargets...); err != nil {
-				rows.Close()
-				e.rows = nil
-				if e.statusBar != nil {
-					e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
-				}
-				return
+		if err := rows.Scan(scanTargets...); err != nil {
+			rows.Close()
+			e.rows = nil
+			if e.statusBar != nil {
+				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
 			}
+			return
 		}
+		e.pointer++
 	}
 	if err := e.rows.Err(); err != nil {
 		if e.statusBar != nil {
@@ -1444,18 +1462,13 @@ func (e *Editor) refreshData() {
 		}
 	}()
 
-	normalizedRecords := make([][]interface{}, len(e.records))
-	for i := 0; i < len(e.records); i++ {
-		ptr := (i + e.pointer) % len(e.records)
-		normalizedRecords[i] = e.records[ptr]
-	}
-	e.table.SetData(normalizedRecords)
+	e.table.SetData(e.records)
 }
 
 // nextRows fetches the next i rows from e.rows and resets the auto-close timer
 func (e *Editor) nextRows(i int) error {
 	if e.rows == nil {
-		// TODO re-initiate query
+		// TODO re-initiate query with last key as where clause
 	}
 
 	// Signal timer reset
@@ -1481,11 +1494,21 @@ func (e *Editor) nextRows(i int) error {
 		if err := e.rows.Scan(scanTargets...); err != nil {
 			return err
 		}
-		e.records = append(e.records, row)
+		// Expand records slice if needed
+		if e.pointer >= len(e.records) {
+			e.records = append(e.records, row)
+		} else {
+			e.records[e.pointer] = row
+		}
 		e.pointer++
 	}
 
 	return e.rows.Err()
+}
+
+// updateTableData refreshes the table view with current records data
+func (e *Editor) updateTableData() {
+	e.table.SetData(e.records)
 }
 
 // stopRowsTimer stops the timer and closes the rows if active

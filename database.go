@@ -10,6 +10,36 @@ import (
 
 // database functions
 
+func selectQuery(dbType DatabaseType, tableName string, columns []string, whereClause string, orderBy string, start *string) (string, error) {
+	colLength := 0
+	for _, col := range columns {
+		colLength += len(col) + 2
+	}
+	var builder strings.Builder
+	builder.Grow(len(tableName) + 16 + colLength + len(whereClause) + len(orderBy))
+
+	builder.WriteString("SELECT ")
+	builder.WriteString(strings.Join(columns, ", "))
+	builder.WriteString(" FROM ")
+	builder.WriteString(quoteQualified(dbType, tableName))
+
+	if whereClause != "" {
+		builder.WriteString(" WHERE ")
+		builder.WriteString(whereClause)
+	}
+
+	if start != nil {
+		builder.WriteString(" AND ")
+		builder.WriteString(*start)
+	}
+
+	if orderBy != "" {
+		builder.WriteString(" ORDER BY ")
+		builder.WriteString(orderBy)
+	}
+	return builder.String(), nil
+}
+
 // getShortestLookupKey returns the best lookup key for a table by considering
 // the primary key and all suitable unique constraints, ranking by:
 // - fewest columns
