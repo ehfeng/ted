@@ -7,12 +7,12 @@ ted is a tabular editor. It displays database tables as markdown table and provi
 ```
  ◔ created_at > now() - interval '7 days' ⊗
  ⇅ name DESC, org_id ASC ⊗
-┌────┬┄┬──────┬──────────┬────────────┬────────────┬───┐
-│ id │⁚│ name │ email    │ created_at │ updated_at │ o…│
-┝━━━━┿┅┿━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━┥
-│  4 │ │ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │ 3 │
-│  5 │ │ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │ 4 │
-└────┴┄┴──────┴──────────┴────────────┴────────────┴───┘
+┌────┰──────┬──────────┬────────────┬────────────┬────┬┄┐
+│ id ┃ name │ email    │ created_at │ updated_at │ or…│◂│
+┝━━━━╋━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━┿┅┥
+│  1 ┃ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │  3 │⁚│
+│  2 ┃ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │…24 │⁚│
+└────┸──────┴──────────┴────────────┴────────────┴────┴┄┘
 
 █Status bar██████████████████████████████████████████████
  Command bar
@@ -99,9 +99,7 @@ JSON is treated as text. JSONB is pretty printed.
 
 Status bar in the bottom row where contextual information can be displayed, like warnings, errors, contextual information.
 
-The status bar default shows the current database.table and the row number/total in the bottom right.
-
-During viewing, show column data type, constraints. During editing, input-specific context, including whether input is "valid"
+In view mode, show column data type, constraints. In editing mode, input-specific context, including whether input is "valid"
 
 - run check constraints, test against unique index
 - valid int, bool, float, json
@@ -111,9 +109,13 @@ During viewing, show column data type, constraints. During editing, input-specif
 
 When highlighting or editing foreign key references, the status bar shows a logfmt preview. Say we highlight `accounts.owner`, which references the users table: `users: id=1 name='Eric' plan='free'…`. Multi-column references only work if both columns are shown. Show info message (other column hidden) otherwise.
 
-If the sheet does not have a unique index with not null columns or nulls not distinct, the status bar shows a warning upon opening the file or updating data. The associated records are read-only.
+If a table lacks a key (no primary, unique index with not null columns or nulls not distinct), the status bar shows read-only and reason.
 
 If an update fails, status bar shows error message.
+
+## Command palette
+
+At the bottom, command input. Command palette has different modes: sql, goto, etc.
 
 ## Data flow
 
@@ -140,11 +142,12 @@ databases:
     dbname: [dbname] # opt, assumes name
 
     tables:
-      users: # table
-        columns: # order and width
-          name # default
-          preferences: 20
-          project_cache: 0 # hidden
+      events:
+        key: user_id,created # unique key if primary missing
+        columns: # setting order
+          event_type # default
+          properties: 10 # width
+          client: 0 # hidden
 
 null: <null> # default is \N
 ```
