@@ -8,6 +8,31 @@ import (
 	"strings"
 )
 
+// database: table, attribute, record
+// sheet: sheet, column, row
+// row id should be file line number, different than lookup key
+type Relation struct {
+	DB     *sql.DB
+	DBType DatabaseType
+
+	// name metadata
+	name           string
+	key            []string
+	attributes     map[string]Attribute
+	attributeOrder []string
+	attributeIndex map[string]int
+	// { foreigntable: { attr index: foreign column } }
+	references map[string]map[int]string
+}
+
+type Attribute struct {
+	Name      string
+	Type      string
+	Nullable  bool
+	Reference string // foreign table name
+	Generated bool   // TODO if computed column, read-only
+}
+
 // database functions
 
 func selectQuery(dbType DatabaseType, tableName string, columns []string, whereClause string, orderBy string, start *string) (string, error) {
@@ -365,6 +390,584 @@ func getShortestLookupKey(db *sql.DB, dbType DatabaseType, tableName string) ([]
 		return candidates[i].name < candidates[j].name
 	})
 	return candidates[0].cols, nil
+}
+
+func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, error) {
+	if tableName == "" {
+		return nil, fmt.Errorf("table name is required")
+	}
+
+	wrapErr := func(err error) (*Relation, error) {
+		return nil, fmt.Errorf("failed to load table schema: %w", err)
+	}
+
+	relation := &Relation{
+		DB:             db,
+		DBType:         dbType,
+		name:           tableName,
+		attributes:     make(map[string]Attribute),
+		attributeIndex: make(map[string]int),
+		references:     make(map[string]map[int]string),
+	}
+
+	var (
+		query string
+		args  []interface{}
+	)
+
+	switch dbType {
+	case SQLite:
+		query = fmt.Sprintf("PRAGMA table_info(%s)", relation.name)
+	case PostgreSQL:
+		query = `SELECT column_name, data_type, is_nullable
+				FROM information_schema.columns
+				WHERE table_name = $1
+				ORDER BY ordinal_position`
+		args = append(args, relation.name)
+	case MySQL:
+		query = `SELECT column_name, data_type, is_nullable
+				FROM information_schema.columns
+				WHERE table_name = ?
+				ORDER BY ordinal_position`
+		args = append(args, relation.name)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return wrapErr(err)
+	}
+	defer rows.Close()
+
+	relation.attributes = make(map[string]Attribute)
+	relation.attributeOrder = relation.attributeOrder[:0]
+	relation.attributeIndex = make(map[string]int)
+
+	var primaryKeyColumns []string
+	for rows.Next() {
+		var attr Attribute
+		var nullable string
+
+		switch dbType {
+		case SQLite:
+			var cid int
+			var dfltValue sql.NullString
+			var pk int
+			err = rows.Scan(&cid, &attr.Name, &attr.Type, &nullable, &dfltValue, &pk)
+			attr.Nullable = nullable != "1"
+			if pk == 1 {
+				primaryKeyColumns = append(primaryKeyColumns, attr.Name)
+			}
+		case PostgreSQL, MySQL:
+			err = rows.Scan(&attr.Name, &attr.Type, &nullable)
+			attr.Nullable = strings.ToLower(nullable) == "yes"
+		}
+
+		if err != nil {
+			return wrapErr(err)
+		}
+
+		idx := len(relation.attributeOrder)
+		relation.attributeOrder = append(relation.attributeOrder, attr.Name)
+		relation.attributes[attr.Name] = attr
+		relation.attributeIndex[attr.Name] = idx
+	}
+
+	if err := rows.Err(); err != nil {
+		return wrapErr(err)
+	}
+
+	// Consolidated lookup key selection: choose shortest lookup key
+	lookupCols, err := getShortestLookupKey(db, dbType, relation.name)
+	if err != nil {
+		return wrapErr(err)
+	}
+	primaryKeyColumns = lookupCols
+
+	// TODO if lookup key not found, use databaseFeature.systemId if available
+
+	// If not nullable unique constraint is found, error
+	if len(primaryKeyColumns) == 0 {
+		return wrapErr(fmt.Errorf("no primary key found"))
+	}
+	relation.key = make([]string, len(primaryKeyColumns))
+	copy(relation.key, primaryKeyColumns)
+
+	// Build a quick name->index map for attribute lookup
+	attrIndex := relation.attributeIndex
+
+	// Populate foreign key column indices (supports multicolumn FKs)
+	switch dbType {
+	case SQLite:
+		// PRAGMA foreign_key_list returns one row per referencing column
+		// cols: id, seq, table, from, to, on_update, on_delete, match
+		fkRows, err := db.Query(fmt.Sprintf("PRAGMA foreign_key_list(%s)", relation.name))
+		if err == nil {
+			type fkCol struct {
+				seq      int
+				col      string
+				toCol    string
+				refTable string
+			}
+			byID := map[int][]fkCol{}
+			for fkRows.Next() {
+				var id, seq int
+				var refTable, fromCol, toCol, onUpd, onDel, match string
+				if scanErr := fkRows.Scan(&id, &seq, &refTable, &fromCol, &toCol, &onUpd, &onDel, &match); scanErr != nil {
+					continue
+				}
+				byID[id] = append(byID[id], fkCol{seq: seq, col: fromCol, toCol: toCol, refTable: refTable})
+			}
+			fkRows.Close()
+			// Build references map and update attributes
+			for _, cols := range byID {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].seq < cols[j].seq })
+				if len(cols) == 0 {
+					continue
+				}
+				refTable := cols[0].refTable
+				if relation.references[refTable] == nil {
+					relation.references[refTable] = make(map[int]string)
+				}
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						relation.references[refTable][idx] = c.toCol
+						// Update attribute with reference info
+						if attr, exists := relation.attributes[c.col]; exists {
+							attr.Reference = refTable
+							relation.attributes[c.col] = attr
+						}
+					}
+				}
+			}
+		}
+
+	case PostgreSQL:
+		// Use pg_catalog to get correct column order within FK
+		schema := "public"
+		rel := relation.name
+		if dot := strings.IndexByte(rel, '.'); dot != -1 {
+			schema = rel[:dot]
+			rel = rel[dot+1:]
+		}
+		fkQuery := `
+            SELECT con.oid::text AS id, att.attname AS col, u.ord AS ord,
+                   frel.relname AS ref_table, fatt.attname AS ref_col
+            FROM pg_constraint con
+            JOIN unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord) ON true
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = u.attnum
+            JOIN pg_class frel ON frel.oid = con.confrelid
+            JOIN unnest(con.confkey) WITH ORDINALITY AS fu(attnum, ord) ON fu.ord = u.ord
+            JOIN pg_attribute fatt ON fatt.attrelid = frel.oid AND fatt.attnum = fu.attnum
+            WHERE con.contype = 'f' AND rel.relname = $1 AND nsp.nspname = $2
+            ORDER BY con.oid, u.ord`
+		fkRows, err := db.Query(fkQuery, rel, schema)
+		if err == nil {
+			type fkCol struct {
+				ord      int
+				col      string
+				refTable string
+				refCol   string
+			}
+			byID := map[string][]fkCol{}
+			for fkRows.Next() {
+				var id, col, refTable, refCol string
+				var ord int
+				if scanErr := fkRows.Scan(&id, &col, &ord, &refTable, &refCol); scanErr != nil {
+					continue
+				}
+				byID[id] = append(byID[id], fkCol{ord: ord, col: col, refTable: refTable, refCol: refCol})
+			}
+			fkRows.Close()
+			for _, cols := range byID {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
+				if len(cols) == 0 {
+					continue
+				}
+				refTable := cols[0].refTable
+				if relation.references[refTable] == nil {
+					relation.references[refTable] = make(map[int]string)
+				}
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						relation.references[refTable][idx] = c.refCol
+						// Update attribute with reference info
+						if attr, exists := relation.attributes[c.col]; exists {
+							attr.Reference = refTable
+							relation.attributes[c.col] = attr
+						}
+					}
+				}
+			}
+		}
+
+	case MySQL:
+		// Use information_schema to identify FK columns with ordering
+		fkQuery := `
+            SELECT CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION,
+                   REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`
+		fkRows, err := db.Query(fkQuery, relation.name)
+		if err == nil {
+			type fkCol struct {
+				ord      int
+				col      string
+				refTable string
+				refCol   string
+			}
+			byName := map[string][]fkCol{}
+			for fkRows.Next() {
+				var cname, col, refTable, refCol string
+				var ord int
+				if scanErr := fkRows.Scan(&cname, &col, &ord, &refTable, &refCol); scanErr != nil {
+					continue
+				}
+				byName[cname] = append(byName[cname], fkCol{ord: ord, col: col, refTable: refTable, refCol: refCol})
+			}
+			fkRows.Close()
+			for _, cols := range byName {
+				sort.Slice(cols, func(i, j int) bool { return cols[i].ord < cols[j].ord })
+				if len(cols) == 0 {
+					continue
+				}
+				refTable := cols[0].refTable
+				if relation.references[refTable] == nil {
+					relation.references[refTable] = make(map[int]string)
+				}
+				for _, c := range cols {
+					if idx, ok := attrIndex[c.col]; ok {
+						relation.references[refTable][idx] = c.refCol
+						// Update attribute with reference info
+						if attr, exists := relation.attributes[c.col]; exists {
+							attr.Reference = refTable
+							relation.attributes[c.col] = attr
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return relation, nil
+}
+
+// BuildUpdatePreview constructs a SQL UPDATE statement as a string with literal
+// values inlined for preview purposes. It mirrors UpdateDBValue but does not
+// execute any SQL. Intended only for UI preview.
+func (rel *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, colName string, newValue string) string {
+	if rowIdx < 0 || rowIdx >= len(records) || len(rel.key) == 0 {
+		return ""
+	}
+
+	// Convert raw text to DB-typed value (mirrors UpdateDBValue's toDBValue)
+	toDBValue := func(colName, raw string) interface{} {
+		attrType := ""
+		if attr, ok := rel.attributes[colName]; ok {
+			attrType = strings.ToLower(attr.Type)
+		}
+		if raw == "\\N" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	// Render a literal value for preview (no placeholders)
+	literal := func(val interface{}, attrType string) string {
+		if val == nil {
+			return "NULL"
+		}
+		at := strings.ToLower(attrType)
+		switch v := val.(type) {
+		case bool:
+			if rel.DBType == PostgreSQL {
+				if v {
+					return "TRUE"
+				}
+				return "FALSE"
+			}
+			if v {
+				return "1"
+			}
+			return "0"
+		case int64:
+			return strconv.FormatInt(v, 10)
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		case []byte:
+			s := string(v)
+			s = strings.ReplaceAll(s, "'", "''")
+			return "'" + s + "'"
+		case string:
+			// For non-numeric types, quote and escape
+			if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
+				return v
+			}
+			s := strings.ReplaceAll(v, "'", "''")
+			return "'" + s + "'"
+		default:
+			// Fallback to string formatting quoted
+			s := strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
+			return "'" + s + "'"
+		}
+	}
+
+	// Where clause with literal values
+	whereParts := make([]string, 0, len(rel.key))
+	for _, lookupKeyCol := range rel.key {
+		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
+		idx, ok := rel.attributeIndex[lookupKeyCol]
+		if !ok || rowIdx >= len(records) {
+			return ""
+		}
+		row := records[rowIdx]
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		attr, ok := rel.attributes[lookupKeyCol]
+		if !ok {
+			return ""
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, literal(row[idx], attr.Type)))
+	}
+
+	// SET clause literal
+	targetAttrType := ""
+	if attr, ok := rel.attributes[colName]; ok {
+		targetAttrType = attr.Type
+	}
+	valueArg := toDBValue(colName, newValue)
+	quotedTarget := quoteIdent(rel.DBType, colName)
+	setClause := fmt.Sprintf("%s = %s", quotedTarget, literal(valueArg, targetAttrType))
+
+	returningCols := make([]string, len(rel.attributeOrder))
+	for i, name := range rel.attributeOrder {
+		returningCols[i] = quoteIdent(rel.DBType, name)
+	}
+	if len(rel.key) == 1 {
+		if rel.key[0] == "rowid" {
+			returningCols = append(returningCols, "rowid")
+		}
+		if rel.key[0] == "ctid" {
+			returningCols = append(returningCols, "ctid")
+		}
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	quotedTable := quoteQualified(rel.DBType, rel.name)
+	useReturning := databaseFeatures[rel.DBType].returning
+	if useReturning {
+		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+	}
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
+}
+
+// UpdateDBValue updates a single cell in the underlying database using the
+// relation's lookup key columns to identify the row. It returns the refreshed
+// row values ordered by relation.attributeOrder. If no row is updated, returns
+// an error.
+func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName string, newValue string) ([]interface{}, error) {
+	if rowIdx < 0 || rowIdx >= len(records) {
+		return nil, fmt.Errorf("index out of range")
+	}
+	if len(rel.key) == 0 {
+		return nil, fmt.Errorf("no lookup key configured")
+	}
+
+	// Convert string to appropriate DB value
+	toDBValue := func(colName, raw string) interface{} {
+		attrType := ""
+		if attr, ok := rel.attributes[colName]; ok {
+			attrType = strings.ToLower(attr.Type)
+		}
+		if raw == "\\N" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	// Placeholder builder
+	placeholder := func(i int) string {
+		switch rel.DBType {
+		case PostgreSQL:
+			return fmt.Sprintf("$%d", i)
+		default:
+			return "?"
+		}
+	}
+
+	// Build SET and WHERE clauses and args
+	valueArg := toDBValue(colName, newValue)
+	keyArgs := make([]interface{}, 0, len(rel.key))
+	whereParts := make([]string, 0, len(rel.key))
+	for i := range rel.key {
+		lookupKeyCol := rel.key[i]
+		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
+		var ph string
+		if rel.DBType == PostgreSQL {
+			ph = placeholder(2 + i)
+		} else {
+			ph = placeholder(0)
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, ph))
+		colIdx, ok := rel.attributeIndex[lookupKeyCol]
+		if !ok || rowIdx >= len(records) {
+			return nil, fmt.Errorf("lookup key column %s not found in records", lookupKeyCol)
+		}
+		row := records[rowIdx]
+		if colIdx < 0 || colIdx >= len(row) {
+			return nil, fmt.Errorf("lookup key column %s not loaded", lookupKeyCol)
+		}
+		keyArgs = append(keyArgs, row[colIdx])
+	}
+
+	// SET clause placeholder
+	var setClause string
+	quotedTarget := quoteIdent(rel.DBType, colName)
+	if rel.DBType == PostgreSQL {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(1))
+	} else {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(0))
+	}
+
+	returningCols := make([]string, len(rel.attributeOrder))
+	for i, name := range rel.attributeOrder {
+		returningCols[i] = quoteIdent(rel.DBType, name)
+	}
+
+	if len(rel.key) == 1 {
+		if rel.key[0] == "rowid" {
+			returningCols = append(returningCols, "rowid")
+		}
+		if rel.key[0] == "ctid" {
+			returningCols = append(returningCols, "ctid")
+		}
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	// Build full query
+	var query string
+	useReturning := databaseFeatures[rel.DBType].returning
+	quotedTable := quoteQualified(rel.DBType, rel.name)
+	if useReturning {
+		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+		// Combine args: value + keys
+		args := make([]interface{}, 0, 1+len(keyArgs))
+		args = append(args, valueArg)
+		args = append(args, keyArgs...)
+
+		// Scan into pointers to capture returned values
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(returningCols))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+
+		if err := rel.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("update failed: %w", err)
+		}
+		return rowVals, nil
+	}
+
+	// For database servers that don't support RETURNING, use a transaction
+	// to perform the UPDATE followed by a SELECT of the updated row.
+	query = fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
+
+	// Begin transaction
+	tx, err := rel.DB.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx failed: %w", err)
+	}
+
+	// Execute update inside the transaction
+	args := make([]interface{}, 0, 1+len(keyArgs))
+	args = append(args, valueArg)
+	args = append(args, keyArgs...)
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("update failed: %w", err)
+	}
+	if ra, _ := res.RowsAffected(); ra == 0 {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("no rows updated")
+	}
+
+	// Re-select the updated row within the same transaction
+	selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s", returning, quotedTable, strings.Join(whereParts, " AND "))
+	row := tx.QueryRow(selQuery, keyArgs...)
+	rowVals := make([]interface{}, len(returningCols))
+	scanArgs := make([]interface{}, len(rowVals))
+	for i := range rowVals {
+		scanArgs[i] = &rowVals[i]
+	}
+	if err := row.Scan(scanArgs...); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("scan failed: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit failed: %w", err)
+	}
+	return rowVals, nil
+}
+
+// QueryRows executes a SELECT for the given columns and clauses, returning the
+// resulting row cursor. Callers are responsible for closing the returned rows.
+func (rel *Relation) QueryRows(columns []string, whereClause, orderBy string, start *string) (*sql.Rows, error) {
+	query, err := selectQuery(rel.DBType, rel.name, columns, whereClause, orderBy, start)
+	if err != nil {
+		return nil, err
+	}
+	return rel.DB.Query(query)
 }
 
 // quoteIdent safely quotes an identifier (table/column) for the target DB.
