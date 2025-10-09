@@ -7,14 +7,14 @@ ted is a tabular editor. It displays database tables as markdown table and provi
 ```
  ◔ created_at > now() - interval '7 days' ⊗
  ⇅ name DESC, org_id ASC ⊗
-┌────┰──────┬──────────┬────────────┬────────────┬────┬┄┐
-│ id ┃ name │ email    │ created_at │ updated_at │ or…│◂│
-┝━━━━╋━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━┿┅┥
-│  1 ┃ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │  3 │⁚│
-│  2 ┃ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │…24 │⁚│
-└────┸──────┴──────────┴────────────┴────────────┴────┴┄┘
+┌────┬──────┬──────────┬────────────┬────────────┬────┐
+│ id │ name │ email    │ created_at │ updated_at │ or…│
+├────╆━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━┥
+│  1 ┃ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │  3 │
+│  2 ┃ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │…24 │
+└────┸──────┴──────────┴────────────┴────────────┴────┘
 
-█Status bar██████████████████████████████████████████████
+█Status bar████████████████████████████████████████████
  Command bar
 ```
 
@@ -126,45 +126,6 @@ The "view" of the table is always just a cache.
 Updates are run with `RETURNING *` clause, attempt to update just the row and *not* refresh the entire table.
 
 When updating cells, identify a table's primary keys or unique constraints (even if they are multicolumn). If none exists, warn that updates are "best effort" and are made by `WHERE`'ing matching values. If the number of rows updated >1, message in the status bar.
-
-## `.ted.yml` format
-
-`[dbname]` is a filename (sqlite or duckdb) or a database name in the `.ted.yml` config. If no matching name is found and database type flag is not set, suggest `ted init`. Support for tab-completing database (from either local files or config), table and column names.
-
-```yml
-databases:
-  [name]: <postgres|mysql|clickhouse>
-  [name]:
-    type: <postgres|mysql|clickhouse>
-    host: [host] # opt
-    port: [port] # opt
-    user: [user] # optional, assumes system username
-    dbname: [dbname] # opt, assumes name
-
-    tables:
-      events:
-        key: user_id,created # unique key if primary missing
-        columns: # setting order
-          event_type # default
-          properties: 10 # width
-          client: 0 # hidden
-
-null: <null> # default is \N
-```
-
-`.ted.yaml` can be used to store table column order and width. All columns should appear by default with a width of 8. You can only hide columns, which displays like hidden spreadsheet columns: `│⁚│`. Those unicode characters are clickable to show column.
-
-All columns selected by default. Extra data from table columns shouldn't matter _that_ for this use case.
-
-### Example
-
-```yml
-databases:
-  test: postgres
-  bloggy:
-    type: postgres
-    username: bloggy
-```
 
 ## Nice to have's
 
