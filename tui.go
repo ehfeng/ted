@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -112,11 +113,14 @@ func runEditor(config *Config, dbname, tablename string) error {
 		return err
 	}
 
-	columns := make([]Column, len(relation.attributeOrder))
-	for i, name := range relation.attributeOrder {
-		columns[i] = Column{
-			Name:  name,
-			Width: DefaultColumnWidth,
+	// force key to be first column(s)
+	columns := make([]Column, 0, len(relation.attributeOrder))
+	for _, name := range relation.key {
+		columns = append(columns, Column{Name: name, Width: 2})
+	}
+	for _, name := range relation.attributeOrder {
+		if !slices.Contains(relation.key, name) {
+			columns = append(columns, Column{Name: name, Width: DefaultColumnWidth})
 		}
 	}
 
