@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 
 const (
 	DefaultColumnWidth = 8
+	RowsTimerInterval  = 100 * time.Millisecond
 )
 
 // this is a config concept
@@ -32,7 +32,7 @@ type Column struct {
 type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
-	table    *HeaderTable
+	table    *TableView
 	columns  []Column
 	relation *Relation
 	config   *Config
@@ -127,7 +127,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor := &Editor{
 		app:          tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s", dbname, tablename, databaseIcons[dbType])),
 		pages:        tview.NewPages(),
-		table:        NewHeaderTable(),
+		table:        NewTableView(),
 		columns:      columns,
 		relation:     relation,
 		config:       config,
@@ -156,7 +156,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 }
 
 func (e *Editor) setupTable() {
-	// Create headers for HeaderTable
+	// Create headers for TableView
 	headers := make([]HeaderColumn, len(e.columns))
 	for i, col := range e.columns {
 		headers[i] = HeaderColumn{
@@ -355,17 +355,28 @@ func (e *Editor) setupKeyBindings() {
 		case key == tcell.KeyRight && mod&tcell.ModMeta != 0:
 			e.table.Select(row, len(e.columns)-1)
 			return nil
-		case key == tcell.KeyUp && mod&tcell.ModMeta != 0:
-			e.table.Select(0, col)
-			return nil
+		case key == tcell.KeyUp:
+			if mod&tcell.ModMeta != 0 {
+				e.table.Select(0, col)
+				return nil
+			} else {
+				if row == 0 {
+					e.prevRows(1)
+				} else {
+					e.table.Select(row-1, col)
+				}
+				return nil
+			}
 		case key == tcell.KeyDown:
 			if mod&tcell.ModMeta != 0 {
 				e.table.Select(len(e.records)-1, col)
 				return nil
 			} else {
-				os.Stderr.WriteString(fmt.Sprintf("KeyDown: row: %d, col: %d, mod: %d\n", row, col, mod))
-				e.nextRows(1)
-				// e.table.Select(row+1, col)
+				if row == len(e.records)-1 {
+					e.nextRows(1)
+				} else {
+					e.table.Select(row+1, col)
+				}
 				return nil
 			}
 		default:
@@ -564,7 +575,7 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, c
 	currentText = formatCellValue(currentText)
 
 	// Calculate the position where the cell content appears on screen
-	// HeaderTable structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
+	// TableView structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
 	tableRow := row + 3 // Convert data row to table display row
 
 	// Calculate horizontal position: left border + previous columns + cell padding
@@ -694,6 +705,16 @@ func (e *Editor) updateEditPreview(newText string) {
 	e.commandPalette.SetPlaceholder(preview)
 }
 
+// e.table.SetData based on e.records and e.pointer
+func (e *Editor) setData() {
+	normalizedRecords := make([][]interface{}, len(e.records))
+	for i := 0; i < len(e.records); i++ {
+		ptr := (i + e.pointer) % len(e.records)
+		normalizedRecords[i] = e.records[ptr]
+	}
+	e.table.SetData(normalizedRecords)
+}
+
 func (e *Editor) updateCell(row, col int, newValue string) {
 	// Basic bounds check against current data
 	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.records[row]) {
@@ -711,12 +732,7 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 	ptr := (row + e.pointer) % len(e.records)
 	e.records[ptr] = updated
 
-	normalizedRecords := make([][]interface{}, len(e.records))
-	for i := 0; i < len(e.records); i++ {
-		ptr := (i + e.pointer) % len(e.records)
-		normalizedRecords[i] = e.records[ptr]
-	}
-	e.table.SetData(normalizedRecords)
+	e.setData()
 	e.exitEditMode()
 }
 
@@ -745,25 +761,26 @@ func (e *Editor) toggleColSelection(col int) {
 }
 
 func (e *Editor) highlightRow(row int) {
-	// HeaderTable handles selection highlighting internally
+	// TableView handles selection highlighting internally
 	// This is a placeholder for future row highlighting implementation
 }
 
 func (e *Editor) unhighlightRow(row int) {
-	// HeaderTable handles selection highlighting internally
+	// TableView handles selection highlighting internally
 	// This is a placeholder for future row highlighting implementation
 }
 
 func (e *Editor) highlightColumn(col int) {
-	// HeaderTable handles selection highlighting internally
+	// TableView handles selection highlighting internally
 	// This is a placeholder for future column highlighting implementation
 }
 
 func (e *Editor) unhighlightColumn(col int) {
-	// HeaderTable handles selection highlighting internally
+	// TableView handles selection highlighting internally
 	// This is a placeholder for future column highlighting implementation
 }
 
+// TODO rework this, currently used for initial load, refresh does not account for e.pointer
 func (e *Editor) refreshData() {
 	if e.rows != nil || e.relation == nil || e.relation.DB == nil {
 		return
@@ -779,7 +796,7 @@ func (e *Editor) refreshData() {
 		selectCols[i] = quoteIdent(e.relation.DBType, col.Name)
 	}
 
-	rows, err := e.relation.QueryRows(selectCols, e.whereClause, e.orderBy, nil)
+	rows, err := e.relation.QueryRows(selectCols, nil, nil, false)
 	if err != nil {
 		if e.statusBar != nil {
 			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
@@ -790,6 +807,7 @@ func (e *Editor) refreshData() {
 	e.pointer = 0 // Reset pointer for fresh load
 
 	// Load initial rows up to the preallocated size
+	rowsLoaded := 0
 	for i := 0; i < len(e.records) && rows.Next(); i++ {
 		e.records[i] = make([]interface{}, len(e.columns))
 		scanTargets := make([]interface{}, len(e.columns))
@@ -804,8 +822,14 @@ func (e *Editor) refreshData() {
 			}
 			return
 		}
-		e.pointer++
+		rowsLoaded++
 	}
+
+	// If we didn't fill the buffer, mark the end with nil
+	if rowsLoaded < len(e.records) {
+		e.records[rowsLoaded] = nil
+	}
+
 	if err := e.rows.Err(); err != nil {
 		if e.statusBar != nil {
 			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
@@ -814,7 +838,7 @@ func (e *Editor) refreshData() {
 	}
 	// Start interruptible timer
 	e.rowsTimerReset = make(chan struct{})
-	e.rowsTimer = time.AfterFunc(100*time.Millisecond, func() {
+	e.rowsTimer = time.AfterFunc(RowsTimerInterval, func() {
 		e.app.QueueUpdateDraw(func() {
 			e.stopRowsTimer()
 		})
@@ -833,22 +857,39 @@ func (e *Editor) refreshData() {
 					default:
 					}
 				}
-				timer.Reset(100 * time.Millisecond)
+				timer.Reset(RowsTimerInterval)
 			case <-timer.C:
 				return
 			}
 		}
 	}()
-
-	e.table.SetData(e.records)
+	e.setData()
 }
 
 // nextRows fetches the next i rows from e.rows and resets the auto-close timer
+// when there are no more rows, adds a nil sentinel to mark the end
 func (e *Editor) nextRows(i int) error {
+	// Check if we're already at the end (last record is nil)
+	lastRecordIdx := (e.pointer - 1 + len(e.records)) % len(e.records)
+	if e.records[lastRecordIdx] == nil {
+		return nil // No-op, already at end of data
+	}
+
 	if e.rows == nil {
-		// TODO re-initiate query with last key as where clause
-		os.Stderr.WriteString(fmt.Sprintf("nextRows: rows is nil\n"))
-		// selectQuery, err := selectQuery(e.relation.DBType, e.relation.name, selectCols, e.whereClause, e.orderBy, nil)
+		params := make([]interface{}, len(e.relation.key))
+		for i := range e.relation.key {
+			params[i] = e.records[(e.pointer-1+len(e.records))%len(e.records)][i]
+		}
+		selectCols := make([]string, len(e.columns))
+		for i, col := range e.columns {
+			selectCols[i] = col.Name
+		}
+		var err error
+		e.rows, err = e.relation.QueryRows(selectCols, nil, params, false)
+		if err != nil {
+			return err
+		}
+		return nil
 	}
 
 	// Signal timer reset
@@ -865,6 +906,7 @@ func (e *Editor) nextRows(i int) error {
 	}
 
 	scanTargets := make([]interface{}, colCount)
+	rowsFetched := 0
 
 	for n := 0; n < i && e.rows.Next(); n++ {
 		row := make([]interface{}, colCount)
@@ -874,21 +916,40 @@ func (e *Editor) nextRows(i int) error {
 		if err := e.rows.Scan(scanTargets...); err != nil {
 			return err
 		}
-		// Expand records slice if needed
-		if e.pointer >= len(e.records) {
-			e.records = append(e.records, row)
-		} else {
-			e.records[e.pointer] = row
-		}
-		e.pointer++
+		e.records[e.pointer] = row
+		e.pointer = (e.pointer + 1) % len(e.records)
+		rowsFetched++
 	}
 
+	// If we fetched fewer rows than requested, we've reached the end
+	if rowsFetched < i {
+		e.records[e.pointer] = nil // Mark end of data
+	}
+
+	e.setData()
 	return e.rows.Err()
 }
 
-// updateTableData refreshes the table view with current records data
-func (e *Editor) updateTableData() {
-	e.table.SetData(e.records)
+// prevRows fetches the previous i rows (scrolling backwards in the circular buffer)
+func (e *Editor) prevRows(i int) error {
+	if e.rows == nil {
+		// TODO: implement reverse query when no active rows
+		panic("prevRows: rows is nil")
+		return nil
+	}
+
+	// Signal timer reset
+	if e.rowsTimerReset != nil {
+		select {
+		case e.rowsTimerReset <- struct{}{}:
+		default:
+		}
+	}
+
+	// Move pointer backwards in the circular buffer
+	e.pointer = (e.pointer - i + len(e.records)) % len(e.records)
+	e.setData()
+	return nil
 }
 
 // stopRowsTimer stops the timer and closes the rows if active

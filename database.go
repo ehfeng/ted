@@ -33,34 +33,84 @@ type Attribute struct {
 	Generated bool   // TODO if computed column, read-only
 }
 
-// database functions
+type SortColumn struct {
+	Name string
+	Asc  bool
+}
 
-func selectQuery(dbType DatabaseType, tableName string, columns []string, whereClause string, orderBy string, start *string) (string, error) {
-	colLength := 0
-	for _, col := range columns {
-		colLength += len(col) + 2
+func (sc SortColumn) String(scrollDown bool) string {
+	if sc.Asc {
+		if scrollDown {
+			return sc.Name + " DESC"
+		} else {
+			return sc.Name + " ASC"
+		}
 	}
+	if scrollDown {
+		return sc.Name + " ASC"
+	} else {
+		return sc.Name + " DESC"
+	}
+}
+
+// TODO
+// direction is always secondarily sorted by key cols
+// `select col, ... from tbl where col > ?, ... order by sortCol, keyCol, ...`
+// for initial load, params are nil
+func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCol *SortColumn, keyCols []string, hasParams bool, scrollDown bool) (string, error) {
+	if len(keyCols) == 0 {
+		panic("keyCols is empty")
+	}
+	length := 7 // "select from where order by"
+	length += len(tableName)
+	for _, col := range columns {
+		length += len(col) + 2
+	}
+	for _, col := range keyCols {
+		length += len(col)*2 + 9 + 6 // " = ? AND ", ", DESC"
+	}
+	var sortColString string
+	if sortCol != nil {
+		sortColString = sortCol.String(scrollDown)
+		length += len(sortColString)
+	}
+
 	var builder strings.Builder
-	builder.Grow(len(tableName) + 16 + colLength + len(whereClause) + len(orderBy))
+	builder.Grow(length)
 
 	builder.WriteString("SELECT ")
 	builder.WriteString(strings.Join(columns, ", "))
 	builder.WriteString(" FROM ")
 	builder.WriteString(quoteQualified(dbType, tableName))
 
-	if whereClause != "" {
+	if hasParams {
 		builder.WriteString(" WHERE ")
-		builder.WriteString(whereClause)
+		nextPlaceholder := func(pos int) string {
+			if databaseFeatures[dbType].positionalPlaceholder {
+				return fmt.Sprintf("$%d", pos)
+			}
+			return "?"
+		}
+		for i, col := range keyCols {
+			if i > 0 {
+				builder.WriteString(" AND ")
+			}
+			builder.WriteString(quoteIdent(dbType, col))
+			builder.WriteString(" > ")
+			builder.WriteString(nextPlaceholder(i + 1))
+		}
 	}
-
-	if start != nil {
-		builder.WriteString(" AND ")
-		builder.WriteString(*start)
+	builder.WriteString(" ORDER BY ")
+	if sortCol != nil {
+		builder.WriteString(sortColString)
+		builder.WriteString(", ")
 	}
-
-	if orderBy != "" {
-		builder.WriteString(" ORDER BY ")
-		builder.WriteString(orderBy)
+	for i, col := range keyCols {
+		sc := SortColumn{Name: quoteIdent(dbType, col), Asc: true}
+		builder.WriteString(sc.String(scrollDown))
+		if i < len(keyCols)-1 {
+			builder.WriteString(", ")
+		}
 	}
 	return builder.String(), nil
 }
@@ -962,12 +1012,12 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
-func (rel *Relation) QueryRows(columns []string, whereClause, orderBy string, start *string) (*sql.Rows, error) {
-	query, err := selectQuery(rel.DBType, rel.name, columns, whereClause, orderBy, start)
+func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []interface{}, scrollDown bool) (*sql.Rows, error) {
+	query, err := selectQuery(rel.DBType, rel.name, columns, sortCol, rel.key, len(params) > 0, scrollDown)
 	if err != nil {
 		return nil, err
 	}
-	return rel.DB.Query(query)
+	return rel.DB.Query(query, params...)
 }
 
 // quoteIdent safely quotes an identifier (table/column) for the target DB.

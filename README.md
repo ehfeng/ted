@@ -5,10 +5,8 @@ ted is a tabular editor. It displays database tables as markdown table and provi
 ![ted demo](ted.gif)
 
 ```
- ◔ created_at > now() - interval '7 days' ⊗
- ⇅ name DESC, org_id ASC ⊗
 ┌────┬──────┬──────────┬────────────┬────────────┬────┐
-│ id │ name │ email    │ created_at │ updated_at │ or…│
+│ id │ name │ email    │ created_at │ updated_at │↓or…│
 ├────╆━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━┥
 │  1 ┃ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │  3 │
 │  2 ┃ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │…24 │
@@ -34,11 +32,6 @@ ted test users
 - `-p` or `--port`
 - `-u` or `--username`
 - `--password`
-
-### SQL clauses
-
-- `-w` or `--where`
-- `-o` or `--order-by`
 
 ### Database shorthands
 
@@ -69,10 +62,11 @@ cmd/ctrl for mac/windows
 1. esc: exit from editing, discarding changes
 1. shift+del: delete row (shift+space selects row in Excel)
 1. ctrl+r: refresh data
-1. ctrl+f: LIKE 'token%` search
 1. alt+←/→: rearranges column order
+1. alt+ꜛ/↓: toggles sort
 1. ctrl+del: hides column
 1. ctrl+</>: increase/decrease column width
+1. ctrl+c: exit
 
 ## Mouse
 
@@ -105,7 +99,7 @@ In view mode, show column data type, constraints. In editing mode, input-specifi
 - valid int, bool, float, json
 - enums
 - date time format
-- references: preview
+- references: foreign row preview
 
 When highlighting or editing foreign key references, the status bar shows a logfmt preview. Say we highlight `accounts.owner`, which references the users table: `users: id=1 name='Eric' plan='free'…`. Multi-column references only work if both columns are shown. Show info message (other column hidden) otherwise.
 
