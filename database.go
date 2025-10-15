@@ -111,7 +111,6 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 		builder.WriteString(sortColString)
 		builder.WriteString(", ")
 	}
-	os.Stderr.WriteString(fmt.Sprintf("selectQuery: keyCols: %v, scrollDown: %v\n", keyCols, scrollDown))
 	for i, col := range keyCols {
 		sc := SortColumn{Name: quoteIdent(dbType, col), Asc: scrollDown}
 		builder.WriteString(sc.String(scrollDown))

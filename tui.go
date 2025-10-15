@@ -834,33 +834,7 @@ func (e *Editor) refreshData() {
 		}
 		return
 	}
-	// Start interruptible timer
-	e.rowsTimerReset = make(chan struct{})
-	e.rowsTimer = time.AfterFunc(RowsTimerInterval, func() {
-		e.app.QueueUpdateDraw(func() {
-			e.stopRowsTimer()
-		})
-	})
-
-	// Timer goroutine to handle resets
-	go func() {
-		resetChan := e.rowsTimerReset
-		timer := e.rowsTimer
-		for {
-			select {
-			case <-resetChan:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(RowsTimerInterval)
-			case <-timer.C:
-				return
-			}
-		}
-	}()
+	e.startRowsTimer()
 	e.renderData()
 }
 
@@ -887,6 +861,7 @@ func (e *Editor) nextRows(i int) error {
 		if err != nil {
 			return err
 		}
+		e.startRowsTimer()
 		return nil
 	}
 
@@ -945,6 +920,7 @@ func (e *Editor) prevRows(i int) error {
 		if err != nil {
 			return err
 		}
+		e.startRowsTimer()
 	}
 
 	// Signal timer reset
@@ -979,6 +955,45 @@ func (e *Editor) prevRows(i int) error {
 
 	e.renderData()
 	return e.prevQuery.Err()
+}
+
+// startRowsTimer starts or restarts the timer for auto-closing queries
+func (e *Editor) startRowsTimer() {
+	// Stop existing timer if any
+	if e.rowsTimer != nil {
+		e.rowsTimer.Stop()
+	}
+	if e.rowsTimerReset != nil {
+		close(e.rowsTimerReset)
+	}
+
+	// Start new timer
+	e.rowsTimerReset = make(chan struct{})
+	e.rowsTimer = time.AfterFunc(RowsTimerInterval, func() {
+		e.app.QueueUpdateDraw(func() {
+			e.stopRowsTimer()
+		})
+	})
+
+	// Timer goroutine to handle resets
+	go func() {
+		resetChan := e.rowsTimerReset
+		timer := e.rowsTimer
+		for {
+			select {
+			case <-resetChan:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(RowsTimerInterval)
+			case <-timer.C:
+				return
+			}
+		}
+	}()
 }
 
 // stopRowsTimer stops the timer and closes the rows if active
