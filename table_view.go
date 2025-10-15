@@ -402,6 +402,61 @@ func (tv *TableView) SetColumnWidth(col int, width int) *TableView {
 	return tv
 }
 
+// GetCellAtPosition returns the data row and column indices for screen coordinates
+// Returns (-1, -1) if the position is not within a data cell
+func (tv *TableView) GetCellAtPosition(screenX, screenY int) (row, col int) {
+	x, y, width, height := tv.GetInnerRect()
+
+	// Check if click is within the table bounds
+	if screenX < x || screenX >= x+width || screenY < y || screenY >= y+height {
+		return -1, -1
+	}
+
+	// Calculate which row was clicked
+	// Row 0: top border
+	// Row 1: header
+	// Row 2: header separator
+	// Row 3+: data rows
+	relativeY := screenY - y
+	if relativeY < 3 {
+		return -1, -1 // Clicked on border/header, not a data cell
+	}
+
+	dataRow := relativeY - 3
+	if dataRow < 0 || dataRow >= len(tv.data) || tv.data[dataRow] == nil {
+		return -1, -1 // Beyond available data
+	}
+
+	// Calculate which column was clicked
+	relativeX := screenX - x
+	if relativeX < 1 {
+		return -1, -1 // Clicked on left border
+	}
+
+	// Walk through columns to find which one contains the click
+	currentX := 1 // Start after left border
+	for i, header := range tv.headers {
+		cellWidth := header.Width + 2*tv.cellPadding
+
+		// Check if click is within this column's content area
+		if relativeX >= currentX && relativeX < currentX+cellWidth {
+			return dataRow, i
+		}
+
+		currentX += cellWidth
+
+		// Add separator width if not the last column
+		if i < len(tv.headers)-1 {
+			if relativeX == currentX {
+				return -1, -1 // Clicked on separator
+			}
+			currentX += 1
+		}
+	}
+
+	return -1, -1 // Clicked beyond table content
+}
+
 // padCellToWidth pads text to a specific width, truncating if too long
 func padCellToWidth(text string, width int) string {
 	if len(text) >= width {

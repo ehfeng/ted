@@ -392,13 +392,25 @@ func (e *Editor) setupKeyBindings() {
 
 	// Setup mouse event handler
 	e.table.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-		// Only handle scroll wheel events
 		switch action {
+		case tview.MouseLeftClick:
+			// Get mouse position
+			mouseX, mouseY := event.Position()
+			// Convert to cell coordinates
+			row, col := e.table.GetCellAtPosition(mouseX, mouseY)
+			if row >= 0 && col >= 0 {
+				e.table.Select(row, col)
+				// Use goroutine to avoid deadlock - Draw() needs the lock that the mouse handler currently holds
+				go e.app.Draw()
+			}
+			return action, nil
 		case tview.MouseScrollUp:
 			e.prevRows(1)
+			go e.app.Draw()
 			return action, nil
 		case tview.MouseScrollDown:
 			e.nextRows(1)
+			go e.app.Draw()
 			return action, nil
 		}
 		// Pass through other mouse events
