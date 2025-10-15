@@ -32,6 +32,9 @@ type TableView struct {
 	selectedCol int
 	selectable  bool
 
+	// Callbacks
+	doubleClickFunc func(row, col int)
+
 	// Viewport information
 	BodyRowsAvailable int
 }
@@ -88,6 +91,12 @@ func (tv *TableView) Select(row, col int) *TableView {
 // SetSelectable sets whether the table is selectable
 func (tv *TableView) SetSelectable(selectable bool) *TableView {
 	tv.selectable = selectable
+	return tv
+}
+
+// SetDoubleClickFunc sets the function to call when a cell is double-clicked
+func (tv *TableView) SetDoubleClickFunc(handler func(row, col int)) *TableView {
+	tv.doubleClickFunc = handler
 	return tv
 }
 
@@ -375,6 +384,47 @@ func (tv *TableView) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 		case tcell.KeyEnd:
 			tv.selectedCol = len(tv.headers) - 1
 		}
+	})
+}
+
+// MouseHandler handles mouse events for the table
+func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (consumed bool, capture tview.Primitive) {
+	return tv.WrapMouseHandler(func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (consumed bool, capture tview.Primitive) {
+		// Get mouse position
+		x, y := event.Position()
+
+		// Check if click is within our bounds
+		if !tv.InRect(x, y) {
+			return false, nil
+		}
+
+		switch action {
+		case tview.MouseLeftDown:
+			// Set focus when clicked
+			setFocus(tv)
+			consumed = true
+			if tv.selectable {
+				// Convert screen coordinates to cell coordinates
+				row, col := tv.GetCellAtPosition(x, y)
+				if row >= 0 && col >= 0 {
+					tv.selectedRow = row
+					tv.selectedCol = col
+					consumed = true
+				}
+			}
+
+		case tview.MouseLeftDoubleClick:
+			// Handle double-click on a cell
+			if tv.doubleClickFunc != nil {
+				row, col := tv.GetCellAtPosition(x, y)
+				if row >= 0 && col >= 0 {
+					tv.doubleClickFunc(row, col)
+					consumed = true
+				}
+			}
+		}
+
+		return consumed, nil
 	})
 }
 

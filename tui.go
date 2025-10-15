@@ -124,7 +124,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	}
 
 	editor := &Editor{
-		app:          tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s", dbname, tablename, databaseIcons[dbType])),
+		app:          tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s", dbname, tablename, databaseIcons[dbType])).EnableMouse(true),
 		pages:        tview.NewPages(),
 		table:        NewTableView(),
 		columns:      columns,
@@ -146,7 +146,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor.refreshData()
 	editor.pages.AddPage("table", editor.layout, true, true)
 
-	if err := editor.app.SetRoot(editor.pages, true).EnableMouse(true).Run(); err != nil {
+	if err := editor.app.SetRoot(editor.pages, true).Run(); err != nil {
 		return err
 	}
 	return nil
@@ -163,7 +163,13 @@ func (e *Editor) setupTable() {
 	}
 
 	// Configure the table
-	e.table.SetHeaders(headers).SetData(e.records).SetSelectable(true)
+	e.table.SetHeaders(headers).
+		SetData(e.records).
+		SetSelectable(true).
+		SetDoubleClickFunc(func(row, col int) {
+			// Double-click on a cell opens edit mode
+			e.enterEditMode(row, col)
+		})
 }
 
 func (e *Editor) setupStatusBar() {
@@ -388,33 +394,6 @@ func (e *Editor) setupKeyBindings() {
 		}
 
 		return event
-	})
-
-	// Setup mouse event handler
-	e.table.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-		switch action {
-		case tview.MouseLeftClick:
-			// Get mouse position
-			mouseX, mouseY := event.Position()
-			// Convert to cell coordinates
-			row, col := e.table.GetCellAtPosition(mouseX, mouseY)
-			if row >= 0 && col >= 0 {
-				e.table.Select(row, col)
-				// Use goroutine to avoid deadlock - Draw() needs the lock that the mouse handler currently holds
-				go e.app.Draw()
-			}
-			return action, nil
-		case tview.MouseScrollUp:
-			e.prevRows(1)
-			go e.app.Draw()
-			return action, nil
-		case tview.MouseScrollDown:
-			e.nextRows(1)
-			go e.app.Draw()
-			return action, nil
-		}
-		// Pass through other mouse events
-		return action, event
 	})
 }
 
