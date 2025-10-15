@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1023,7 +1022,6 @@ func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []i
 	if err != nil {
 		return nil, err
 	}
-	os.Stderr.WriteString(fmt.Sprintf("QueryRows: query: %s, params: %v\n", query, params))
 	return rel.DB.Query(query, params...)
 }
 

@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -116,7 +115,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	// force key to be first column(s)
 	columns := make([]Column, 0, len(relation.attributeOrder))
 	for _, name := range relation.key {
-		columns = append(columns, Column{Name: name, Width: 2})
+		columns = append(columns, Column{Name: name, Width: 4})
 	}
 	for _, name := range relation.attributeOrder {
 		if !slices.Contains(relation.key, name) {
@@ -310,12 +309,15 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, len(e.columns)-1)
 			return nil
 		case key == tcell.KeyPgUp:
-			newRow := max(0, row-10)
-			e.table.Select(newRow, col)
+			// Page up: scroll data backward while keeping selection in same visual position
+			pageSize := max(1, e.table.BodyRowsAvailable-1)
+			e.prevRows(pageSize)
 			return nil
 		case key == tcell.KeyPgDn:
-			newRow := min(len(e.records)-1, row+10)
-			e.table.Select(newRow, col)
+			// Page down: scroll data forward while keeping selection in same visual position
+			pageSize := max(1, e.table.BodyRowsAvailable-1)
+			// Keep selection at same position, just fetch next rows
+			e.nextRows(pageSize)
 			return nil
 		case rune == ' ' && mod&tcell.ModShift != 0:
 			e.toggleRowSelection(row)
@@ -862,7 +864,6 @@ func (e *Editor) nextRows(i int) error {
 			return err
 		}
 		e.startRowsTimer()
-		return nil
 	}
 
 	// Signal timer reset
@@ -898,7 +899,6 @@ func (e *Editor) nextRows(i int) error {
 	if rowsFetched < i {
 		e.records[e.pointer] = nil // Mark end of data
 	}
-
 	e.renderData()
 	return e.nextQuery.Err()
 }
@@ -910,7 +910,6 @@ func (e *Editor) prevRows(i int) error {
 		for i := range e.relation.key {
 			params[i] = e.records[e.pointer][i]
 		}
-		os.Stderr.WriteString(fmt.Sprintf("prevRows: params: %v\n", params))
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {
 			selectCols[i] = col.Name
