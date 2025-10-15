@@ -389,6 +389,21 @@ func (e *Editor) setupKeyBindings() {
 
 		return event
 	})
+
+	// Setup mouse event handler
+	e.table.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		// Only handle scroll wheel events
+		switch action {
+		case tview.MouseScrollUp:
+			e.prevRows(1)
+			return action, nil
+		case tview.MouseScrollDown:
+			e.nextRows(1)
+			return action, nil
+		}
+		// Pass through other mouse events
+		return action, event
+	})
 }
 
 func (e *Editor) consumeKittyCSI(key tcell.Key, r rune, mod tcell.ModMask) bool {
@@ -968,11 +983,7 @@ func (e *Editor) startRowsTimer() {
 
 	// Start new timer
 	e.rowsTimerReset = make(chan struct{})
-	e.rowsTimer = time.AfterFunc(RowsTimerInterval, func() {
-		e.app.QueueUpdateDraw(func() {
-			e.stopRowsTimer()
-		})
-	})
+	e.rowsTimer = time.NewTimer(RowsTimerInterval)
 
 	// Timer goroutine to handle resets
 	go func() {
@@ -989,6 +1000,9 @@ func (e *Editor) startRowsTimer() {
 				}
 				timer.Reset(RowsTimerInterval)
 			case <-timer.C:
+				e.app.QueueUpdateDraw(func() {
+					e.stopRowsTimer()
+				})
 				return
 			}
 		}
