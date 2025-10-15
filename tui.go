@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,11 +57,10 @@ type Editor struct {
 	selectedCols     map[int]bool
 
 	// data, records is a circular buffer
-	rows        *sql.Rows
-	pointer     int             // pointer to the current record
-	records     [][]interface{} // columns are keyed off e.columns
-	whereClause string
-	orderBy     string
+	nextQuery *sql.Rows       // nextRows
+	prevQuery *sql.Rows       // prevRows
+	pointer   int             // pointer to the current record
+	records   [][]interface{} // columns are keyed off e.columns
 
 	// timer for auto-closing rows
 	rowsTimer      *time.Timer
@@ -137,8 +137,6 @@ func runEditor(config *Config, dbname, tablename string) error {
 		preEditMode:  PaletteModeDefault,
 		pointer:      0,
 		records:      make([][]interface{}, tableDataHeight),
-		whereClause:  config.Where,
-		orderBy:      config.OrderBy,
 	}
 
 	editor.setupTable()
@@ -706,7 +704,7 @@ func (e *Editor) updateEditPreview(newText string) {
 }
 
 // e.table.SetData based on e.records and e.pointer
-func (e *Editor) setData() {
+func (e *Editor) renderData() {
 	normalizedRecords := make([][]interface{}, len(e.records))
 	for i := 0; i < len(e.records); i++ {
 		ptr := (i + e.pointer) % len(e.records)
@@ -732,7 +730,7 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 	ptr := (row + e.pointer) % len(e.records)
 	e.records[ptr] = updated
 
-	e.setData()
+	e.renderData()
 	e.exitEditMode()
 }
 
@@ -782,7 +780,7 @@ func (e *Editor) unhighlightColumn(col int) {
 
 // TODO rework this, currently used for initial load, refresh does not account for e.pointer
 func (e *Editor) refreshData() {
-	if e.rows != nil || e.relation == nil || e.relation.DB == nil {
+	if e.nextQuery != nil || e.relation == nil || e.relation.DB == nil {
 		return
 	}
 
@@ -796,14 +794,14 @@ func (e *Editor) refreshData() {
 		selectCols[i] = quoteIdent(e.relation.DBType, col.Name)
 	}
 
-	rows, err := e.relation.QueryRows(selectCols, nil, nil, false)
+	rows, err := e.relation.QueryRows(selectCols, nil, nil, true)
 	if err != nil {
 		if e.statusBar != nil {
 			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
 		}
 		return
 	}
-	e.rows = rows
+	e.nextQuery = rows
 	e.pointer = 0 // Reset pointer for fresh load
 
 	// Load initial rows up to the preallocated size
@@ -816,7 +814,7 @@ func (e *Editor) refreshData() {
 		}
 		if err := rows.Scan(scanTargets...); err != nil {
 			rows.Close()
-			e.rows = nil
+			e.nextQuery = nil
 			if e.statusBar != nil {
 				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
 			}
@@ -830,7 +828,7 @@ func (e *Editor) refreshData() {
 		e.records[rowsLoaded] = nil
 	}
 
-	if err := e.rows.Err(); err != nil {
+	if err := e.nextQuery.Err(); err != nil {
 		if e.statusBar != nil {
 			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
 		}
@@ -863,7 +861,7 @@ func (e *Editor) refreshData() {
 			}
 		}
 	}()
-	e.setData()
+	e.renderData()
 }
 
 // nextRows fetches the next i rows from e.rows and resets the auto-close timer
@@ -875,7 +873,7 @@ func (e *Editor) nextRows(i int) error {
 		return nil // No-op, already at end of data
 	}
 
-	if e.rows == nil {
+	if e.nextQuery == nil {
 		params := make([]interface{}, len(e.relation.key))
 		for i := range e.relation.key {
 			params[i] = e.records[(e.pointer-1+len(e.records))%len(e.records)][i]
@@ -885,7 +883,7 @@ func (e *Editor) nextRows(i int) error {
 			selectCols[i] = col.Name
 		}
 		var err error
-		e.rows, err = e.relation.QueryRows(selectCols, nil, params, false)
+		e.nextQuery, err = e.relation.QueryRows(selectCols, nil, params, true)
 		if err != nil {
 			return err
 		}
@@ -908,12 +906,12 @@ func (e *Editor) nextRows(i int) error {
 	scanTargets := make([]interface{}, colCount)
 	rowsFetched := 0
 
-	for n := 0; n < i && e.rows.Next(); n++ {
+	for n := 0; n < i && e.nextQuery.Next(); n++ {
 		row := make([]interface{}, colCount)
 		for j := 0; j < colCount; j++ {
 			scanTargets[j] = &row[j]
 		}
-		if err := e.rows.Scan(scanTargets...); err != nil {
+		if err := e.nextQuery.Scan(scanTargets...); err != nil {
 			return err
 		}
 		e.records[e.pointer] = row
@@ -926,16 +924,27 @@ func (e *Editor) nextRows(i int) error {
 		e.records[e.pointer] = nil // Mark end of data
 	}
 
-	e.setData()
-	return e.rows.Err()
+	e.renderData()
+	return e.nextQuery.Err()
 }
 
 // prevRows fetches the previous i rows (scrolling backwards in the circular buffer)
 func (e *Editor) prevRows(i int) error {
-	if e.rows == nil {
-		// TODO: implement reverse query when no active rows
-		panic("prevRows: rows is nil")
-		return nil
+	if e.prevQuery == nil {
+		params := make([]interface{}, len(e.relation.key))
+		for i := range e.relation.key {
+			params[i] = e.records[e.pointer][i]
+		}
+		os.Stderr.WriteString(fmt.Sprintf("prevRows: params: %v\n", params))
+		selectCols := make([]string, len(e.columns))
+		for i, col := range e.columns {
+			selectCols[i] = col.Name
+		}
+		var err error
+		e.prevQuery, err = e.relation.QueryRows(selectCols, nil, params, false)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Signal timer reset
@@ -946,10 +955,30 @@ func (e *Editor) prevRows(i int) error {
 		}
 	}
 
-	// Move pointer backwards in the circular buffer
-	e.pointer = (e.pointer - i + len(e.records)) % len(e.records)
-	e.setData()
-	return nil
+	colCount := len(e.columns)
+	if colCount == 0 {
+		return nil
+	}
+
+	scanTargets := make([]interface{}, colCount)
+	rowsFetched := 0
+
+	for n := 0; n < i && e.prevQuery.Next(); n++ {
+		row := make([]interface{}, colCount)
+		for j := 0; j < colCount; j++ {
+			scanTargets[j] = &row[j]
+		}
+		if err := e.prevQuery.Scan(scanTargets...); err != nil {
+			return err
+		}
+		idx := (e.pointer - 1 + len(e.records)) % len(e.records)
+		e.pointer = idx // Move pointer backwards in the circular buffer
+		e.records[e.pointer] = row
+		rowsFetched++
+	}
+
+	e.renderData()
+	return e.prevQuery.Err()
 }
 
 // stopRowsTimer stops the timer and closes the rows if active
@@ -962,9 +991,13 @@ func (e *Editor) stopRowsTimer() {
 		close(e.rowsTimerReset)
 		e.rowsTimerReset = nil
 	}
-	if e.rows != nil {
-		_ = e.rows.Close()
-		e.rows = nil
+	if e.nextQuery != nil {
+		_ = e.nextQuery.Close()
+		e.nextQuery = nil
+	}
+	if e.prevQuery != nil {
+		_ = e.prevQuery.Close()
+		e.prevQuery = nil
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,15 +42,16 @@ type SortColumn struct {
 func (sc SortColumn) String(scrollDown bool) string {
 	if sc.Asc {
 		if scrollDown {
-			return sc.Name + " DESC"
-		} else {
 			return sc.Name + " ASC"
+		} else {
+			return sc.Name + " DESC"
 		}
-	}
-	if scrollDown {
-		return sc.Name + " ASC"
 	} else {
-		return sc.Name + " DESC"
+		if scrollDown {
+			return sc.Name + " ASC"
+		} else {
+			return sc.Name + " DESC"
+		}
 	}
 }
 
@@ -96,7 +98,11 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 				builder.WriteString(" AND ")
 			}
 			builder.WriteString(quoteIdent(dbType, col))
-			builder.WriteString(" > ")
+			if scrollDown {
+				builder.WriteString(" > ")
+			} else {
+				builder.WriteString(" < ")
+			}
 			builder.WriteString(nextPlaceholder(i + 1))
 		}
 	}
@@ -105,8 +111,9 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 		builder.WriteString(sortColString)
 		builder.WriteString(", ")
 	}
+	os.Stderr.WriteString(fmt.Sprintf("selectQuery: keyCols: %v, scrollDown: %v\n", keyCols, scrollDown))
 	for i, col := range keyCols {
-		sc := SortColumn{Name: quoteIdent(dbType, col), Asc: true}
+		sc := SortColumn{Name: quoteIdent(dbType, col), Asc: scrollDown}
 		builder.WriteString(sc.String(scrollDown))
 		if i < len(keyCols)-1 {
 			builder.WriteString(", ")
@@ -1017,6 +1024,7 @@ func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []i
 	if err != nil {
 		return nil, err
 	}
+	os.Stderr.WriteString(fmt.Sprintf("QueryRows: query: %s, params: %v\n", query, params))
 	return rel.DB.Query(query, params...)
 }
 
