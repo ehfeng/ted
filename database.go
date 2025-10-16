@@ -1124,8 +1124,6 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT 1",
 		selectClause, quotedTable, strings.Join(whereParts, " AND "), strings.Join(orderParts, ", "))
 
-	os.Stderr.WriteString(fmt.Sprintf("FindNextRow below: %s, args: %v\n", query, args))
-
 	row := rel.DB.QueryRow(query, args...)
 	foundKeys := make([]any, len(rel.key))
 	scanArgs := make([]any, len(rel.key))

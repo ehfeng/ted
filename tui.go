@@ -262,7 +262,8 @@ func (e *Editor) setupCommandPalette() {
 		switch event.Key() {
 		case tcell.KeyEnter:
 			command := e.commandPalette.GetText()
-			switch e.getPaletteMode() {
+			mode := e.getPaletteMode()
+			switch mode {
 			case PaletteModeCommand:
 				e.executeCommand(command)
 			case PaletteModeSQL:
@@ -271,10 +272,14 @@ func (e *Editor) setupCommandPalette() {
 					e.refreshData()
 				}
 			case PaletteModeGoto:
-				if strings.TrimSpace(command) != "" {
-					e.executeGoto(command)
-				}
+				e.executeGoto(command)
 			}
+
+			// For Goto mode, keep the palette open with text selected
+			if mode == PaletteModeGoto {
+				return nil
+			}
+
 			e.setPaletteMode(PaletteModeDefault, false)
 			e.app.SetFocus(e.table)
 			return nil
