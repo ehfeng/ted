@@ -142,3 +142,11 @@ ted test.db users 2>/tmp/ted.log
 tail -f /tmp/ted.log
 ```
 
+Release a new version
+
+```sh
+git tag -a v0.1.2 -m "Release notes"
+git push origin v0.1.2
+```
+
+Then go to `ehfeng/homebrew-ted`, run `.update-checksums` and push.
