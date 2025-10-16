@@ -11,6 +11,13 @@ ted test users
 
 `dbname` can either be a database file (sqlite or duckdb) or a database name.
 
+## Installation
+
+```sh
+brew tap ehfeng/ted
+brew install ted
+```
+
 ## Common flags
 
 ### Connection info
