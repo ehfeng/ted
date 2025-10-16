@@ -1,27 +1,15 @@
-# ted
+# ted: tabular editor
 
-ted is a tabular editor. It displays database tables as markdown table and provides spreadsheet-like editing, including mouse support for selecting cells (with Opt key) or adjust column widths.
+ted displays database tables as markdown table and provides spreadsheet-like editing, including mouse support for selecting/editing cells.
 
 ![ted demo](ted.gif)
-
-```
-┌────┬──────┬──────────┬────────────┬────────────┬────┐
-│ id │ name │ email    │ created_at │ updated_at │↓or…│
-├────╆━━━━━━┿━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━━━━━━━━━┿━━━━┥
-│  1 ┃ John…│ john.dee…│ 2021-01-01 │ 2021-01-01 │  3 │
-│  2 ┃ Jane…│ jane.don…│ 2021-01-01 │ 2021-01-01 │…24 │
-└────┸──────┴──────────┴────────────┴────────────┴────┘
-
-█Status bar████████████████████████████████████████████
- Command bar
-```
 
 ```sh
 ted [dbname] [tbl]
 ted test users
 ```
 
-`dbname` can either be a database file (sqlite or duckdb) or a database name. The where clause lets you filter down the table.
+`dbname` can either be a database file (sqlite or duckdb) or a database name.
 
 ## Common flags
 
@@ -35,14 +23,10 @@ ted test users
 
 ### Database shorthands
 
-Only needed for database servers
-
 - `--pg`
 - `--my` or `--mysql`
 
 ## Supported keyboard shortcuts
-
-cmd/ctrl for mac/windows
 
 ### Navigation
 
