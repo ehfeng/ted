@@ -146,6 +146,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor.setupCommandPalette()
 	editor.setupLayout()
 	editor.refreshData()
+	editor.table.Select(0, 0)
 	editor.pages.AddPage("table", editor.layout, true, true)
 
 	if err := editor.app.SetRoot(editor.pages, true).Run(); err != nil {
@@ -270,9 +271,8 @@ func (e *Editor) setupCommandPalette() {
 					e.refreshData()
 				}
 			case PaletteModeGoto:
-				// Placeholder for future goto implementation
 				if strings.TrimSpace(command) != "" {
-					e.SetStatusLog("Goto: " + strings.TrimSpace(command))
+					e.executeGoto(command)
 				}
 			}
 			e.setPaletteMode(PaletteModeDefault, false)
@@ -880,6 +880,110 @@ func (e *Editor) refreshData() {
 	e.renderData()
 }
 
+func (e *Editor) loadFromRowId(id []interface{}, fromTop bool, focusColumn int) error {
+	if e.relation == nil || e.relation.DB == nil {
+		return fmt.Errorf("no database connection available")
+	}
+
+	// Stop refresh timer when starting a new query
+	e.stopRefreshTimer()
+
+	selectCols := make([]string, len(e.columns))
+	for i, col := range e.columns {
+		selectCols[i] = col.Name
+	}
+
+	colCount := len(e.columns)
+	if colCount == 0 {
+		return nil
+	}
+
+	var rows *sql.Rows
+	var err error
+	if fromTop {
+		// Load from top: use QueryRows with inclusive true, scrollDown true
+		rows, err = e.relation.QueryRows(selectCols, nil, id, true, true)
+		if err != nil {
+			return err
+		}
+		e.nextQuery = rows
+		e.startRowsTimer()
+
+		// Scan rows into e.records starting from pointer
+		e.pointer = 0
+		rowsLoaded := 0
+		scanTargets := make([]interface{}, colCount)
+		for i := 0; i < len(e.records) && rows.Next(); i++ {
+			row := make([]interface{}, colCount)
+			for j := 0; j < colCount; j++ {
+				scanTargets[j] = &row[j]
+			}
+			if err := rows.Scan(scanTargets...); err != nil {
+				return err
+			}
+			e.records[i] = row
+			rowsLoaded++
+		}
+
+		// Mark end with nil if we didn't fill the buffer
+		if rowsLoaded < len(e.records) {
+			e.records[rowsLoaded] = nil
+		}
+	} else {
+		// Load from bottom: use QueryRows with inclusive true, scrollDown false
+		rows, err = e.relation.QueryRows(selectCols, nil, id, true, false)
+		if err != nil {
+			return err
+		}
+		e.prevQuery = rows
+		e.startRowsTimer()
+
+		// Scan rows into e.records in reverse, starting from end of buffer
+		e.pointer = 0
+		scanTargets := make([]interface{}, colCount)
+		rowsLoaded := 0
+		tempRows := make([][]interface{}, 0, len(e.records))
+
+		// First collect all rows
+		for rows.Next() {
+			row := make([]interface{}, colCount)
+			for j := 0; j < colCount; j++ {
+				scanTargets[j] = &row[j]
+			}
+			if err := rows.Scan(scanTargets...); err != nil {
+				return err
+			}
+			tempRows = append(tempRows, row)
+			rowsLoaded++
+			if rowsLoaded >= len(e.records) {
+				break
+			}
+		}
+
+		// Reverse the rows and place them at the end of the buffer
+		for i := len(tempRows) - 1; i >= 0; i-- {
+			idx := len(tempRows) - 1 - i
+			e.records[idx] = tempRows[i]
+		}
+
+		// Mark end with nil if we didn't fill the buffer
+		if rowsLoaded < len(e.records) {
+			e.records[rowsLoaded] = nil
+		}
+	}
+
+	e.renderData()
+
+	// Focus on the specified column
+	if fromTop {
+		e.table.Select(0, focusColumn)
+	} else {
+		e.table.Select(len(e.records)-1, focusColumn)
+	}
+
+	return nil
+}
+
 // nextRows fetches the next i rows from e.rows and resets the auto-close timer
 // when there are no more rows, adds a nil sentinel to mark the end
 func (e *Editor) nextRows(i int) error {
@@ -1066,6 +1170,10 @@ func (e *Editor) stopRowsTimer() {
 
 // startRefreshTimer starts a timer that refreshes data every 300ms
 func (e *Editor) startRefreshTimer() {
+	if e.app == nil {
+		return
+	}
+
 	// Stop existing refresh timer if any
 	e.stopRefreshTimer()
 
@@ -1077,14 +1185,17 @@ func (e *Editor) startRefreshTimer() {
 	go func() {
 		stopChan := e.refreshTimerStop
 		timer := e.refreshTimer
+		app := e.app
 		for {
 			select {
 			case <-stopChan:
 				return
 			case <-timer.C:
-				e.app.QueueUpdateDraw(func() {
-					e.refreshData()
-				})
+				if app != nil {
+					app.QueueUpdateDraw(func() {
+						e.refreshData()
+					})
+				}
 				timer.Reset(300 * time.Millisecond)
 			}
 		}
@@ -1182,7 +1293,6 @@ func (e *Editor) isMultilineColumnType(col int) bool {
 		strings.Contains(attrType, "text") ||
 		attrType == "json" // json but not jsonb
 }
-
 
 // Status bar API methods
 func (e *Editor) SetStatusMessage(message string) {
@@ -1284,5 +1394,96 @@ func (e *Editor) executeCommand(command string) {
 		}
 	default:
 		e.SetStatusError("Unknown command: " + cmd)
+	}
+}
+
+// Goto execution
+func (e *Editor) executeGoto(gotoValue string) {
+	if e.relation == nil {
+		e.SetStatusError("No database connection available")
+		return
+	}
+
+	row, col := e.table.GetSelection()
+	if row < 0 || row >= len(e.records) || e.records[row] == nil {
+		e.SetStatusError("Invalid current row")
+		return
+	}
+
+	// Get current row's key values
+	currentKeys := make([]interface{}, len(e.relation.key))
+	for i := range e.relation.key {
+		currentKeys[i] = e.records[row][i]
+	}
+
+	// Find the column index in relation.attributeOrder
+	gotoCol := -1
+	for i, name := range e.relation.attributeOrder {
+		if name == e.columns[col].Name {
+			gotoCol = i
+			break
+		}
+	}
+
+	if gotoCol == -1 {
+		e.SetStatusError("Column not found in relation")
+		return
+	}
+
+	// Use FindNextRow to search for the next matching row
+	foundKeys, foundBelow, err := e.relation.FindNextRow(gotoCol, gotoValue, nil, nil, currentKeys)
+	if err != nil {
+		e.SetStatusError(err.Error())
+		return
+	}
+
+	if foundKeys == nil {
+		e.SetStatusMessage("No match found")
+		return
+	}
+
+	// Check if the found row is within the current record window
+	foundInWindow := false
+	var foundRow int
+
+	for i := 0; i < len(e.records); i++ {
+		if e.records[i] == nil {
+			break
+		}
+		// Compare key values
+		match := true
+		for j := range e.relation.key {
+			if e.records[i][j] != foundKeys[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			foundInWindow = true
+			foundRow = i
+			break
+		}
+	}
+
+	if foundInWindow {
+		// Row is in the current window, just select it
+		e.table.Select(foundRow, col)
+		e.SetStatusMessage("Match found")
+	} else {
+		// Row is outside the current window, need to load from that row
+		if foundBelow {
+			// Found row is after current window, load from bottom (reverse order)
+			if err := e.loadFromRowId(foundKeys, false, col); err != nil {
+				e.SetStatusError(err.Error())
+				return
+			}
+		} else {
+			// Found row wrapped around to before current window, load from top
+			if err := e.loadFromRowId(foundKeys, true, col); err != nil {
+				e.SetStatusError(err.Error())
+				return
+			}
+		}
+		e.SetStatusMessage("Match found")
 	}
 }
