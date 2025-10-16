@@ -73,7 +73,7 @@ const (
 	PaletteModeDefault PaletteMode = iota
 	PaletteModeCommand
 	PaletteModeSQL
-	PaletteModeFind
+	PaletteModeGoto
 	PaletteModeUpdate
 )
 
@@ -85,8 +85,8 @@ func (m PaletteMode) Glyph() string {
 		return "> "
 	case PaletteModeSQL:
 		return "` "
-	case PaletteModeFind:
-		return "/ "
+	case PaletteModeGoto:
+		return "↪ "
 	case PaletteModeUpdate:
 		return "= "
 	default:
@@ -219,8 +219,8 @@ func (e *Editor) setupCommandPalette() {
 		}
 
 		switch {
-		case (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0:
-			e.setPaletteMode(PaletteModeFind, true)
+		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0: // Ctrl+G sends BEL (7) or 'g' depending on terminal
+			e.setPaletteMode(PaletteModeGoto, true)
 			return nil
 		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
 			e.setPaletteMode(PaletteModeCommand, true)
@@ -237,14 +237,14 @@ func (e *Editor) setupCommandPalette() {
 			case PaletteModeCommand:
 				e.executeCommand(command)
 			case PaletteModeSQL:
-				// Placeholder for future SQL execution
 				if strings.TrimSpace(command) != "" {
-					e.SetStatusLog("SQL: " + strings.TrimSpace(command))
+					e.executeSQL(command)
+					e.refreshData()
 				}
-			case PaletteModeFind:
-				// Placeholder for future find implementation
+			case PaletteModeGoto:
+				// Placeholder for future goto implementation
 				if strings.TrimSpace(command) != "" {
-					e.SetStatusLog("Find: " + strings.TrimSpace(command))
+					e.SetStatusLog("Goto: " + strings.TrimSpace(command))
 				}
 			}
 			e.setPaletteMode(PaletteModeDefault, false)
@@ -334,8 +334,8 @@ func (e *Editor) setupKeyBindings() {
 		case (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0: // Ctrl+R sends DC2 (18) or 'r' depending on terminal
 			e.refreshData()
 			return nil
-		case (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0: // Ctrl+F sends ACK (6) or 'f' depending on terminal
-			e.setPaletteMode(PaletteModeFind, true)
+		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0: // Ctrl+G sends BEL (7) or 'g' depending on terminal
+			e.setPaletteMode(PaletteModeGoto, true)
 			return nil
 		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0: // Ctrl+P sends DLE (16) or 'p' depending on terminal
 			e.setPaletteMode(PaletteModeCommand, true)
@@ -683,13 +683,13 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	} else {
 		switch mode {
 		case PaletteModeDefault:
-			e.commandPalette.SetPlaceholder("Ctrl+P: Command   Ctrl+`: SQL   Ctrl+F: Find")
+			e.commandPalette.SetPlaceholder("Ctrl+P Command · Ctrl+` SQL · Ctrl+G Goto · Ctrl+C Exit")
 		case PaletteModeCommand:
 			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
 		case PaletteModeSQL:
-			e.commandPalette.SetPlaceholder("SQL… (Esc to exit)")
-		case PaletteModeFind:
-			e.commandPalette.SetPlaceholder("Find… (Esc to exit)")
+			e.commandPalette.SetPlaceholder("Execute SQL… (Esc to exit)")
+		case PaletteModeGoto:
+			e.commandPalette.SetPlaceholder("Goto next row matching value… (Esc to exit)")
 		case PaletteModeUpdate:
 			// No placeholder in update mode
 			e.commandPalette.SetPlaceholder("")
@@ -802,13 +802,26 @@ func (e *Editor) refreshData() {
 		selectCols[i] = quoteIdent(e.relation.DBType, col.Name)
 	}
 
-	rows, err := e.relation.QueryRows(selectCols, nil, nil, true)
-	if err != nil {
-		if e.statusBar != nil {
-			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+	var rows *sql.Rows
+	var err error
+	if len(e.records) == 0 || e.records[e.pointer] == nil {
+		rows, err = e.relation.QueryRows(selectCols, nil, nil, true, true)
+		if err != nil {
+			if e.statusBar != nil {
+				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+			}
+			return
 		}
-		return
+	} else {
+		rows, err = e.relation.QueryRows(selectCols, nil, e.records[e.pointer][:len(e.relation.key)], true, true)
+		if err != nil {
+			if e.statusBar != nil {
+				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+			}
+			return
+		}
 	}
+
 	e.nextQuery = rows
 	e.pointer = 0 // Reset pointer for fresh load
 
@@ -865,7 +878,7 @@ func (e *Editor) nextRows(i int) error {
 			selectCols[i] = col.Name
 		}
 		var err error
-		e.nextQuery, err = e.relation.QueryRows(selectCols, nil, params, true)
+		e.nextQuery, err = e.relation.QueryRows(selectCols, nil, params, false, true)
 		if err != nil {
 			return err
 		}
@@ -921,7 +934,7 @@ func (e *Editor) prevRows(i int) error {
 			selectCols[i] = col.Name
 		}
 		var err error
-		e.prevQuery, err = e.relation.QueryRows(selectCols, nil, params, false)
+		e.prevQuery, err = e.relation.QueryRows(selectCols, nil, params, false, false)
 		if err != nil {
 			return err
 		}
@@ -1127,7 +1140,6 @@ func getTerminalHeight() int {
 func (e *Editor) SetStatusMessage(message string) {
 	if e.statusBar != nil {
 		e.statusBar.SetText(message)
-		e.app.Draw()
 	}
 }
 
@@ -1142,6 +1154,47 @@ func (e *Editor) SetStatusLog(message string) {
 	if e.statusBar != nil {
 		e.statusBar.SetText("[blue]LOG: " + message + "[white]")
 		e.app.Draw()
+	}
+}
+
+// SQL execution
+func (e *Editor) executeSQL(query string) {
+	if e.relation == nil || e.relation.DB == nil {
+		e.SetStatusError("No database connection available")
+		return
+	}
+
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return
+	}
+
+	result, err := e.relation.DB.Exec(query)
+	if err != nil {
+		e.SetStatusError(err.Error())
+		return
+	}
+
+	// Try to get last insert id
+	lastInsertId, lastIdErr := result.LastInsertId()
+	rowsAffected, rowsErr := result.RowsAffected()
+
+	// Build status message
+	var statusParts []string
+	if rowsErr == nil {
+		if rowsAffected == 1 {
+			statusParts = append(statusParts, "1 row affected")
+		} else {
+			statusParts = append(statusParts, fmt.Sprintf("%d rows affected", rowsAffected))
+		}
+	}
+	if lastIdErr == nil && lastInsertId > 0 {
+		statusParts = append(statusParts, fmt.Sprintf("last insert id: %d", lastInsertId))
+	}
+	if len(statusParts) > 0 {
+		e.SetStatusMessage(strings.Join(statusParts, ", "))
+	} else {
+		e.SetStatusMessage("Query executed successfully")
 	}
 }
 

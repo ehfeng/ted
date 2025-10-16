@@ -58,7 +58,7 @@ func (sc SortColumn) String(scrollDown bool) string {
 // direction is always secondarily sorted by key cols
 // `select col, ... from tbl where col > ?, ... order by sortCol, keyCol, ...`
 // for initial load, params are nil
-func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCol *SortColumn, keyCols []string, hasParams bool, scrollDown bool) (string, error) {
+func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCol *SortColumn, keyCols []string, hasParams, inclusive, scrollDown bool) (string, error) {
 	if len(keyCols) == 0 {
 		panic("keyCols is empty")
 	}
@@ -98,9 +98,17 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 			}
 			builder.WriteString(quoteIdent(dbType, col))
 			if scrollDown {
-				builder.WriteString(" > ")
+				if inclusive {
+					builder.WriteString(" >= ")
+				} else {
+					builder.WriteString(" > ")
+				}
 			} else {
-				builder.WriteString(" < ")
+				if inclusive {
+					builder.WriteString(" <= ")
+				} else {
+					builder.WriteString(" < ")
+				}
 			}
 			builder.WriteString(nextPlaceholder(i + 1))
 		}
@@ -1017,8 +1025,8 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
-func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []interface{}, scrollDown bool) (*sql.Rows, error) {
-	query, err := selectQuery(rel.DBType, rel.name, columns, sortCol, rel.key, len(params) > 0, scrollDown)
+func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []interface{}, inclusive, scrollDown bool) (*sql.Rows, error) {
+	query, err := selectQuery(rel.DBType, rel.name, columns, sortCol, rel.key, len(params) > 0, inclusive, scrollDown)
 	if err != nil {
 		return nil, err
 	}
