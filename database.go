@@ -1027,6 +1027,166 @@ func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []i
 	return rel.DB.Query(query, params...)
 }
 
+// FindNextRow searches for the next row matching gotoColVal in the column at index gotoCol.
+// It searches below the current selection first, then wraps around to search from the top.
+// Returns: (keys of found row, true if found below/false if wrapped, error)
+func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColumn, sortColVal any, currentKeys []any) ([]any, bool, error) {
+	if gotoCol < 0 || gotoCol >= len(rel.attributeOrder) {
+		return nil, false, fmt.Errorf("gotoCol index out of range")
+	}
+	if len(currentKeys) != len(rel.key) {
+		return nil, false, fmt.Errorf("currentKeys length mismatch: expected %d, got %d", len(rel.key), len(currentKeys))
+	}
+
+	searchColName := rel.attributeOrder[gotoCol]
+	quotedSearchCol := quoteIdent(rel.DBType, searchColName)
+	quotedTable := quoteQualified(rel.DBType, rel.name)
+
+	// Build key column list for SELECT
+	keyCols := make([]string, len(rel.key))
+	for i, k := range rel.key {
+		keyCols[i] = quoteIdent(rel.DBType, k)
+	}
+	selectClause := strings.Join(keyCols, ", ")
+
+	placeholder := func(pos int) string {
+		if databaseFeatures[rel.DBType].positionalPlaceholder {
+			return fmt.Sprintf("$%d", pos)
+		}
+		return "?"
+	}
+
+	// Helper to build WHERE clause for multi-column key progression
+	buildKeyWhere := func(op string, startPos int) (string, []any) {
+		// For multi-column keys, we need: key1 >= ? AND key2 >= ? AND ... AND keyN > ?
+		// The last key uses > (or <), the rest use >= (or <=)
+		var parts []string
+		var args []any
+		lastIdx := len(rel.key) - 1
+		for i, keyCol := range rel.key {
+			quoted := quoteIdent(rel.DBType, keyCol)
+			var cmp string
+			if i < lastIdx {
+				cmp = op + "="
+			} else {
+				cmp = op
+			}
+			parts = append(parts, fmt.Sprintf("%s %s %s", quoted, cmp, placeholder(startPos)))
+			args = append(args, currentKeys[i])
+			startPos++
+		}
+		return strings.Join(parts, " AND "), args
+	}
+
+	// Search below current position
+	var whereParts []string
+	var args []any
+	paramPos := 1
+
+	// Sort column condition
+	if sortCol != nil {
+		quotedSortCol := quoteIdent(rel.DBType, sortCol.Name)
+		whereParts = append(whereParts, fmt.Sprintf("%s >= %s", quotedSortCol, placeholder(paramPos)))
+		args = append(args, sortColVal)
+		paramPos++
+	}
+
+	// Key progression conditions
+	keyWhere, keyArgs := buildKeyWhere(">", paramPos)
+	whereParts = append(whereParts, keyWhere)
+	args = append(args, keyArgs...)
+	paramPos += len(keyArgs)
+
+	// Search column match
+	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, placeholder(paramPos)))
+	args = append(args, gotoColVal)
+
+	// ORDER BY
+	var orderParts []string
+	if sortCol != nil {
+		if sortCol.Asc {
+			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" ASC")
+		} else {
+			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" DESC")
+		}
+	}
+	for _, k := range rel.key {
+		orderParts = append(orderParts, quoteIdent(rel.DBType, k)+" ASC")
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT 1",
+		selectClause, quotedTable, strings.Join(whereParts, " AND "), strings.Join(orderParts, ", "))
+
+	os.Stderr.WriteString(fmt.Sprintf("FindNextRow below: %s, args: %v\n", query, args))
+
+	row := rel.DB.QueryRow(query, args...)
+	foundKeys := make([]any, len(rel.key))
+	scanArgs := make([]any, len(rel.key))
+	for i := range foundKeys {
+		scanArgs[i] = &foundKeys[i]
+	}
+
+	err := row.Scan(scanArgs...)
+	if err == nil {
+		return foundKeys, true, nil // Found below
+	}
+	if err != sql.ErrNoRows {
+		return nil, false, fmt.Errorf("search below failed: %w", err)
+	}
+
+	// Wrap around: search from top up to current position
+	whereParts = whereParts[:0]
+	args = args[:0]
+	paramPos = 1
+
+	// Sort column condition (reversed)
+	if sortCol != nil {
+		quotedSortCol := quoteIdent(rel.DBType, sortCol.Name)
+		whereParts = append(whereParts, fmt.Sprintf("%s <= %s", quotedSortCol, placeholder(paramPos)))
+		args = append(args, sortColVal)
+		paramPos++
+	}
+
+	// Key progression conditions (reversed)
+	keyWhere, keyArgs = buildKeyWhere("<", paramPos)
+	whereParts = append(whereParts, keyWhere)
+	args = append(args, keyArgs...)
+	paramPos += len(keyArgs)
+
+	// Search column match
+	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, placeholder(paramPos)))
+	args = append(args, gotoColVal)
+
+	// ORDER BY (reversed)
+	orderParts = orderParts[:0]
+	if sortCol != nil {
+		if sortCol.Asc {
+			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" DESC")
+		} else {
+			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" ASC")
+		}
+	}
+	for _, k := range rel.key {
+		orderParts = append(orderParts, quoteIdent(rel.DBType, k)+" DESC")
+	}
+
+	query = fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT 1",
+		selectClause, quotedTable, strings.Join(whereParts, " AND "), strings.Join(orderParts, ", "))
+
+	os.Stderr.WriteString(fmt.Sprintf("FindNextRow wrap: %s, args: %v\n", query, args))
+
+	row = rel.DB.QueryRow(query, args...)
+	err = row.Scan(scanArgs...)
+	if err == sql.ErrNoRows {
+		return nil, false, nil // Not found at all
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("wrap search failed: %w", err)
+	}
+
+	return foundKeys, false, nil // Found after wrapping
+}
+
 // quoteIdent safely quotes an identifier (table/column) for the target DB.
 // Attempts to minimize quoting by returning the identifier unquoted when it is
 // obviously safe to do so:
