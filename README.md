@@ -140,5 +140,5 @@ Pasting cells (separate from pasting values). Unclear how you'd map things, espe
 watchexec --restart --exts go,mod,sum -- 'go install'
 ted test.db users 2>/tmp/ted.log
 tail -f /tmp/ted.log
-`
+```
 
