@@ -64,6 +64,10 @@ type Editor struct {
 	// timer for auto-closing rows
 	rowsTimer      *time.Timer
 	rowsTimerReset chan struct{}
+
+	// timer for auto-refreshing data
+	refreshTimer     *time.Timer
+	refreshTimerStop chan struct{}
 }
 
 // PaletteMode represents the current mode of the command palette
@@ -683,7 +687,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	} else {
 		switch mode {
 		case PaletteModeDefault:
-			e.commandPalette.SetPlaceholder("Ctrl+P Command · Ctrl+` SQL · Ctrl+G Goto · Ctrl+C Exit")
+			e.commandPalette.SetPlaceholder("Ctrl+P: Command · Ctrl+`: SQL · Ctrl+G: Goto · Ctrl+C: Exit")
 		case PaletteModeCommand:
 			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
 		case PaletteModeSQL:
@@ -822,7 +826,6 @@ func (e *Editor) refreshData() {
 		}
 	}
 
-	e.nextQuery = rows
 	e.pointer = 0 // Reset pointer for fresh load
 
 	// Load initial rows up to the preallocated size
@@ -835,7 +838,6 @@ func (e *Editor) refreshData() {
 		}
 		if err := rows.Scan(scanTargets...); err != nil {
 			rows.Close()
-			e.nextQuery = nil
 			if e.statusBar != nil {
 				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
 			}
@@ -845,17 +847,12 @@ func (e *Editor) refreshData() {
 	}
 
 	// If we didn't fill the buffer, mark the end with nil
+	rows.Close()
+	e.startRowsTimer()
 	if rowsLoaded < len(e.records) {
 		e.records[rowsLoaded] = nil
 	}
 
-	if err := e.nextQuery.Err(); err != nil {
-		if e.statusBar != nil {
-			e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
-		}
-		return
-	}
-	e.startRowsTimer()
 	e.renderData()
 }
 
@@ -869,6 +866,9 @@ func (e *Editor) nextRows(i int) error {
 	}
 
 	if e.nextQuery == nil {
+		// Stop refresh timer when starting a new query
+		e.stopRefreshTimer()
+
 		params := make([]interface{}, len(e.relation.key))
 		for i := range e.relation.key {
 			params[i] = e.records[(e.pointer-1+len(e.records))%len(e.records)][i]
@@ -925,6 +925,9 @@ func (e *Editor) nextRows(i int) error {
 // prevRows fetches the previous i rows (scrolling backwards in the circular buffer)
 func (e *Editor) prevRows(i int) error {
 	if e.prevQuery == nil {
+		// Stop refresh timer when starting a new query
+		e.stopRefreshTimer()
+
 		params := make([]interface{}, len(e.relation.key))
 		for i := range e.relation.key {
 			params[i] = e.records[e.pointer][i]
@@ -1030,6 +1033,49 @@ func (e *Editor) stopRowsTimer() {
 	if e.prevQuery != nil {
 		_ = e.prevQuery.Close()
 		e.prevQuery = nil
+	}
+
+	// Start refresh timer after closing queries
+	e.refreshData()
+	e.startRefreshTimer()
+}
+
+// startRefreshTimer starts a timer that refreshes data every 300ms
+func (e *Editor) startRefreshTimer() {
+	// Stop existing refresh timer if any
+	e.stopRefreshTimer()
+
+	// Start new refresh timer
+	e.refreshTimerStop = make(chan struct{})
+	e.refreshTimer = time.NewTimer(300 * time.Millisecond)
+
+	// Refresh timer goroutine
+	go func() {
+		stopChan := e.refreshTimerStop
+		timer := e.refreshTimer
+		for {
+			select {
+			case <-stopChan:
+				return
+			case <-timer.C:
+				e.app.QueueUpdateDraw(func() {
+					e.refreshData()
+				})
+				timer.Reset(300 * time.Millisecond)
+			}
+		}
+	}()
+}
+
+// stopRefreshTimer stops the refresh timer if active
+func (e *Editor) stopRefreshTimer() {
+	if e.refreshTimer != nil {
+		e.refreshTimer.Stop()
+		e.refreshTimer = nil
+	}
+	if e.refreshTimerStop != nil {
+		close(e.refreshTimerStop)
+		e.refreshTimerStop = nil
 	}
 }
 
