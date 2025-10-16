@@ -107,9 +107,19 @@ jobs:
 
       - name: Prepare release files
         run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+
           mv artifacts/linux-windows-binaries/* .
           mv artifacts/macos-binaries/* .
-          sha256sum ted-* > checksums.txt
+
+          # Package binaries into tar.gz with proper naming
+          tar -czf ted_${VERSION}_Linux_amd64.tar.gz ted-linux-amd64
+          tar -czf ted_${VERSION}_Darwin_amd64.tar.gz ted-darwin-amd64
+          tar -czf ted_${VERSION}_Darwin_arm64.tar.gz ted-darwin-arm64
+          zip ted_${VERSION}_Windows_amd64.zip ted-windows-amd64.exe
+
+          # Create checksums for the archives
+          sha256sum ted_${VERSION}_*.tar.gz ted_${VERSION}_*.zip > checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -119,10 +129,10 @@ jobs:
           body: ${{ steps.tag_message.outputs.use_tag_message == 'true' && steps.tag_message.outputs.tag_message || '' }}
           generate_release_notes: ${{ steps.tag_message.outputs.use_tag_message == 'false' }}
           files: |
-            ted-linux-amd64
-            ted-windows-amd64.exe
-            ted-darwin-amd64
-            ted-darwin-arm64
+            ted_*_Linux_amd64.tar.gz
+            ted_*_Darwin_amd64.tar.gz
+            ted_*_Darwin_arm64.tar.gz
+            ted_*_Windows_amd64.zip
             checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
