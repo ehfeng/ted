@@ -81,6 +81,25 @@ jobs:
     needs: [build-linux-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract tag message
+        id: tag_message
+        run: |
+          TAG_MESSAGE=$(git tag -l --format='%(contents)' ${GITHUB_REF#refs/tags/})
+          if [ -z "$TAG_MESSAGE" ]; then
+            echo "No annotated tag message found, will use auto-generated notes"
+            echo "use_tag_message=false" >> $GITHUB_OUTPUT
+          else
+            echo "use_tag_message=true" >> $GITHUB_OUTPUT
+            echo "tag_message<<EOF" >> $GITHUB_OUTPUT
+            echo "$TAG_MESSAGE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -97,7 +116,8 @@ jobs:
         with:
           draft: false
           prerelease: ${{ contains(github.ref, '-') }}
-          generate_release_notes: true
+          body: ${{ steps.tag_message.outputs.use_tag_message == 'true' && steps.tag_message.outputs.tag_message || '' }}
+          generate_release_notes: ${{ steps.tag_message.outputs.use_tag_message == 'false' }}
           files: |
             ted-linux-amd64
             ted-windows-amd64.exe
