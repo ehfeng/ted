@@ -34,6 +34,11 @@ type TableView struct {
 
 	// Callbacks
 	doubleClickFunc func(row, col int)
+	singleClickFunc func(row, col int)
+
+	// Double-click tracking
+	lastClickRow int
+	lastClickCol int
 
 	// Viewport information
 	BodyRowsAvailable int
@@ -51,6 +56,8 @@ func NewTableView() *TableView {
 		selectedRow:   0,
 		selectedCol:   0,
 		selectable:    true,
+		lastClickRow:  -1,
+		lastClickCol:  -1,
 	}
 
 	tv.SetBorder(false) // We'll draw our own borders
@@ -97,6 +104,12 @@ func (tv *TableView) SetSelectable(selectable bool) *TableView {
 // SetDoubleClickFunc sets the function to call when a cell is double-clicked
 func (tv *TableView) SetDoubleClickFunc(handler func(row, col int)) *TableView {
 	tv.doubleClickFunc = handler
+	return tv
+}
+
+// SetSingleClickFunc sets the function to call when a cell is single-clicked
+func (tv *TableView) SetSingleClickFunc(handler func(row, col int)) *TableView {
+	tv.singleClickFunc = handler
 	return tv
 }
 
@@ -409,16 +422,29 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 				if row >= 0 && col >= 0 {
 					tv.selectedRow = row
 					tv.selectedCol = col
+					// tv.lastClickRow = row
+					// tv.lastClickCol = col
 					consumed = true
 				}
 			}
-
+		case tview.MouseLeftClick:
+			row, col := tv.GetCellAtPosition(x, y)
+			if tv.singleClickFunc != nil && row >= 0 && col >= 0 {
+				tv.singleClickFunc(row, col)
+			}
+			tv.lastClickRow = row
+			tv.lastClickCol = col
+			consumed = true
+			return consumed, nil
 		case tview.MouseLeftDoubleClick:
-			// Handle double-click on a cell
+			// Handle double-click on a cell - only if both clicks are on the same cell
 			if tv.doubleClickFunc != nil {
 				row, col := tv.GetCellAtPosition(x, y)
-				if row >= 0 && col >= 0 {
+				if row >= 0 && col >= 0 && row == tv.lastClickRow && col == tv.lastClickCol {
 					tv.doubleClickFunc(row, col)
+					// reset double click tracking
+					tv.lastClickRow = -1
+					tv.lastClickCol = -1
 					consumed = true
 				}
 			}

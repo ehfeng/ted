@@ -173,7 +173,33 @@ func (e *Editor) setupTable() {
 		SetDoubleClickFunc(func(row, col int) {
 			// Double-click on a cell opens edit mode
 			e.enterEditMode(row, col)
+		}).
+		SetSingleClickFunc(func(row, col int) {
+			// Single-click exits edit mode without saving
+			if e.editMode {
+				e.exitEditMode()
+			}
 		})
+
+	// Set up mouse scroll handling
+	e.table.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		switch action {
+		case tview.MouseScrollUp:
+			if err := e.prevRows(1); err != nil {
+				return action, nil
+			}
+			go e.app.Draw()
+			return action, nil
+		case tview.MouseScrollDown:
+			if err := e.nextRows(1); err != nil {
+				return action, nil
+			}
+			go e.app.Draw()
+			return action, nil
+		}
+		// Pass through other mouse events
+		return action, event
+	})
 }
 
 func (e *Editor) setupStatusBar() {
