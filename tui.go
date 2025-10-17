@@ -251,9 +251,9 @@ func (e *Editor) setupCommandPalette() {
 		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0: // Ctrl+G sends BEL (7) or 'g' depending on terminal
 			e.setPaletteMode(PaletteModeGoto, true)
 			return nil
-		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
-			e.setPaletteMode(PaletteModeCommand, true)
-			return nil
+		// case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
+		// 	e.setPaletteMode(PaletteModeCommand, true)
+		// 	return nil
 		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0:
 			e.setPaletteMode(PaletteModeSQL, true)
 			return nil
@@ -1009,7 +1009,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	} else {
 		switch mode {
 		case PaletteModeDefault:
-			e.commandPalette.SetPlaceholder("Ctrl+P: Command · Ctrl+`: SQL · Ctrl+G: Goto · Ctrl+C: Exit")
+			e.commandPalette.SetPlaceholder("Ctrl+`: SQL · Ctrl+G: Goto · Ctrl+C: Exit")
 		case PaletteModeCommand:
 			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
 		case PaletteModeSQL:
