@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -162,9 +165,11 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 
 	// Check if we should draw the bottom border (when final slice is nil)
 	drawBottomBorder := tv.bottom
-	if len(tv.data) > 0 && tv.data[len(tv.data)-1] == nil {
+	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1]) == 0 {
 		drawBottomBorder = true
 	}
+	os.Stderr.WriteString(fmt.Sprintf("len(tv.data): %d, tv.data[len(tv.data)-1]: %v\n", len(tv.data), tv.data[len(tv.data)-1]))
+	os.Stderr.WriteString(fmt.Sprintf("bottom border: %v\n", drawBottomBorder))
 
 	// Draw data rows
 	dataRowsDrawn := 0

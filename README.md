@@ -44,7 +44,9 @@ brew install ted
 1. end
 1. page up
 1. page down
-1. cmd+arrow
+1. ctrl+home/end
+
+cmd+up/down are captured by Ghostty, micro also uses these shortcuts.
 
 ### Data
 

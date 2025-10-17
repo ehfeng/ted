@@ -342,9 +342,21 @@ func (e *Editor) setupKeyBindings() {
 			e.navigateTab(true)
 			return nil
 		case key == tcell.KeyHome:
+			if mod&tcell.ModCtrl != 0 {
+				// Ctrl+Home: jump to first row
+				e.loadFromRowId(nil, true, col)
+				e.table.Select(0, col)
+				return nil
+			}
 			e.table.Select(row, 0)
 			return nil
 		case key == tcell.KeyEnd:
+			if mod&tcell.ModCtrl != 0 {
+				// Ctrl+End: jump to last row
+				e.loadFromRowId(nil, false, col)
+				e.table.Select(len(e.records)-2, col)
+				return nil
+			}
 			e.table.Select(row, len(e.columns)-1)
 			return nil
 		case key == tcell.KeyPgUp:
@@ -408,13 +420,21 @@ func (e *Editor) setupKeyBindings() {
 			}
 		case key == tcell.KeyDown:
 			if mod&tcell.ModMeta != 0 {
-				e.table.Select(len(e.records)-1, col)
+				if len(e.records[len(e.records)-1]) == 0 {
+					e.table.Select(len(e.records)-2, col)
+				} else {
+					e.table.Select(len(e.records)-1, col)
+				}
 				return nil
 			} else {
 				if row == len(e.records)-1 {
 					e.nextRows(1)
 				} else {
-					e.table.Select(row+1, col)
+					if len(e.records[row+1]) == 0 {
+						e.table.Select(row+2, col)
+					} else {
+						e.table.Select(row+1, col)
+					}
 				}
 				return nil
 			}
@@ -552,6 +572,17 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 			// Plain Enter: save and exit
 			newText := textArea.GetText()
 			e.updateCell(row, col, newText)
+			return nil
+		case tcell.KeyTab:
+			// Tab: save and move to next cell
+			newText := textArea.GetText()
+			e.updateCell(row, col, newText)
+			// Move selection right
+			if col < len(e.columns)-1 {
+				e.table.Select(row, col+1)
+			} else if row < len(e.records)-1 {
+				e.table.Select(row+1, 0)
+			}
 			return nil
 		case tcell.KeyEscape:
 			e.exitEditMode()
@@ -1256,7 +1287,7 @@ func (e *Editor) loadFromRowId(id []interface{}, fromTop bool, focusColumn int) 
 			}
 			tempRows = append(tempRows, row)
 			rowsLoaded++
-			if rowsLoaded >= len(e.records) {
+			if rowsLoaded >= len(e.records)-1 {
 				break
 			}
 		}
@@ -1266,13 +1297,15 @@ func (e *Editor) loadFromRowId(id []interface{}, fromTop bool, focusColumn int) 
 			idx := len(tempRows) - 1 - i
 			e.records[idx] = tempRows[i]
 		}
+		e.records[len(e.records)-1] = nil
 
 		// Mark end with nil if we didn't fill the buffer
 		if rowsLoaded < len(e.records) {
 			e.records[rowsLoaded] = nil
 		}
+		e.records[len(e.records)-1] = nil
+		e.pointer = 0
 	}
-
 	e.renderData()
 
 	// Focus on the specified column
