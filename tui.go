@@ -607,6 +607,7 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 	e.editMode = true
 
 	e.setPaletteMode(PaletteModeUpdate, false)
+	e.updateStatusForEditMode(col)
 }
 
 func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, currentText string) tview.Primitive {
@@ -690,7 +691,299 @@ func (e *Editor) exitEditMode() {
 		e.editMode = false
 		// Return palette to default mode after editing
 		e.setPaletteMode(PaletteModeDefault, false)
+		e.SetStatusMessage("Ready")
 		e.originalEditText = ""
+	}
+}
+
+// updateStatusForEditMode sets helpful status bar text based on column type and constraints
+func (e *Editor) updateStatusForEditMode(col int) {
+	if e.relation == nil || col < 0 || col >= len(e.columns) {
+		e.SetStatusMessage("Editing...")
+		return
+	}
+
+	colName := e.columns[col].Name
+	attr, ok := e.relation.attributes[colName]
+	if !ok {
+		e.SetStatusMessage("Editing...")
+		return
+	}
+
+	var parts []string
+
+	// Enum or custom type information takes priority
+	if len(attr.EnumValues) > 0 {
+		// Format enum values
+		enumStr := formatEnumValues(attr.EnumValues)
+		if attr.CustomTypeName != "" {
+			parts = append(parts, fmt.Sprintf("ENUM %s: %s", attr.CustomTypeName, enumStr))
+		} else {
+			parts = append(parts, fmt.Sprintf("ENUM: %s", enumStr))
+		}
+	} else if attr.CustomTypeName != "" {
+		// Custom type without enum values
+		parts = append(parts, fmt.Sprintf("Custom type: %s", attr.CustomTypeName))
+	} else {
+		// Standard column type information
+		typeHint := getTypeHint(attr.Type)
+		if typeHint != "" {
+			parts = append(parts, typeHint)
+		}
+	}
+
+	// Nullability constraint
+	if !attr.Nullable {
+		parts = append(parts, "NOT NULL")
+	} else {
+		parts = append(parts, "Type \\N for NULL")
+	}
+
+	// Foreign key reference
+	if attr.Reference >= 0 && attr.Reference < len(e.relation.references) {
+		refTable := e.relation.references[attr.Reference].ForeignTable.name
+		parts = append(parts, fmt.Sprintf("→ %s", refTable))
+	}
+
+	// Multiline hint
+	if e.isMultilineColumnType(col) {
+		parts = append(parts, "Alt+Enter for newline")
+	}
+
+	// Enter to save hint
+	parts = append(parts, "Enter to save · Esc to cancel")
+
+	e.SetStatusMessage(strings.Join(parts, " · "))
+}
+
+// updateForeignKeyPreview updates the status bar with a preview of the referenced row
+func (e *Editor) updateForeignKeyPreview(col int, newText string) {
+	if e.relation == nil || col < 0 || col >= len(e.columns) {
+		return
+	}
+
+	colName := e.columns[col].Name
+	attr, ok := e.relation.attributes[colName]
+	if !ok || attr.Reference < 0 || attr.Reference >= len(e.relation.references) {
+		return // Not a foreign key column
+	}
+
+	// Look up the referenced row
+	// refPreview := e.relation.LookupReferencedRow(colName, newText)
+
+	// Rebuild status message with foreign key preview
+	var parts []string
+
+	// Enum or custom type information takes priority
+	if len(attr.EnumValues) > 0 {
+		// Format enum values, highlight if current value matches
+		enumStr := formatEnumValuesWithHighlight(attr.EnumValues, newText)
+		if attr.CustomTypeName != "" {
+			parts = append(parts, fmt.Sprintf("ENUM %s: %s", attr.CustomTypeName, enumStr))
+		} else {
+			parts = append(parts, fmt.Sprintf("ENUM: %s", enumStr))
+		}
+	} else if attr.CustomTypeName != "" {
+		// Custom type without enum values
+		parts = append(parts, fmt.Sprintf("Custom type: %s", attr.CustomTypeName))
+	} else {
+		// Standard column type information
+		typeHint := getTypeHint(attr.Type)
+		if typeHint != "" {
+			parts = append(parts, typeHint)
+		}
+	}
+
+	// Nullability constraint
+	if !attr.Nullable {
+		parts = append(parts, "NOT NULL")
+	} else {
+		parts = append(parts, "Type \\N for NULL")
+	}
+
+	ref := e.relation.references[attr.Reference]
+	if newText == "" || newText == "\\N" {
+		parts = append(parts, fmt.Sprintf("→ %s", ref.ForeignTable.name))
+	} else {
+		// Foreign key reference with preview
+		foreignKeys := make(map[string]any)
+		for attrIdx, foreignCol := range ref.ForeignColumns {
+			if attrIdx == col {
+				foreignKeys[foreignCol] = newText
+			} else {
+				foreignKeys[foreignCol] = e.records[e.currentRow][attrIdx]
+			}
+		}
+		// TODO pass config columns if available
+		preview, err := getForeignRow(e.relation.DB, ref.ForeignTable, foreignKeys, nil)
+		if err != nil {
+			e.SetStatusError(err.Error())
+			return
+		}
+		previewStr := ""
+		previewStrs := make([]string, 0, len(preview))
+		for col, val := range preview {
+			previewStrs = append(previewStrs, fmt.Sprintf("%s: %v", col, val))
+		}
+		previewStr = strings.Join(previewStrs, ", ")
+		if preview == nil {
+			parts = append(parts, fmt.Sprintf("[blueviolet]→ %s: not found[black]", ref.ForeignTable.name))
+		} else {
+			parts = append(parts, fmt.Sprintf("[darkgreen]→ %s: %s[black]", ref.ForeignTable.name, previewStr))
+		}
+	}
+
+	// Multiline hint
+	if e.isMultilineColumnType(col) {
+		parts = append(parts, "Alt+Enter for newline")
+	}
+
+	// Enter to save hint
+	parts = append(parts, "Enter to save · Esc to cancel")
+	e.SetStatusMessage(strings.Join(parts, " · "))
+}
+
+// formatEnumValues formats enum values for display in the status bar
+// Shows first few values, with "..." if there are too many
+func formatEnumValues(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+
+	maxDisplay := 5
+	maxLength := 60 // Max total length
+
+	var parts []string
+	totalLen := 0
+
+	for i, val := range values {
+		if i >= maxDisplay {
+			parts = append(parts, "...")
+			break
+		}
+
+		// Truncate individual values if too long
+		displayVal := val
+		if len(displayVal) > 20 {
+			displayVal = displayVal[:17] + "..."
+		}
+
+		quoted := "'" + displayVal + "'"
+		if totalLen+len(quoted)+2 > maxLength && i > 0 {
+			parts = append(parts, "...")
+			break
+		}
+
+		parts = append(parts, quoted)
+		totalLen += len(quoted) + 2 // +2 for ", "
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+// formatEnumValuesWithHighlight formats enum values and highlights the matching one
+func formatEnumValuesWithHighlight(values []string, currentValue string) string {
+	if len(values) == 0 {
+		return ""
+	}
+
+	maxDisplay := 5
+	maxLength := 60
+
+	var parts []string
+	totalLen := 0
+	foundMatch := false
+
+	for i, val := range values {
+		if i >= maxDisplay {
+			parts = append(parts, "...")
+			break
+		}
+
+		// Truncate individual values if too long
+		displayVal := val
+		if len(displayVal) > 20 {
+			displayVal = displayVal[:17] + "..."
+		}
+
+		// Highlight if it matches current value
+		var formatted string
+		if val == currentValue {
+			formatted = "[green]'" + displayVal + "'[white]"
+			foundMatch = true
+		} else {
+			formatted = "'" + displayVal + "'"
+		}
+
+		// Estimate length without color codes for truncation
+		plainLen := len("'" + displayVal + "'")
+		if totalLen+plainLen+2 > maxLength && i > 0 {
+			parts = append(parts, "...")
+			break
+		}
+
+		parts = append(parts, formatted)
+		totalLen += plainLen + 2
+	}
+
+	// If value doesn't match any enum, show warning
+	if !foundMatch && currentValue != "" && currentValue != "\\N" {
+		// Check if it's a partial match
+		hasPartial := false
+		for _, val := range values {
+			if strings.HasPrefix(val, currentValue) {
+				hasPartial = true
+				break
+			}
+		}
+		if hasPartial {
+			return strings.Join(parts, ", ") + " [yellow](typing...)[white]"
+		}
+		return strings.Join(parts, ", ") + " [yellow](invalid)[white]"
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+// getTypeHint returns a user-friendly hint for a database column type
+func getTypeHint(dbType string) string {
+	t := strings.ToLower(dbType)
+
+	switch {
+	case strings.Contains(t, "bool"):
+		return "Boolean (true/false, 1/0, t/f)"
+	case strings.Contains(t, "tinyint"):
+		return "Integer (-128 to 127)"
+	case strings.Contains(t, "smallint"):
+		return "Integer (-32768 to 32767)"
+	case t == "int" || strings.Contains(t, "integer"):
+		return "Integer"
+	case strings.Contains(t, "bigint"):
+		return "Large integer"
+	case strings.Contains(t, "real") || strings.Contains(t, "float"):
+		return "Decimal number"
+	case strings.Contains(t, "double"):
+		return "Decimal number (high precision)"
+	case strings.Contains(t, "decimal") || strings.Contains(t, "numeric"):
+		return "Exact decimal number"
+	case strings.Contains(t, "char") || strings.Contains(t, "varchar"):
+		return "Text"
+	case strings.Contains(t, "text") || strings.Contains(t, "clob"):
+		return "Text (unlimited)"
+	case strings.Contains(t, "date"):
+		return "Date (YYYY-MM-DD)"
+	case strings.Contains(t, "time") && !strings.Contains(t, "stamp"):
+		return "Time (HH:MM:SS)"
+	case strings.Contains(t, "timestamp"):
+		return "Timestamp (ISO 8601)"
+	case strings.Contains(t, "json"):
+		return "JSON"
+	case strings.Contains(t, "uuid"):
+		return "UUID"
+	case strings.Contains(t, "blob") || strings.Contains(t, "bytea") || strings.Contains(t, "binary"):
+		return "Binary data"
+	default:
+		return ""
 	}
 }
 
@@ -742,6 +1035,9 @@ func (e *Editor) updateEditPreview(newText string) {
 	preview := e.relation.BuildUpdatePreview(e.records, e.currentRow, colName, newText)
 	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
 	e.commandPalette.SetPlaceholder(preview)
+
+	// Update status bar with foreign key preview if this column has a reference
+	e.updateForeignKeyPreview(e.currentCol, newText)
 }
 
 // e.table.SetData based on e.records and e.pointer
@@ -1273,6 +1569,17 @@ func formatCellValue(value interface{}) string {
 			return "true"
 		}
 		return "false"
+	case time.Time:
+		// Format timestamps in ISO 8601 format
+		if v.IsZero() {
+			return "\\N"
+		}
+		// Use RFC3339 format for timestamps with time zones
+		// or date-only format for dates without time component
+		if v.Hour() == 0 && v.Minute() == 0 && v.Second() == 0 && v.Nanosecond() == 0 {
+			return v.Format("2006-01-02")
+		}
+		return v.Format(time.RFC3339)
 	default:
 		return fmt.Sprintf("%v", value)
 	}

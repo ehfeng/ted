@@ -4,10 +4,16 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 )
+
+type Reference struct {
+	ForeignTable   *Relation
+	ForeignColumns map[int]string // attr index -> foreign column
+}
 
 // database: table, attribute, record
 // sheet: sheet, column, row
@@ -19,19 +25,20 @@ type Relation struct {
 	// name metadata
 	name           string
 	key            []string
-	attributes     map[string]Attribute
-	attributeOrder []string
-	attributeIndex map[string]int
-	// { foreigntable: { attr index: foreign column } }
-	references map[string]map[int]string
+	attributes     map[string]Attribute // attribute name -> attribute
+	attributeOrder []string             // attribute name order
+	attributeIndex map[string]int       // attribute name -> attribute index
+	references     []Reference          // references
 }
 
 type Attribute struct {
-	Name      string
-	Type      string
-	Nullable  bool
-	Reference string // foreign table name
-	Generated bool   // TODO if computed column, read-only
+	Name           string
+	Type           string
+	Nullable       bool
+	Reference      int      // reference index, -1 if not a foreign key column
+	Generated      bool     // TODO if computed column, read-only
+	EnumValues     []string // for ENUM types, stores allowed values
+	CustomTypeName string   // for custom types (PostgreSQL), stores the type name
 }
 
 type SortColumn struct {
@@ -471,7 +478,7 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		name:           tableName,
 		attributes:     make(map[string]Attribute),
 		attributeIndex: make(map[string]int),
-		references:     make(map[string]map[int]string),
+		references:     []Reference{},
 	}
 
 	var (
@@ -509,6 +516,7 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	var primaryKeyColumns []string
 	for rows.Next() {
 		var attr Attribute
+		attr.Reference = -1 // Initialize to -1 (not a foreign key)
 		var nullable string
 
 		switch dbType {
@@ -556,6 +564,12 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	relation.key = make([]string, len(primaryKeyColumns))
 	copy(relation.key, primaryKeyColumns)
 
+	// Fetch enum values and custom type information
+	if err := relation.loadEnumAndCustomTypes(); err != nil {
+		// Non-fatal error, just log and continue
+		fmt.Fprintf(os.Stderr, "Warning: failed to load enum/custom types: %v\n", err)
+	}
+
 	// Build a quick name->index map for attribute lookup
 	attrIndex := relation.attributeIndex
 
@@ -575,33 +589,54 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 			byID := map[int][]fkCol{}
 			for fkRows.Next() {
 				var id, seq int
-				var refTable, fromCol, toCol, onUpd, onDel, match string
+				var refTable, fromCol, onUpd, onDel, match string
+				var toCol sql.NullString
 				if scanErr := fkRows.Scan(&id, &seq, &refTable, &fromCol, &toCol, &onUpd, &onDel, &match); scanErr != nil {
 					continue
 				}
-				byID[id] = append(byID[id], fkCol{seq: seq, col: fromCol, toCol: toCol, refTable: refTable})
+				toColStr := toCol.String
+				if !toCol.Valid {
+					toColStr = "" // Empty means reference the primary key (implicit)
+				}
+				col := fkCol{seq: seq, col: fromCol, toCol: toColStr, refTable: refTable}
+				byID[id] = append(byID[id], col)
 			}
 			fkRows.Close()
-			// Build references map and update attributes
+			// Build references slice and update attributes
 			for _, cols := range byID {
 				sort.Slice(cols, func(i, j int) bool { return cols[i].seq < cols[j].seq })
 				if len(cols) == 0 {
 					continue
 				}
-				refTable := cols[0].refTable
-				if relation.references[refTable] == nil {
-					relation.references[refTable] = make(map[int]string)
+				refTableName := cols[0].refTable
+				// Load the foreign table metadata
+				foreignRel, err := NewRelation(db, dbType, refTableName)
+				if err != nil {
+					// If we can't load the foreign table, skip this reference
+					fmt.Fprintf(os.Stderr, "Warning: failed to load foreign table %s: %v\n", refTableName, err)
+					continue
 				}
-				for _, c := range cols {
+				// Create a new Reference entry
+				ref := Reference{
+					ForeignTable:   foreignRel,
+					ForeignColumns: make(map[int]string),
+				}
+				for i, c := range cols {
 					if idx, ok := attrIndex[c.col]; ok {
-						relation.references[refTable][idx] = c.toCol
-						// Update attribute with reference info
+						foreignCol := c.toCol
+						// If toCol is empty, it references the foreign table's primary key
+						if foreignCol == "" && i < len(foreignRel.key) {
+							foreignCol = foreignRel.key[i]
+						}
+						ref.ForeignColumns[idx] = foreignCol
+						// Update attribute with reference index
 						if attr, exists := relation.attributes[c.col]; exists {
-							attr.Reference = refTable
+							attr.Reference = len(relation.references)
 							relation.attributes[c.col] = attr
 						}
 					}
 				}
+				relation.references = append(relation.references, ref)
 			}
 		}
 
@@ -649,20 +684,35 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 				if len(cols) == 0 {
 					continue
 				}
-				refTable := cols[0].refTable
-				if relation.references[refTable] == nil {
-					relation.references[refTable] = make(map[int]string)
+				refTableName := cols[0].refTable
+				// Load the foreign table metadata
+				foreignRel, err := NewRelation(db, dbType, refTableName)
+				if err != nil {
+					// If we can't load the foreign table, skip this reference
+					fmt.Fprintf(os.Stderr, "Warning: failed to load foreign table %s: %v\n", refTableName, err)
+					continue
 				}
-				for _, c := range cols {
+				// Create a new Reference entry
+				ref := Reference{
+					ForeignTable:   foreignRel,
+					ForeignColumns: make(map[int]string),
+				}
+				for i, c := range cols {
 					if idx, ok := attrIndex[c.col]; ok {
-						relation.references[refTable][idx] = c.refCol
-						// Update attribute with reference info
+						foreignCol := c.refCol
+						// If refCol is empty, it references the foreign table's primary key
+						if foreignCol == "" && i < len(foreignRel.key) {
+							foreignCol = foreignRel.key[i]
+						}
+						ref.ForeignColumns[idx] = foreignCol
+						// Update attribute with reference index
 						if attr, exists := relation.attributes[c.col]; exists {
-							attr.Reference = refTable
+							attr.Reference = len(relation.references)
 							relation.attributes[c.col] = attr
 						}
 					}
 				}
+				relation.references = append(relation.references, ref)
 			}
 		}
 
@@ -697,25 +747,188 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 				if len(cols) == 0 {
 					continue
 				}
-				refTable := cols[0].refTable
-				if relation.references[refTable] == nil {
-					relation.references[refTable] = make(map[int]string)
+				refTableName := cols[0].refTable
+				// Load the foreign table metadata
+				foreignRel, err := NewRelation(db, dbType, refTableName)
+				if err != nil {
+					// If we can't load the foreign table, skip this reference
+					fmt.Fprintf(os.Stderr, "Warning: failed to load foreign table %s: %v\n", refTableName, err)
+					continue
 				}
-				for _, c := range cols {
+				// Create a new Reference entry
+				ref := Reference{
+					ForeignTable:   foreignRel,
+					ForeignColumns: make(map[int]string),
+				}
+				for i, c := range cols {
 					if idx, ok := attrIndex[c.col]; ok {
-						relation.references[refTable][idx] = c.refCol
-						// Update attribute with reference info
+						foreignCol := c.refCol
+						// If refCol is empty, it references the foreign table's primary key
+						if foreignCol == "" && i < len(foreignRel.key) {
+							foreignCol = foreignRel.key[i]
+						}
+						ref.ForeignColumns[idx] = foreignCol
+						// Update attribute with reference index
 						if attr, exists := relation.attributes[c.col]; exists {
-							attr.Reference = refTable
+							attr.Reference = len(relation.references)
 							relation.attributes[c.col] = attr
 						}
 					}
 				}
+				relation.references = append(relation.references, ref)
 			}
 		}
 	}
 
 	return relation, nil
+}
+
+// loadEnumAndCustomTypes fetches enum values and custom type information for columns
+func (rel *Relation) loadEnumAndCustomTypes() error {
+	switch rel.DBType {
+	case MySQL:
+		// MySQL ENUM types are stored in information_schema.columns.column_type
+		query := `SELECT column_name, column_type
+		          FROM information_schema.columns
+		          WHERE table_name = ? AND table_schema = DATABASE()
+		          AND data_type = 'enum'`
+		rows, err := rel.DB.Query(query, rel.name)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var colName, colType string
+			if err := rows.Scan(&colName, &colType); err != nil {
+				continue
+			}
+
+			// Parse ENUM values from column_type like "enum('value1','value2','value3')"
+			enumValues := parseEnumValues(colType)
+			if attr, ok := rel.attributes[colName]; ok {
+				attr.EnumValues = enumValues
+				rel.attributes[colName] = attr
+			}
+		}
+
+	case PostgreSQL:
+		// PostgreSQL: Fetch custom types and enum types
+		// First, get UDT (user-defined types) information
+		query := `SELECT c.column_name, c.udt_name, c.data_type
+		          FROM information_schema.columns c
+		          WHERE c.table_name = $1
+		          AND (c.data_type = 'USER-DEFINED' OR c.udt_name NOT IN ('int4', 'int8', 'varchar', 'text', 'bool', 'timestamp', 'timestamptz', 'date', 'numeric', 'float8', 'bytea'))`
+		rows, err := rel.DB.Query(query, rel.name)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		customTypes := make(map[string]string) // column_name -> udt_name
+		for rows.Next() {
+			var colName, udtName, dataType string
+			if err := rows.Scan(&colName, &udtName, &dataType); err != nil {
+				continue
+			}
+			if dataType == "USER-DEFINED" {
+				customTypes[colName] = udtName
+			}
+		}
+		rows.Close()
+
+		// For each custom type, check if it's an enum and fetch values
+		for colName, udtName := range customTypes {
+			enumQuery := `SELECT e.enumlabel
+			              FROM pg_type t
+			              JOIN pg_enum e ON t.oid = e.enumtypid
+			              WHERE t.typname = $1
+			              ORDER BY e.enumsortorder`
+			enumRows, err := rel.DB.Query(enumQuery, udtName)
+			if err != nil {
+				continue
+			}
+
+			var enumValues []string
+			for enumRows.Next() {
+				var enumValue string
+				if err := enumRows.Scan(&enumValue); err == nil {
+					enumValues = append(enumValues, enumValue)
+				}
+			}
+			enumRows.Close()
+
+			if attr, ok := rel.attributes[colName]; ok {
+				if len(enumValues) > 0 {
+					attr.EnumValues = enumValues
+					attr.CustomTypeName = udtName
+				} else {
+					// Not an enum, but still a custom type
+					attr.CustomTypeName = udtName
+				}
+				rel.attributes[colName] = attr
+			}
+		}
+
+	case SQLite:
+		// SQLite doesn't have native ENUM support, but we can check for CHECK constraints
+		// that simulate enums. This is a best-effort approach.
+		// For now, we'll skip this as it's complex to parse CHECK constraints reliably
+	}
+
+	return nil
+}
+
+// parseEnumValues extracts enum values from MySQL's column_type string
+// Example input: "enum('active','inactive','pending')"
+// Returns: ["active", "inactive", "pending"]
+func parseEnumValues(colType string) []string {
+	// Remove "enum(" prefix and ")" suffix
+	if !strings.HasPrefix(colType, "enum(") || !strings.HasSuffix(colType, ")") {
+		return nil
+	}
+
+	inner := colType[5 : len(colType)-1] // Remove "enum(" and ")"
+
+	// Split by comma, handling quoted values
+	var values []string
+	var current strings.Builder
+	inQuote := false
+	escaped := false
+
+	for i := 0; i < len(inner); i++ {
+		ch := inner[i]
+
+		if escaped {
+			current.WriteByte(ch)
+			escaped = false
+			continue
+		}
+
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+
+		if ch == '\'' {
+			if inQuote {
+				// End of quoted value
+				values = append(values, current.String())
+				current.Reset()
+				inQuote = false
+			} else {
+				// Start of quoted value
+				inQuote = true
+			}
+			continue
+		}
+
+		if inQuote {
+			current.WriteByte(ch)
+		}
+	}
+
+	return values
 }
 
 // BuildUpdatePreview constructs a SQL UPDATE statement as a string with literal
@@ -1034,6 +1247,13 @@ func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []i
 	return rel.DB.Query(query, params...)
 }
 
+func (rel *Relation) placeholder(pos int) string {
+	if databaseFeatures[rel.DBType].positionalPlaceholder {
+		return fmt.Sprintf("$%d", pos)
+	}
+	return "?"
+}
+
 // FindNextRow searches for the next row matching gotoColVal in the column at index gotoCol.
 // It searches below the current selection first, then wraps around to search from the top.
 // Returns: (keys of found row, true if found below/false if wrapped, error)
@@ -1056,13 +1276,6 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 	}
 	selectClause := strings.Join(keyCols, ", ")
 
-	placeholder := func(pos int) string {
-		if databaseFeatures[rel.DBType].positionalPlaceholder {
-			return fmt.Sprintf("$%d", pos)
-		}
-		return "?"
-	}
-
 	// Helper to build WHERE clause for multi-column key progression
 	buildKeyWhere := func(op string, startPos int) (string, []any) {
 		// For multi-column keys, we need: key1 >= ? AND key2 >= ? AND ... AND keyN > ?
@@ -1078,7 +1291,7 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 			} else {
 				cmp = op
 			}
-			parts = append(parts, fmt.Sprintf("%s %s %s", quoted, cmp, placeholder(startPos)))
+			parts = append(parts, fmt.Sprintf("%s %s %s", quoted, cmp, rel.placeholder(startPos)))
 			args = append(args, currentKeys[i])
 			startPos++
 		}
@@ -1093,7 +1306,7 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 	// Sort column condition
 	if sortCol != nil {
 		quotedSortCol := quoteIdent(rel.DBType, sortCol.Name)
-		whereParts = append(whereParts, fmt.Sprintf("%s >= %s", quotedSortCol, placeholder(paramPos)))
+		whereParts = append(whereParts, fmt.Sprintf("%s >= %s", quotedSortCol, rel.placeholder(paramPos)))
 		args = append(args, sortColVal)
 		paramPos++
 	}
@@ -1105,7 +1318,7 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 	paramPos += len(keyArgs)
 
 	// Search column match
-	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, placeholder(paramPos)))
+	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, rel.placeholder(paramPos)))
 	args = append(args, gotoColVal)
 
 	// ORDER BY
@@ -1147,7 +1360,7 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 	// Sort column condition (reversed)
 	if sortCol != nil {
 		quotedSortCol := quoteIdent(rel.DBType, sortCol.Name)
-		whereParts = append(whereParts, fmt.Sprintf("%s <= %s", quotedSortCol, placeholder(paramPos)))
+		whereParts = append(whereParts, fmt.Sprintf("%s <= %s", quotedSortCol, rel.placeholder(paramPos)))
 		args = append(args, sortColVal)
 		paramPos++
 	}
@@ -1159,7 +1372,7 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 	paramPos += len(keyArgs)
 
 	// Search column match
-	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, placeholder(paramPos)))
+	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, rel.placeholder(paramPos)))
 	args = append(args, gotoColVal)
 
 	// ORDER BY (reversed)
@@ -1177,8 +1390,6 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 
 	query = fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT 1",
 		selectClause, quotedTable, strings.Join(whereParts, " AND "), strings.Join(orderParts, ", "))
-
-	os.Stderr.WriteString(fmt.Sprintf("FindNextRow wrap: %s, args: %v\n", query, args))
 
 	row = rel.DB.QueryRow(query, args...)
 	err = row.Scan(scanArgs...)
@@ -1218,6 +1429,42 @@ func quoteIdent(dbType DatabaseType, ident string) string {
 		escaped := strings.ReplaceAll(ident, "\"", "\"\"")
 		return "\"" + escaped + "\""
 	}
+}
+
+func getForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]interface{}, error) {
+	if len(columns) == 0 {
+		// choose non-key columns
+		columns = make([]string, 0, len(table.attributeOrder))
+		for _, col := range table.attributeOrder {
+			if !slices.Contains(table.key, col) {
+				columns = append(columns, col)
+			}
+		}
+	}
+	whereParts := make([]string, 0, len(key))
+	args := make([]any, 0, len(key))
+	placeholderPos := 1
+	for col := range key {
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", quoteIdent(table.DBType, col), table.placeholder(placeholderPos)))
+		args = append(args, key[col])
+		placeholderPos++
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", strings.Join(columns, ", "), quoteQualified(table.DBType, table.name), strings.Join(whereParts, " AND "))
+	row := db.QueryRow(query, args...)
+	values := make([]any, len(columns))
+	// scan into pointers
+	scanArgs := make([]any, len(values))
+	for i := range values {
+		scanArgs[i] = &values[i]
+	}
+	if err := row.Scan(scanArgs...); err != nil {
+		return nil, fmt.Errorf("scan failed: %w", err)
+	}
+	result := make(map[string]any, len(columns))
+	for i, col := range columns {
+		result[col] = *scanArgs[i].(*any)
+	}
+	return result, nil
 }
 
 // isSafeUnquotedIdent returns true if ident can be used without quotes in a
