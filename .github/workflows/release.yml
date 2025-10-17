@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-linux-windows:
     name: Build Linux and Windows
@@ -26,18 +30,30 @@ jobs:
           go-version: '1.25.1'
           cache: true
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: gcc-mingw-w64
+          version: 1.0
+
+      - name: Download Go dependencies
+        run: go mod download
 
       - name: Build binaries
         run: |
           # Linux amd64
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -o ted-linux-amd64 -ldflags "-s -w" .
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -p 4 -o ted-linux-amd64 -ldflags "-s -w" .
 
           # Windows amd64
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build -o ted-windows-amd64.exe -ldflags "-s -w" .
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build -p 4 -o ted-windows-amd64.exe -ldflags "-s -w" .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -53,6 +69,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -60,13 +78,24 @@ jobs:
           go-version: '1.25.1'
           cache: true
 
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download Go dependencies
+        run: go mod download
+
       - name: Build binaries
         run: |
           # macOS amd64
-          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -o ted-darwin-amd64 -ldflags "-s -w" .
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -p 4 -o ted-darwin-amd64 -ldflags "-s -w" .
 
           # macOS arm64
-          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -o ted-darwin-arm64 -ldflags "-s -w" .
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -p 4 -o ted-darwin-arm64 -ldflags "-s -w" .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
