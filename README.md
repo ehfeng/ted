@@ -1,4 +1,4 @@
-# ted: tabular editor
+![ted logo](.github/ted.png)
 
 ted displays database tables as markdown table and provides spreadsheet-like editing, including mouse support for selecting/editing cells.
 
