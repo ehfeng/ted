@@ -82,7 +82,7 @@ const (
 func (m PaletteMode) Glyph() string {
 	switch m {
 	case PaletteModeDefault:
-		return "# "
+		return "⌃ "
 	case PaletteModeCommand:
 		return "> "
 	case PaletteModeSQL:
@@ -90,7 +90,7 @@ func (m PaletteMode) Glyph() string {
 	case PaletteModeGoto:
 		return "↪ "
 	case PaletteModeUpdate:
-		return "= "
+		return "` "
 	default:
 		return "> "
 	}
@@ -333,9 +333,43 @@ func (e *Editor) setupKeyBindings() {
 				e.app.SetFocus(e.table)
 				return nil
 			}
+			if len(e.table.newRecordRow) > 0 {
+				// Exit new record mode and select last real row
+				e.table.SetNewRecordRow(nil)
+
+				// Find the last non-nil record
+				lastIdx := len(e.records) - 1
+				for lastIdx >= 0 && e.records[lastIdx] == nil {
+					lastIdx--
+				}
+
+				e.renderData()
+				_, col := e.table.GetSelection()
+				e.table.Select(lastIdx, col)
+				e.SetStatusMessage("")
+				return nil
+			}
 			e.exitEditMode()
 			return nil
 		case key == tcell.KeyTab:
+			// Ctrl+I sends Tab, so check for Ctrl modifier
+			if mod&tcell.ModCtrl != 0 {
+				// Ctrl+I: Jump to end and enable new record mode
+				e.loadFromRowId(nil, false, 0)
+
+				// Scroll forward by 1 row to make room for the new record row
+				e.nextRows(1)
+
+				e.table.SetNewRecordRow(make([]interface{}, len(e.columns)))
+				e.renderData()
+
+				// Select the new record row (which is at index len(data))
+				_, col := e.table.GetSelection()
+				e.table.Select(e.table.GetDataLength(), col)
+
+				e.SetStatusMessage("New record mode - Press Esc to cancel")
+				return nil
+			}
 			e.navigateTab(false)
 			return nil
 		case key == tcell.KeyBacktab:
@@ -343,6 +377,9 @@ func (e *Editor) setupKeyBindings() {
 			return nil
 		case key == tcell.KeyHome:
 			if mod&tcell.ModCtrl != 0 {
+				if len(e.table.newRecordRow) > 0 {
+					return nil // Disable vertical navigation in new record mode
+				}
 				// Ctrl+Home: jump to first row
 				e.loadFromRowId(nil, true, col)
 				e.table.Select(0, col)
@@ -352,6 +389,9 @@ func (e *Editor) setupKeyBindings() {
 			return nil
 		case key == tcell.KeyEnd:
 			if mod&tcell.ModCtrl != 0 {
+				if len(e.table.newRecordRow) > 0 {
+					return nil // Disable vertical navigation in new record mode
+				}
 				// Ctrl+End: jump to last row
 				e.loadFromRowId(nil, false, col)
 				e.table.Select(len(e.records)-2, col)
@@ -360,11 +400,17 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, len(e.columns)-1)
 			return nil
 		case key == tcell.KeyPgUp:
+			if len(e.table.newRecordRow) > 0 {
+				return nil // Disable vertical navigation in new record mode
+			}
 			// Page up: scroll data backward while keeping selection in same visual position
 			pageSize := max(1, e.table.BodyRowsAvailable-1)
 			e.prevRows(pageSize)
 			return nil
 		case key == tcell.KeyPgDn:
+			if len(e.table.newRecordRow) > 0 {
+				return nil // Disable vertical navigation in new record mode
+			}
 			// Page down: scroll data forward while keeping selection in same visual position
 			pageSize := max(1, e.table.BodyRowsAvailable-1)
 			// Keep selection at same position, just fetch next rows
@@ -407,6 +453,9 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, len(e.columns)-1)
 			return nil
 		case key == tcell.KeyUp:
+			if len(e.table.newRecordRow) > 0 {
+				return nil // Disable vertical navigation in new record mode
+			}
 			if mod&tcell.ModMeta != 0 {
 				e.table.Select(0, col)
 				return nil
@@ -419,6 +468,9 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 		case key == tcell.KeyDown:
+			if len(e.table.newRecordRow) > 0 {
+				return nil // Disable vertical navigation in new record mode
+			}
 			if mod&tcell.ModMeta != 0 {
 				if len(e.records[len(e.records)-1]) == 0 {
 					e.table.Select(len(e.records)-2, col)
@@ -470,6 +522,18 @@ func (e *Editor) consumeKittyCSI(key tcell.Key, r rune, mod tcell.ModMask) bool 
 					mask := modifier - 1
 					if mask&4 != 0 && codepoint == 96 {
 						e.setPaletteMode(PaletteModeSQL, true)
+					} else if mask&4 != 0 && codepoint == 105 {
+						// Ctrl+I: Jump to end and enable new record mode
+						e.loadFromRowId(nil, false, 0)
+
+						e.table.SetNewRecordRow(make([]interface{}, len(e.columns)))
+						e.renderData()
+
+						// Select the new record row (which is at index len(data))
+						_, col := e.table.GetSelection()
+						e.table.Select(e.table.GetDataLength(), col)
+
+						e.SetStatusMessage("New record mode - Press Esc to cancel")
 					}
 				}
 			}
@@ -508,22 +572,33 @@ func (e *Editor) navigateTab(reverse bool) {
 }
 
 func (e *Editor) enterEditMode(row, col int) {
-	currentValue := e.table.GetCell(row, col)
+	var currentValue interface{}
+	if len(e.table.newRecordRow) > 0 {
+		currentValue = e.table.newRecordRow[col]
+	} else {
+		currentValue = e.table.GetCell(row, col)
+	}
 	currentText := formatCellValue(currentValue)
 	e.enterEditModeWithInitialValue(row, col, currentText)
 }
 
 func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string) {
-	if row < 0 || row >= len(e.records) {
-		return
-	}
-	if col < 0 || col >= len(e.columns) || col >= len(e.records[row]) {
-		return
-	}
 
+	// In new record mode, allow editing the virtual new record row
+	// The virtual row index equals the length of the data array (which is shorter than records in new mode)
+	isNewRecordRow := len(e.table.newRecordRow) > 0 && row == e.table.GetDataLength()
+
+	// TODO no need to remember palette mode, it should just return to default mode after editing
 	// Remember the palette mode so we can restore it after editing
 	e.preEditMode = e.getPaletteMode()
-	originalValue := e.table.GetCell(row, col)
+
+	// Get original value (empty for new record row)
+	var originalValue interface{}
+	if isNewRecordRow {
+		originalValue = nil
+	} else {
+		originalValue = e.table.GetCell(row, col)
+	}
 	e.originalEditText = formatCellValue(originalValue)
 
 	// Create textarea for editing with proper styling
@@ -633,7 +708,6 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 
 	// Set cursor to bar style (style 5 = blinking bar)
 	e.setCursorStyle(5)
-
 	e.app.SetFocus(textArea)
 	e.editMode = true
 
@@ -644,6 +718,11 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, currentText string) tview.Primitive {
 	// Get the current text to calculate minimum size
 	currentText = formatCellValue(currentText)
+	if currentText == NullGlyph {
+		textArea.SetTextStyle(textArea.GetTextStyle().Italic(true))
+	} else {
+		textArea.SetTextStyle(textArea.GetTextStyle().Italic(false))
+	}
 
 	// Calculate the position where the cell content appears on screen
 	// TableView structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
@@ -766,8 +845,6 @@ func (e *Editor) updateStatusForEditMode(col int) {
 	// Nullability constraint
 	if !attr.Nullable {
 		parts = append(parts, "NOT NULL")
-	} else {
-		parts = append(parts, "Type \\N for NULL")
 	}
 
 	// Foreign key reference
@@ -828,12 +905,10 @@ func (e *Editor) updateForeignKeyPreview(col int, newText string) {
 	// Nullability constraint
 	if !attr.Nullable {
 		parts = append(parts, "NOT NULL")
-	} else {
-		parts = append(parts, "Type \\N for NULL")
 	}
 
 	ref := e.relation.references[attr.Reference]
-	if newText == "" || newText == "\\N" {
+	if newText == "" || newText == NullGlyph {
 		parts = append(parts, fmt.Sprintf("→ %s", ref.ForeignTable.name))
 	} else {
 		// Foreign key reference with preview
@@ -958,7 +1033,7 @@ func formatEnumValuesWithHighlight(values []string, currentValue string) string 
 	}
 
 	// If value doesn't match any enum, show warning
-	if !foundMatch && currentValue != "" && currentValue != "\\N" {
+	if !foundMatch && currentValue != "" && currentValue != NullGlyph {
 		// Check if it's a partial match
 		hasPartial := false
 		for _, val := range values {
@@ -1040,13 +1115,14 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	} else {
 		switch mode {
 		case PaletteModeDefault:
-			e.commandPalette.SetPlaceholder("Ctrl+`: SQL · Ctrl+G: Goto · Ctrl+C: Exit")
+			e.commandPalette.SetPlaceholder("Ctrl+… I: Insert · `: SQL · G: Goto · C: Exit")
 		case PaletteModeCommand:
 			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
 		case PaletteModeSQL:
 			e.commandPalette.SetPlaceholder("Execute SQL… (Esc to exit)")
 		case PaletteModeGoto:
 			e.commandPalette.SetPlaceholder("Goto next row matching value… (Esc to exit)")
+			e.SetStatusMessage("hi")
 		case PaletteModeUpdate:
 			// No placeholder in update mode
 			e.commandPalette.SetPlaceholder("")
@@ -1073,15 +1149,44 @@ func (e *Editor) updateEditPreview(newText string) {
 
 // e.table.SetData based on e.records and e.pointer
 func (e *Editor) renderData() {
-	normalizedRecords := make([][]interface{}, len(e.records))
-	for i := 0; i < len(e.records); i++ {
+	// When in new record mode, we need to reserve one slot for the new record row
+	// that will be rendered by TableView
+	dataCount := len(e.records)
+	if len(e.table.newRecordRow) > 0 {
+		// Find the last non-nil record
+		lastIdx := len(e.records) - 1
+		for lastIdx >= 0 && e.records[lastIdx] == nil {
+			lastIdx--
+		}
+		dataCount = lastIdx + 1 // Only pass real data, TableView will add new record row
+	}
+
+	normalizedRecords := make([][]interface{}, dataCount)
+	for i := 0; i < dataCount; i++ {
 		ptr := (i + e.pointer) % len(e.records)
+		// new record row needs "space" at the top to still be able to render
+		// the last db row
+		if len(e.table.newRecordRow) > 0 && i == 0 {
+			ptr++
+		}
 		normalizedRecords[i] = e.records[ptr]
+	}
+	if len(e.table.newRecordRow) > 0 {
+		normalizedRecords = slices.Delete(normalizedRecords, 0, 1)
 	}
 	e.table.SetData(normalizedRecords)
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
+	// Check if this is a new record row
+	if len(e.table.newRecordRow) > 0 {
+		// TODO: Implement new record insertion
+		// update the new record row with the new value
+		e.table.newRecordRow[col] = newValue
+		e.exitEditMode()
+		return
+	}
+
 	// Basic bounds check against current data
 	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.records[row]) {
 		e.exitEditMode()
@@ -1582,7 +1687,7 @@ func (e *Editor) adjustColumnWidth(col, delta int) {
 
 func formatCellValue(value interface{}) string {
 	if value == nil {
-		return "\\N"
+		return NullGlyph
 	}
 
 	switch v := value.(type) {
@@ -1591,6 +1696,9 @@ func formatCellValue(value interface{}) string {
 	case string:
 		if v == "" {
 			return ""
+		}
+		if v == "null" {
+			return "null"
 		}
 		return v
 	case int64:
@@ -1605,7 +1713,7 @@ func formatCellValue(value interface{}) string {
 	case time.Time:
 		// Format timestamps in ISO 8601 format
 		if v.IsZero() {
-			return "\\N"
+			return NullGlyph
 		}
 		// Use RFC3339 format for timestamps with time zones
 		// or date-only format for dates without time component

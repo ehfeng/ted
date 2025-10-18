@@ -78,7 +78,7 @@ Each column has a default width of 8 characters + 2 spaces + pipe = 11 character
 
 When editing values with overflow, it overlays _on top_ of the table with a light background. Overflow overlay flows to the right and below the cell. When value overflows the editor window, it word wraps. The editing overlay _never_ exceeds the terminal window size.
 
-Default null sentinel is `\N` (configurable). `\\N` to input actual string.
+Default null sentinel is `null` (configurable). `'null'` to input actual string.
 
 JSON is treated as text. JSONB is pretty printed.
 

@@ -10,6 +10,9 @@ import (
 	"strings"
 )
 
+// should be configurable
+const NullGlyph = "null"
+
 type Reference struct {
 	ForeignTable   *Relation
 	ForeignColumns map[int]string // attr index -> foreign column
@@ -945,7 +948,7 @@ func (rel *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, col
 		if attr, ok := rel.attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
 		}
-		if raw == "\\N" {
+		if raw == NullGlyph {
 			return nil
 		}
 		t := attrType
@@ -1082,7 +1085,7 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 		if attr, ok := rel.attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
 		}
-		if raw == "\\N" {
+		if raw == NullGlyph {
 			return nil
 		}
 		t := attrType

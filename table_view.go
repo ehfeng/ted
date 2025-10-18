@@ -1,9 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -29,6 +26,7 @@ type TableView struct {
 	headerBgColor tcell.Color
 	separatorChar rune
 	bottom        bool
+	newRecordRow  []interface{} // if non-empty, render as new record row with special styling
 
 	// Selection state
 	selectedRow int
@@ -84,14 +82,29 @@ func (tv *TableView) SetData(data [][]interface{}) *TableView {
 	return tv
 }
 
+// SetNewRecordRow sets the new record row data (or nil to disable)
+func (tv *TableView) SetNewRecordRow(row []interface{}) *TableView {
+	tv.newRecordRow = row
+	return tv
+}
+
 // GetSelection returns the currently selected data row and column
 func (tv *TableView) GetSelection() (row, col int) {
 	return tv.selectedRow, tv.selectedCol
 }
 
+// GetDataLength returns the length of the data array
+func (tv *TableView) GetDataLength() int {
+	return len(tv.data)
+}
+
 // Select selects a data cell
 func (tv *TableView) Select(row, col int) *TableView {
-	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.headers) {
+	maxRow := len(tv.data)
+	if len(tv.newRecordRow) > 0 {
+		maxRow = len(tv.data) + 1 // Allow selecting the virtual new record row
+	}
+	if row >= 0 && row < maxRow && col >= 0 && col < len(tv.headers) {
 		tv.selectedRow = row
 		tv.selectedCol = col
 	}
@@ -163,13 +176,14 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		currentY++
 	}
 
-	// Check if we should draw the bottom border (when final slice is nil)
+	// Check if we should draw the bottom border (when final slice is nil or in new record mode)
 	drawBottomBorder := tv.bottom
 	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1]) == 0 {
 		drawBottomBorder = true
 	}
-	os.Stderr.WriteString(fmt.Sprintf("len(tv.data): %d, tv.data[len(tv.data)-1]: %v\n", len(tv.data), tv.data[len(tv.data)-1]))
-	os.Stderr.WriteString(fmt.Sprintf("bottom border: %v\n", drawBottomBorder))
+	if len(tv.newRecordRow) > 0 {
+		drawBottomBorder = true
+	}
 
 	// Draw data rows
 	dataRowsDrawn := 0
@@ -177,12 +191,27 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 	if drawBottomBorder {
 		maxDataRows = height - 4 // Reserve additional space for bottom border
 	}
+
+	// When in new record mode, we need to reserve one more row for the new record
+	maxRegularDataRows := maxDataRows
+	if len(tv.newRecordRow) > 0 {
+		maxRegularDataRows = maxDataRows - 1
+	}
 	tv.BodyRowsAvailable = maxDataRows
-	for i := 0; i < len(tv.data) && dataRowsDrawn < maxDataRows && currentY < y+height; i++ {
+
+	// Draw regular data rows
+	for i := 0; i < len(tv.data) && dataRowsDrawn < maxRegularDataRows && currentY < y+height; i++ {
 		if tv.data[i] == nil {
 			break // Stop drawing when we hit a nil slice
 		}
 		tv.drawDataRow(screen, x, currentY, tableWidth, i)
+		currentY++
+		dataRowsDrawn++
+	}
+
+	// Draw new record row if enabled and there's space
+	if len(tv.newRecordRow) > 0 && currentY < y+height {
+		tv.drawDataRow(screen, x, currentY, tableWidth, len(tv.data))
 		currentY++
 		dataRowsDrawn++
 	}
@@ -249,7 +278,7 @@ func (tv *TableView) drawHeaderRow(screen tcell.Screen, x, y, tableWidth int) {
 		// Header text
 		headerText := padCellToWidth(header.Name, header.Width)
 		for j, ch := range headerText {
-			screen.SetContent(pos+j, y, ch, nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+			screen.SetContent(pos+j, y, ch, nil, tcell.StyleDefault.Bold(true).Foreground(tv.headerColor).Background(tv.headerBgColor))
 		}
 		pos += header.Width
 
@@ -298,14 +327,27 @@ func (tv *TableView) drawHeaderSeparator(screen tcell.Screen, x, y, tableWidth i
 
 // drawDataRow draws a data row
 func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx int) {
+	// Check if this is the new record row (when newRecordRow is set and rowIdx is beyond data)
+	isNewRecordRow := len(tv.newRecordRow) > 0 && rowIdx == len(tv.data)
+
 	// Left border
-	screen.SetContent(x, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+	borderStyle := tcell.StyleDefault.Foreground(tv.borderColor)
+	if isNewRecordRow {
+		borderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
+	}
+	screen.SetContent(x, y, '│', nil, borderStyle)
 	pos := x + 1
 
 	// Data cells
 	for i, header := range tv.headers {
-		// Cell style (highlight if selected)
-		cellStyle := tcell.StyleDefault
+		// Base style - use cyan background for new record row
+		baseCellStyle := tcell.StyleDefault
+		if isNewRecordRow {
+			baseCellStyle = baseCellStyle.Background(tcell.ColorRoyalBlue).Foreground(tcell.ColorDarkGrey)
+		}
+
+		// Apply selection highlight on top of base style
+		cellStyle := baseCellStyle
 		if tv.selectable && rowIdx == tv.selectedRow && i == tv.selectedCol {
 			cellStyle = cellStyle.Background(tcell.ColorBlue).Foreground(tcell.ColorWhite)
 		}
@@ -317,14 +359,32 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 		pos += tv.cellPadding
 
 		// Cell data
-		var cellText string
-		if rowIdx < len(tv.data) && i < len(tv.data[rowIdx]) {
-			cellText = formatCellValue(tv.data[rowIdx][i])
-		}
-		cellText = padCellToWidth(cellText, header.Width)
+		if isNewRecordRow {
+			// For new record row, render repeating dots if newRecordRow[i] is nil
 
-		for j, ch := range cellText {
-			screen.SetContent(pos+j, y, ch, nil, cellStyle)
+			cellText := formatCellValue(tv.newRecordRow[i])
+			if cellText == NullGlyph {
+				cellStyle = cellStyle.Italic(true)
+			}
+			cellText = padCellToWidth(cellText, header.Width)
+			for j, ch := range cellText {
+				screen.SetContent(pos+j, y, ch, nil, cellStyle)
+			}
+
+		} else {
+			// Normal rendering
+			var cellText string
+			if rowIdx < len(tv.data) && i < len(tv.data[rowIdx]) {
+				cellText = formatCellValue(tv.data[rowIdx][i])
+				if cellText == NullGlyph {
+					cellStyle.Italic(true)
+				}
+			}
+			cellText = padCellToWidth(cellText, header.Width)
+
+			for j, ch := range cellText {
+				screen.SetContent(pos+j, y, ch, nil, cellStyle)
+			}
 		}
 		pos += header.Width
 
@@ -336,13 +396,21 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 
 		// Column separator
 		if i < len(tv.headers)-1 {
-			screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			sepStyle := tcell.StyleDefault.Foreground(tv.borderColor)
+			if isNewRecordRow {
+				sepStyle = baseCellStyle
+			}
+			screen.SetContent(pos, y, '│', nil, sepStyle)
 			pos++
 		}
 	}
 
 	// Right border
-	screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+	rightBorderStyle := tcell.StyleDefault.Foreground(tv.borderColor)
+	if isNewRecordRow {
+		rightBorderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
+	}
+	screen.SetContent(pos, y, '│', nil, rightBorderStyle)
 }
 
 // drawBottomBorder draws the bottom border of the table
@@ -382,10 +450,16 @@ func (tv *TableView) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 
 		switch key {
 		case tcell.KeyUp:
+			if len(tv.newRecordRow) > 0 {
+				return // Disable vertical navigation in new record mode
+			}
 			if tv.selectedRow > 0 {
 				tv.selectedRow--
 			}
 		case tcell.KeyDown:
+			if len(tv.newRecordRow) > 0 {
+				return // Disable vertical navigation in new record mode
+			}
 			if tv.selectedRow < len(tv.data)-1 {
 				tv.selectedRow++
 			}
