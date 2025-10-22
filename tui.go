@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	DefaultColumnWidth = 8
-	RowsTimerInterval  = 100 * time.Millisecond
+	DefaultColumnWidth   = 8
+	RowsTimerInterval    = 300 * time.Millisecond
+	RefreshTimerInterval = RowsTimerInterval
 )
 
 // this is a config concept
@@ -126,7 +127,8 @@ func runEditor(config *Config, dbname, tablename string) error {
 	}
 
 	editor := &Editor{
-		app:          tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s", dbname, tablename, databaseIcons[dbType])).EnableMouse(true),
+		app: tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s",
+			dbname, tablename, databaseIcons[dbType])).EnableMouse(true),
 		pages:        tview.NewPages(),
 		table:        NewTableView(),
 		columns:      columns,
@@ -181,17 +183,26 @@ func (e *Editor) setupTable() {
 		})
 
 	// Set up mouse scroll handling
-	e.table.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+	e.table.SetMouseCapture(func(action tview.MouseAction,
+		event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
 		switch action {
 		case tview.MouseScrollUp:
-			if err := e.prevRows(1); err != nil {
+			reachedEnd, err := e.prevRows(1)
+			if err != nil {
 				return action, nil
+			}
+			if !reachedEnd {
+				e.table.Select(e.table.selectedRow-1, e.table.selectedCol)
 			}
 			go e.app.Draw()
 			return action, nil
 		case tview.MouseScrollDown:
-			if err := e.nextRows(1); err != nil {
+			reachedEnd, err := e.nextRows(1)
+			if err != nil {
 				return action, nil
+			}
+			if !reachedEnd {
+				e.table.Select(e.table.selectedRow-1, e.table.selectedCol)
 			}
 			go e.app.Draw()
 			return action, nil
@@ -248,7 +259,8 @@ func (e *Editor) setupCommandPalette() {
 		}
 
 		switch {
-		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0: // Ctrl+G sends BEL (7) or 'g' depending on terminal
+		// Ctrl+G sends BEL (7) or 'g' depending on terminal
+		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
 			e.setPaletteMode(PaletteModeGoto, true)
 			return nil
 		// case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
@@ -323,8 +335,21 @@ func (e *Editor) setupKeyBindings() {
 			return nil
 		}
 
+		// Ctrl+S: execute INSERT in new record mode (save and insert)
+		if (rune == 's' || rune == 19) && mod&tcell.ModAlt != 0 {
+			if len(e.table.newRecordRow) > 0 && !e.editMode {
+				e.executeInsert()
+				return nil
+			}
+		}
+
 		switch {
 		case key == tcell.KeyEnter:
+			if len(e.table.newRecordRow) > 0 && !e.editMode && mod&tcell.ModAlt != 0 {
+				e.executeInsert()
+				return nil
+			}
+			// Enter: enter edit mode
 			e.enterEditMode(row, col)
 			return nil
 		case key == tcell.KeyEscape:
@@ -422,16 +447,20 @@ func (e *Editor) setupKeyBindings() {
 		case rune == ' ' && mod&tcell.ModCtrl != 0:
 			e.toggleColSelection(col)
 			return nil
-		case (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0: // Ctrl+R sends DC2 (18) or 'r' depending on terminal
+		// Ctrl+R sends DC2 (18) or 'r' depending on terminal
+		case (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0:
 			e.refreshData()
 			return nil
-		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0: // Ctrl+G sends BEL (7) or 'g' depending on terminal
+		// Ctrl+G sends BEL (7) or 'g' depending on terminal
+		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
 			e.setPaletteMode(PaletteModeGoto, true)
 			return nil
-		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0: // Ctrl+P sends DLE (16) or 'p' depending on terminal
+		// Ctrl+P sends DLE (16) or 'p' depending on terminal
+		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
 			e.setPaletteMode(PaletteModeCommand, true)
 			return nil
-		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0: // Ctrl+` sends BEL (0) or '`' depending on terminal
+		// Ctrl+` sends BEL (0) or '`' depending on terminal
+		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0:
 			e.setPaletteMode(PaletteModeSQL, true)
 			return nil
 		case key == tcell.KeyLeft && mod&tcell.ModAlt != 0:
@@ -585,7 +614,8 @@ func (e *Editor) enterEditMode(row, col int) {
 func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string) {
 
 	// In new record mode, allow editing the virtual new record row
-	// The virtual row index equals the length of the data array (which is shorter than records in new mode)
+	// The virtual row index equals the length of the data array
+	// (which is shorter than records in new mode)
 	isNewRecordRow := len(e.table.newRecordRow) > 0 && row == e.table.GetDataLength()
 
 	// TODO no need to remember palette mode, it should just return to default mode after editing
@@ -624,7 +654,23 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 
 	// Handle textarea input capture for save/cancel
 	textArea.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
+		key := event.Key()
+		rune := event.Rune()
+		mod := event.Modifiers()
+
+		// Ctrl+S: execute INSERT in new record mode (save and insert)
+		if (rune == 's' || rune == 19) && mod&tcell.ModCtrl != 0 {
+			if len(e.table.newRecordRow) > 0 {
+				// Save current cell first
+				newText := textArea.GetText()
+				e.table.newRecordRow[col] = newText
+				e.exitEditMode()
+				e.executeInsert()
+				return nil
+			}
+		}
+
+		switch key {
 		case tcell.KeyEnter:
 			// Check if Alt/Option is pressed with Enter
 			if event.Modifiers()&tcell.ModAlt != 0 {
@@ -637,7 +683,6 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 					textArea.SetText(newText, true)
 					resizeTextarea()
 					return nil
-					// return event
 				}
 				// For other types, treat as regular Enter (save and exit)
 				newText := textArea.GetText()
@@ -715,7 +760,8 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 	e.updateStatusForEditMode(col)
 }
 
-func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int, currentText string) tview.Primitive {
+func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int,
+	currentText string) tview.Primitive {
 	// Get the current text to calculate minimum size
 	currentText = formatCellValue(currentText)
 	if currentText == NullGlyph {
@@ -933,9 +979,11 @@ func (e *Editor) updateForeignKeyPreview(col int, newText string) {
 		}
 		previewStr = strings.Join(previewStrs, ", ")
 		if preview == nil {
-			parts = append(parts, fmt.Sprintf("[blueviolet]→ %s: not found[black]", ref.ForeignTable.name))
+			parts = append(parts, fmt.Sprintf("[blueviolet]→ %s: not found[black]",
+				ref.ForeignTable.name))
 		} else {
-			parts = append(parts, fmt.Sprintf("[darkgreen]→ %s: %s[black]", ref.ForeignTable.name, previewStr))
+			parts = append(parts, fmt.Sprintf("[darkgreen]→ %s: %s[black]",
+				ref.ForeignTable.name, previewStr))
 		}
 	}
 
@@ -1105,9 +1153,12 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	e.commandPalette.SetText("")
 	style := e.placeholderStyleItalic
 	e.commandPalette.SetPlaceholderStyle(style)
+	if e.table.newRecordRow != nil {
+		e.commandPalette.SetPlaceholder("INSERT preview… (Esc to exit)")
+	}
 	if e.editMode {
 		// Editing contexts manage their own placeholder text
-		e.commandPalette.SetPlaceholder("UPDATE preview... (Esc to exit)")
+		e.commandPalette.SetPlaceholder("UPDATE preview… (Esc to exit)")
 		if focus {
 			e.app.SetFocus(e.commandPalette)
 		}
@@ -1133,18 +1184,34 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	}
 }
 
-// Update the command palette to show a SQL UPDATE preview while editing
+// Update the command palette to show a SQL UPDATE/INSERT preview while editing
 func (e *Editor) updateEditPreview(newText string) {
 	if e.relation == nil || !e.editMode {
 		return
 	}
+
+	// Check if we're in new record mode
+	isNewRecordRow := len(e.table.newRecordRow) > 0 && e.currentRow == e.table.GetDataLength()
+
+	var preview string
 	colName := e.columns[e.currentCol].Name
-	preview := e.relation.BuildUpdatePreview(e.records, e.currentRow, colName, newText)
+	if isNewRecordRow {
+		// Show INSERT preview
+		newRecordRow := make([]any, len(e.table.newRecordRow))
+		copy(newRecordRow, e.table.newRecordRow)
+		newRecordRow[e.currentCol] = newText
+		preview = e.relation.BuildInsertPreview(newRecordRow, e.columns)
+	} else {
+		// Show UPDATE preview
+		preview = e.relation.BuildUpdatePreview(e.records, e.currentRow, colName, newText)
+	}
 	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
 	e.commandPalette.SetPlaceholder(preview)
 
-	// Update status bar with foreign key preview if this column has a reference
-	e.updateForeignKeyPreview(e.currentCol, newText)
+	// Update status bar with foreign key preview if this column has a reference (only for UPDATE)
+	if !isNewRecordRow {
+		e.updateForeignKeyPreview(e.currentCol, newText)
+	}
 }
 
 // e.table.SetData based on e.records and e.pointer
@@ -1163,7 +1230,7 @@ func (e *Editor) renderData() {
 
 	normalizedRecords := make([][]interface{}, dataCount)
 	for i := 0; i < dataCount; i++ {
-		ptr := (i + e.pointer) % len(e.records)
+		ptr := (i + e.pointer) % dataCount
 		// new record row needs "space" at the top to still be able to render
 		// the last db row
 		if len(e.table.newRecordRow) > 0 && i == 0 {
@@ -1179,9 +1246,10 @@ func (e *Editor) renderData() {
 
 func (e *Editor) updateCell(row, col int, newValue string) {
 	// Check if this is a new record row
-	if len(e.table.newRecordRow) > 0 {
-		// TODO: Implement new record insertion
-		// update the new record row with the new value
+	isNewRecordRow := len(e.table.newRecordRow) > 0 && row == e.table.GetDataLength()
+
+	if isNewRecordRow {
+		// Update the new record row with the new value
 		e.table.newRecordRow[col] = newValue
 		e.exitEditMode()
 		return
@@ -1205,6 +1273,51 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 
 	e.renderData()
 	e.exitEditMode()
+}
+
+// executeInsert executes the INSERT statement for the new record row
+func (e *Editor) executeInsert() error {
+	if len(e.table.newRecordRow) == 0 {
+		return fmt.Errorf("no new record to insert")
+	}
+
+	// Execute the insert
+	insertedRow, err := e.relation.InsertDBRecord(e.table.newRecordRow)
+	if err != nil {
+		e.SetStatusError(err.Error())
+		return err
+	}
+
+	// Exit new record mode
+	e.table.SetNewRecordRow(nil)
+	// TODO focus on new record row
+	e.SetStatusMessage("Record inserted successfully")
+
+	// Extract the key values from the inserted row
+	keyVals := make([]interface{}, len(e.relation.key))
+	for i, keyCol := range e.relation.key {
+		keyIdx, ok := e.relation.attributeIndex[keyCol]
+		if !ok || insertedRow == nil {
+			// Fallback: load from bottom without specific row
+			e.loadFromRowId(nil, false, 0)
+			e.renderData()
+			e.table.Select(len(e.records)-2, 0)
+			// e.app.Draw()
+			return nil
+		}
+		keyVals[i] = insertedRow[keyIdx]
+	}
+
+	// Load from the inserted row (from bottom)
+	if err := e.loadFromRowId(keyVals, false, 0); err != nil {
+		e.SetStatusError(err.Error())
+		return err
+	}
+
+	e.table.Select(0, 0)
+	// Select the first row (which should be the newly inserted one)
+	e.renderData()
+	return nil
 }
 
 func (e *Editor) toggleRowSelection(row int) {
@@ -1308,12 +1421,12 @@ func (e *Editor) refreshData() {
 	}
 
 	// If we didn't fill the buffer, mark the end with nil
-	rows.Close()
-	e.startRowsTimer()
+	if err := rows.Close(); err != nil {
+		panic(err)
+	}
 	if rowsLoaded < len(e.records) {
 		e.records[rowsLoaded] = nil
 	}
-
 	e.renderData()
 }
 
@@ -1425,11 +1538,11 @@ func (e *Editor) loadFromRowId(id []interface{}, fromTop bool, focusColumn int) 
 
 // nextRows fetches the next i rows from e.rows and resets the auto-close timer
 // when there are no more rows, adds a nil sentinel to mark the end
-func (e *Editor) nextRows(i int) error {
+// returns bool, err. bool if the edge of table is reached
+func (e *Editor) nextRows(i int) (bool, error) {
 	// Check if we're already at the end (last record is nil)
-	lastRecordIdx := (e.pointer - 1 + len(e.records)) % len(e.records)
-	if e.records[lastRecordIdx] == nil {
-		return nil // No-op, already at end of data
+	if e.records[e.lastRowIdx()] == nil {
+		return false, nil // No-op, already at end of data
 	}
 
 	if e.nextQuery == nil {
@@ -1447,7 +1560,7 @@ func (e *Editor) nextRows(i int) error {
 		var err error
 		e.nextQuery, err = e.relation.QueryRows(selectCols, nil, params, false, true)
 		if err != nil {
-			return err
+			return false, err
 		}
 		e.startRowsTimer()
 	}
@@ -1462,39 +1575,47 @@ func (e *Editor) nextRows(i int) error {
 
 	colCount := len(e.columns)
 	if colCount == 0 {
-		return nil
+		return false, nil
 	}
 
 	scanTargets := make([]interface{}, colCount)
-	rowsFetched := 0
 
-	for n := 0; n < i && e.nextQuery.Next(); n++ {
+	rowsFetched := 0
+	for ; rowsFetched < i && e.nextQuery.Next(); rowsFetched++ {
 		row := make([]interface{}, colCount)
 		for j := 0; j < colCount; j++ {
 			scanTargets[j] = &row[j]
 		}
 		if err := e.nextQuery.Scan(scanTargets...); err != nil {
-			return err
+			return false, err
 		}
-		e.records[e.pointer] = row
-		e.pointer = (e.pointer + 1) % len(e.records)
-		rowsFetched++
+		e.records[e.pointer+rowsFetched] = row
 	}
-
+	// new pointer position
+	e.incrPtr(rowsFetched)
 	// If we fetched fewer rows than requested, we've reached the end
 	if rowsFetched < i {
-		e.records[e.pointer] = nil // Mark end of data
+		e.incrPtr(1)
+		e.records[e.lastRowIdx()] = nil // Mark end of data
 	}
 	e.renderData()
-	return e.nextQuery.Err()
+	return rowsFetched < i, e.nextQuery.Err()
+}
+
+func (e *Editor) lastRowIdx() int {
+	return (e.pointer + len(e.records) - 1) % len(e.records)
+}
+
+func (e *Editor) incrPtr(n int) {
+	e.pointer = (e.pointer + n) % len(e.records)
 }
 
 // prevRows fetches the previous i rows (scrolling backwards in the circular buffer)
-func (e *Editor) prevRows(i int) error {
+// returns whether rows were moved (false means you'ved the edge)
+func (e *Editor) prevRows(i int) (bool, error) {
 	if e.prevQuery == nil {
 		// Stop refresh timer when starting a new query
 		e.stopRefreshTimer()
-
 		params := make([]interface{}, len(e.relation.key))
 		for i := range e.relation.key {
 			params[i] = e.records[e.pointer][i]
@@ -1506,7 +1627,7 @@ func (e *Editor) prevRows(i int) error {
 		var err error
 		e.prevQuery, err = e.relation.QueryRows(selectCols, nil, params, false, false)
 		if err != nil {
-			return err
+			return false, err
 		}
 		e.startRowsTimer()
 	}
@@ -1521,28 +1642,26 @@ func (e *Editor) prevRows(i int) error {
 
 	colCount := len(e.columns)
 	if colCount == 0 {
-		return nil
+		return false, nil
 	}
 
 	scanTargets := make([]interface{}, colCount)
-	rowsFetched := 0
 
-	for n := 0; n < i && e.prevQuery.Next(); n++ {
+	rowsFetched := 0
+	for ; rowsFetched < i && e.prevQuery.Next(); rowsFetched++ {
 		row := make([]interface{}, colCount)
 		for j := 0; j < colCount; j++ {
 			scanTargets[j] = &row[j]
 		}
 		if err := e.prevQuery.Scan(scanTargets...); err != nil {
-			return err
+			return false, err
 		}
-		idx := (e.pointer - 1 + len(e.records)) % len(e.records)
-		e.pointer = idx // Move pointer backwards in the circular buffer
+		e.pointer = e.lastRowIdx() // Move pointer backwards in the circular buffer
 		e.records[e.pointer] = row
-		rowsFetched++
 	}
 
 	e.renderData()
-	return e.prevQuery.Err()
+	return rowsFetched < i, e.prevQuery.Err()
 }
 
 // startRowsTimer starts or restarts the timer for auto-closing queries
@@ -1574,9 +1693,7 @@ func (e *Editor) startRowsTimer() {
 				}
 				timer.Reset(RowsTimerInterval)
 			case <-timer.C:
-				e.app.QueueUpdateDraw(func() {
-					e.stopRowsTimer()
-				})
+				e.stopRowsTimer()
 				return
 			}
 		}
@@ -1594,11 +1711,15 @@ func (e *Editor) stopRowsTimer() {
 		e.rowsTimerReset = nil
 	}
 	if e.nextQuery != nil {
-		_ = e.nextQuery.Close()
+		if err := e.nextQuery.Close(); err != nil {
+			panic(err)
+		}
 		e.nextQuery = nil
 	}
 	if e.prevQuery != nil {
-		_ = e.prevQuery.Close()
+		if err := e.prevQuery.Close(); err != nil {
+			panic(err)
+		}
 		e.prevQuery = nil
 	}
 
@@ -1618,24 +1739,27 @@ func (e *Editor) startRefreshTimer() {
 
 	// Start new refresh timer
 	e.refreshTimerStop = make(chan struct{})
-	e.refreshTimer = time.NewTimer(300 * time.Millisecond)
+	e.refreshTimer = time.NewTimer(RefreshTimerInterval)
 
 	// Refresh timer goroutine
 	go func() {
 		stopChan := e.refreshTimerStop
 		timer := e.refreshTimer
 		app := e.app
+		if stopChan == nil || timer == nil {
+			return
+		}
 		for {
 			select {
 			case <-stopChan:
 				return
 			case <-timer.C:
-				if app != nil {
+				if app != nil && e.relation != nil && e.relation.DB != nil {
 					app.QueueUpdateDraw(func() {
 						e.refreshData()
 					})
 				}
-				timer.Reset(300 * time.Millisecond)
+				timer.Reset(RefreshTimerInterval)
 			}
 		}
 	}()
@@ -1650,6 +1774,18 @@ func (e *Editor) stopRefreshTimer() {
 	if e.refreshTimerStop != nil {
 		close(e.refreshTimerStop)
 		e.refreshTimerStop = nil
+	}
+	if e.prevQuery != nil {
+		if err := e.prevQuery.Close(); err != nil {
+			panic(err)
+		}
+		e.prevQuery = nil
+	}
+	if e.nextQuery != nil {
+		if err := e.nextQuery.Close(); err != nil {
+			panic(err)
+		}
+		e.nextQuery = nil
 	}
 }
 

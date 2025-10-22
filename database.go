@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -934,6 +935,100 @@ func parseEnumValues(colType string) []string {
 	return values
 }
 
+// BuildInsertPreview constructs a SQL INSERT statement as a string with literal
+// values inlined for preview purposes. Intended only for UI preview.
+func (rel *Relation) BuildInsertPreview(newRecordRow []interface{}, columns []Column) string {
+	// Render a literal value for preview (no placeholders)
+	literal := func(val interface{}, attrType string) string {
+		if val == nil {
+			return "NULL"
+		}
+		at := strings.ToLower(attrType)
+		switch v := val.(type) {
+		case bool:
+			if rel.DBType == PostgreSQL {
+				if v {
+					return "TRUE"
+				}
+				return "FALSE"
+			}
+			if v {
+				return "1"
+			}
+			return "0"
+		case int64:
+			return strconv.FormatInt(v, 10)
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		case []byte:
+			s := string(v)
+			s = strings.ReplaceAll(s, "'", "''")
+			return "'" + s + "'"
+		case string:
+			if v == NullGlyph {
+				return "NULL"
+			}
+			// For non-numeric types, quote and escape
+			if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
+				return v
+			}
+			s := strings.ReplaceAll(v, "'", "''")
+			return "'" + s + "'"
+		default:
+			// Fallback to string formatting quoted
+			s := strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
+			return "'" + s + "'"
+		}
+	}
+	os.Stderr.WriteString("1 BuildInsertPreview: " + strconv.Itoa(len(rel.attributeOrder)) + "\n")
+
+	// Check if all values are nil/empty
+	hasNonNullValue := false
+	for _, val := range newRecordRow {
+		if val != nil && val != "" && val != NullGlyph {
+			hasNonNullValue = true
+			break
+		}
+	}
+
+	// Return empty string if all values are nil/empty
+	if !hasNonNullValue {
+		return ""
+	}
+
+	// Build column list and values list
+	var cols []string
+	var vals []string
+	for i, column := range columns {
+		attr := rel.attributes[column.Name]
+		// nil means no update
+		if newRecordRow[i] != nil {
+			cols = append(cols, quoteIdent(rel.DBType, column.Name))
+			vals = append(vals, literal(newRecordRow[i], attr.Type))
+		}
+	}
+
+	if len(cols) == 0 {
+		return ""
+	}
+
+	quotedTable := quoteQualified(rel.DBType, rel.name)
+	useReturning := databaseFeatures[rel.DBType].returning
+
+	returningCols := make([]string, len(rel.attributeOrder))
+	for i, name := range rel.attributeOrder {
+		returningCols[i] = quoteIdent(rel.DBType, name)
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	if useReturning {
+		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
+			quotedTable, strings.Join(cols, ", "), strings.Join(vals, ", "), returning)
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quotedTable, strings.Join(cols, ", "), strings.Join(vals, ", "))
+}
+
 // BuildUpdatePreview constructs a SQL UPDATE statement as a string with literal
 // values inlined for preview purposes. It mirrors UpdateDBValue but does not
 // execute any SQL. Intended only for UI preview.
@@ -1065,6 +1160,239 @@ func (rel *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, col
 		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
 	}
 	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
+}
+
+// InsertDBRecord inserts a new record into the database. It returns the inserted
+// row values ordered by relation.attributeOrder. The newRecordRow should contain
+// values for all columns (or nil/NullGlyph for NULL values).
+func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, error) {
+	if len(newRecordRow) != len(rel.attributeOrder) {
+		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.attributeOrder), len(newRecordRow))
+	}
+
+	// Convert string values to appropriate DB values
+	toDBValue := func(colName, raw string) interface{} {
+		attrType := ""
+		if attr, ok := rel.attributes[colName]; ok {
+			attrType = strings.ToLower(attr.Type)
+		}
+		if raw == NullGlyph || raw == "" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	// Placeholder builder
+	placeholder := func(i int) string {
+		switch rel.DBType {
+		case PostgreSQL:
+			return fmt.Sprintf("$%d", i)
+		default:
+			return "?"
+		}
+	}
+
+	// Build column list and values
+	var cols []string
+	var placeholders []string
+	var args []interface{}
+	paramPos := 1
+
+	for i, attrName := range rel.attributeOrder {
+		attr, ok := rel.attributes[attrName]
+		if !ok {
+			continue
+		}
+
+		val := newRecordRow[i]
+
+		// Convert to DB value
+		var dbVal interface{}
+		if strVal, ok := val.(string); ok {
+			dbVal = toDBValue(attrName, strVal)
+		} else {
+			dbVal = val
+		}
+
+		// Skip NULL/empty values ONLY if column is nullable AND has a default
+		// For now, we include all NOT NULL columns even if nil (let DB handle constraint violations)
+		// We skip nullable columns with nil values (let DB use defaults)
+		if (dbVal == nil || dbVal == "" || dbVal == NullGlyph) && attr.Nullable {
+			continue
+		}
+
+		// If the column is NOT NULL but the value is nil/empty, we still need to include it
+		// so the database can return a proper constraint violation error
+
+		cols = append(cols, quoteIdent(rel.DBType, attrName))
+		placeholders = append(placeholders, placeholder(paramPos))
+		args = append(args, dbVal)
+		paramPos++
+	}
+
+	// Build RETURNING clause
+	returningCols := make([]string, len(rel.attributeOrder))
+	for i, name := range rel.attributeOrder {
+		returningCols[i] = quoteIdent(rel.DBType, name)
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	// Build query
+	quotedTable := quoteQualified(rel.DBType, rel.name)
+	useReturning := databaseFeatures[rel.DBType].returning
+
+	// If no columns to insert, use DEFAULT VALUES syntax
+	if len(cols) == 0 {
+		if useReturning {
+			query := fmt.Sprintf("INSERT INTO %s DEFAULT VALUES RETURNING %s",
+				quotedTable, returning)
+
+			// Scan returned values
+			rowVals := make([]interface{}, len(returningCols))
+			scanArgs := make([]interface{}, len(returningCols))
+			for i := range rowVals {
+				scanArgs[i] = &rowVals[i]
+			}
+
+			if err := rel.DB.QueryRow(query).Scan(scanArgs...); err != nil {
+				return nil, fmt.Errorf("insert failed: %w", err)
+			}
+			return rowVals, nil
+		}
+
+		// For databases without RETURNING, use a transaction
+		query := fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", quotedTable)
+		os.Stderr.WriteString("insert db new record query: " + query + "\n")
+		return nil, errors.New("not implemented")
+
+		tx, err := rel.DB.Begin()
+		if err != nil {
+			return nil, fmt.Errorf("begin tx failed: %w", err)
+		}
+
+		result, err := tx.Exec(query)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("insert failed: %w", err)
+		}
+
+		// Get last insert ID if available
+		lastID, err := result.LastInsertId()
+		if err == nil && lastID > 0 && len(rel.key) == 1 {
+			// Select the inserted row by last insert ID
+			selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
+				returning, quotedTable, quoteIdent(rel.DBType, rel.key[0]), placeholder(1))
+			row := tx.QueryRow(selQuery, lastID)
+
+			rowVals := make([]interface{}, len(returningCols))
+			scanArgs := make([]interface{}, len(rowVals))
+			for i := range rowVals {
+				scanArgs[i] = &rowVals[i]
+			}
+
+			if err := row.Scan(scanArgs...); err != nil {
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("scan failed: %w", err)
+			}
+
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("commit failed: %w", err)
+			}
+			return rowVals, nil
+		}
+
+		// Fallback: commit and return nil (caller should refresh manually)
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit failed: %w", err)
+		}
+		return nil, nil
+	}
+
+	if useReturning {
+		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
+			quotedTable, strings.Join(cols, ", "), strings.Join(placeholders, ", "), returning)
+
+		// Scan returned values
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(returningCols))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+
+		if err := rel.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("insert failed: %w", err)
+		}
+		return rowVals, nil
+	}
+
+	// For databases without RETURNING, use a transaction
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quotedTable, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
+
+	tx, err := rel.DB.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx failed: %w", err)
+	}
+
+	result, err := tx.Exec(query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("insert failed: %w", err)
+	}
+
+	// Get last insert ID if available
+	lastID, err := result.LastInsertId()
+	if err == nil && lastID > 0 && len(rel.key) == 1 {
+		// Select the inserted row by last insert ID
+		selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
+			returning, quotedTable, quoteIdent(rel.DBType, rel.key[0]), placeholder(1))
+		row := tx.QueryRow(selQuery, lastID)
+
+		rowVals := make([]interface{}, len(returningCols))
+		scanArgs := make([]interface{}, len(rowVals))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+
+		if err := row.Scan(scanArgs...); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit failed: %w", err)
+		}
+		return rowVals, nil
+	}
+
+	// Fallback: commit and return nil (caller should refresh manually)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit failed: %w", err)
+	}
+	return nil, nil
 }
 
 // UpdateDBValue updates a single cell in the underlying database using the
