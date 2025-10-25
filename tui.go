@@ -54,10 +54,10 @@ type Editor struct {
 	selectedCols map[int]bool
 
 	// data, records is a circular buffer
-	nextQuery *sql.Rows       // nextRows
-	prevQuery *sql.Rows       // prevRows
-	pointer   int             // pointer to the current record
-	records   [][]any // columns are keyed off e.columns
+	nextQuery *sql.Rows // nextRows
+	prevQuery *sql.Rows // prevRows
+	pointer   int       // pointer to the current record
+	records   [][]any   // columns are keyed off e.columns
 
 	// timer for auto-closing rows
 	rowsTimer      *time.Timer
@@ -540,6 +540,10 @@ func (e *Editor) setupKeyBindings() {
 				}
 				return nil
 			}
+		case key == tcell.KeyBackspace || key == tcell.KeyBackspace2 || key == tcell.KeyDEL || key == tcell.KeyDelete:
+			// Backspace or Delete: start editing with empty string
+			e.enterEditModeWithInitialValue(row, col, "")
+			return nil
 		default:
 			if key == tcell.KeyRune && rune != 0 &&
 				mod&(tcell.ModAlt|tcell.ModCtrl|tcell.ModMeta) == 0 {
