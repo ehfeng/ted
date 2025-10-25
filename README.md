@@ -78,7 +78,9 @@ Each column has a default width of 8 characters + 2 spaces + pipe = 11 character
 
 When editing values with overflow, it overlays _on top_ of the table with a light background. Overflow overlay flows to the right and below the cell. When value overflows the editor window, it word wraps. The editing overlay _never_ exceeds the terminal window size.
 
-Default null sentinel is `null` (configurable). `'null'` to input actual string.
+For most data types, an empty cell means null. Only for nullable text does it have another valid meaning. If that's the case, then empty should mean `null`. Using `''` to input an empty string? What if you actually want to input the string `'` or `''`?
+
+Default null sentinel is `\N` (configurable). It's grey for easy viewing in single width columns.
 
 JSON is treated as text. JSONB is pretty printed.
 
@@ -139,7 +141,7 @@ Pasting cells (separate from pasting values). Unclear how you'd map things, espe
 ## Development
 
 ```sh
-watchexec --restart --exts go,mod,sum -- 'go install'
+make watch
 ted test.db users 2>/tmp/ted.log
 tail -f /tmp/ted.log
 ```

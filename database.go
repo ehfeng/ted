@@ -12,7 +12,9 @@ import (
 )
 
 // should be configurable
-const NullGlyph = "null"
+const NullGlyph = "\\0"
+const NullDisplay = "null"
+const EmptyDisplay = "·"
 
 type Reference struct {
 	ForeignTable   *Relation
@@ -487,7 +489,7 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 
 	var (
 		query string
-		args  []interface{}
+		args  []any
 	)
 
 	switch dbType {
@@ -937,9 +939,9 @@ func parseEnumValues(colType string) []string {
 
 // BuildInsertPreview constructs a SQL INSERT statement as a string with literal
 // values inlined for preview purposes. Intended only for UI preview.
-func (rel *Relation) BuildInsertPreview(newRecordRow []interface{}, columns []Column) string {
+func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) string {
 	// Render a literal value for preview (no placeholders)
-	literal := func(val interface{}, attrType string) string {
+	literal := func(val any, attrType string) string {
 		if val == nil {
 			return "NULL"
 		}
@@ -980,12 +982,11 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []interface{}, columns []Co
 			return "'" + s + "'"
 		}
 	}
-	os.Stderr.WriteString("1 BuildInsertPreview: " + strconv.Itoa(len(rel.attributeOrder)) + "\n")
 
 	// Check if all values are nil/empty
 	hasNonNullValue := false
 	for _, val := range newRecordRow {
-		if val != nil && val != "" && val != NullGlyph {
+		if val != nil {
 			hasNonNullValue = true
 			break
 		}
@@ -1002,7 +1003,7 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []interface{}, columns []Co
 	for i, column := range columns {
 		attr := rel.attributes[column.Name]
 		// nil means no update
-		if newRecordRow[i] != nil {
+		if newRecordRow[i] != EmptyCellValue {
 			cols = append(cols, quoteIdent(rel.DBType, column.Name))
 			vals = append(vals, literal(newRecordRow[i], attr.Type))
 		}
@@ -1032,13 +1033,13 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []interface{}, columns []Co
 // BuildUpdatePreview constructs a SQL UPDATE statement as a string with literal
 // values inlined for preview purposes. It mirrors UpdateDBValue but does not
 // execute any SQL. Intended only for UI preview.
-func (rel *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, colName string, newValue string) string {
+func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName string, newValue string) string {
 	if rowIdx < 0 || rowIdx >= len(records) || len(rel.key) == 0 {
 		return ""
 	}
 
 	// Convert raw text to DB-typed value (mirrors UpdateDBValue's toDBValue)
-	toDBValue := func(colName, raw string) interface{} {
+	toDBValue := func(colName, raw string) any {
 		attrType := ""
 		if attr, ok := rel.attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
@@ -1073,7 +1074,7 @@ func (rel *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, col
 	}
 
 	// Render a literal value for preview (no placeholders)
-	literal := func(val interface{}, attrType string) string {
+	literal := func(val any, attrType string) string {
 		if val == nil {
 			return "NULL"
 		}
@@ -1165,13 +1166,13 @@ func (rel *Relation) BuildUpdatePreview(records [][]interface{}, rowIdx int, col
 // InsertDBRecord inserts a new record into the database. It returns the inserted
 // row values ordered by relation.attributeOrder. The newRecordRow should contain
 // values for all columns (or nil/NullGlyph for NULL values).
-func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, error) {
+func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 	if len(newRecordRow) != len(rel.attributeOrder) {
 		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.attributeOrder), len(newRecordRow))
 	}
 
 	// Convert string values to appropriate DB values
-	toDBValue := func(colName, raw string) interface{} {
+	toDBValue := func(colName, raw string) any {
 		attrType := ""
 		if attr, ok := rel.attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
@@ -1218,7 +1219,7 @@ func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, 
 	// Build column list and values
 	var cols []string
 	var placeholders []string
-	var args []interface{}
+	var args []any
 	paramPos := 1
 
 	for i, attrName := range rel.attributeOrder {
@@ -1230,7 +1231,7 @@ func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, 
 		val := newRecordRow[i]
 
 		// Convert to DB value
-		var dbVal interface{}
+		var dbVal any
 		if strVal, ok := val.(string); ok {
 			dbVal = toDBValue(attrName, strVal)
 		} else {
@@ -1271,8 +1272,8 @@ func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, 
 				quotedTable, returning)
 
 			// Scan returned values
-			rowVals := make([]interface{}, len(returningCols))
-			scanArgs := make([]interface{}, len(returningCols))
+			rowVals := make([]any, len(returningCols))
+			scanArgs := make([]any, len(returningCols))
 			for i := range rowVals {
 				scanArgs[i] = &rowVals[i]
 			}
@@ -1307,8 +1308,8 @@ func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, 
 				returning, quotedTable, quoteIdent(rel.DBType, rel.key[0]), placeholder(1))
 			row := tx.QueryRow(selQuery, lastID)
 
-			rowVals := make([]interface{}, len(returningCols))
-			scanArgs := make([]interface{}, len(rowVals))
+			rowVals := make([]any, len(returningCols))
+			scanArgs := make([]any, len(rowVals))
 			for i := range rowVals {
 				scanArgs[i] = &rowVals[i]
 			}
@@ -1336,8 +1337,8 @@ func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, 
 			quotedTable, strings.Join(cols, ", "), strings.Join(placeholders, ", "), returning)
 
 		// Scan returned values
-		rowVals := make([]interface{}, len(returningCols))
-		scanArgs := make([]interface{}, len(returningCols))
+		rowVals := make([]any, len(returningCols))
+		scanArgs := make([]any, len(returningCols))
 		for i := range rowVals {
 			scanArgs[i] = &rowVals[i]
 		}
@@ -1371,8 +1372,8 @@ func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, 
 			returning, quotedTable, quoteIdent(rel.DBType, rel.key[0]), placeholder(1))
 		row := tx.QueryRow(selQuery, lastID)
 
-		rowVals := make([]interface{}, len(returningCols))
-		scanArgs := make([]interface{}, len(rowVals))
+		rowVals := make([]any, len(returningCols))
+		scanArgs := make([]any, len(rowVals))
 		for i := range rowVals {
 			scanArgs[i] = &rowVals[i]
 		}
@@ -1399,7 +1400,7 @@ func (rel *Relation) InsertDBRecord(newRecordRow []interface{}) ([]interface{}, 
 // relation's lookup key columns to identify the row. It returns the refreshed
 // row values ordered by relation.attributeOrder. If no row is updated, returns
 // an error.
-func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName string, newValue string) ([]interface{}, error) {
+func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, newValue string) ([]any, error) {
 	if rowIdx < 0 || rowIdx >= len(records) {
 		return nil, fmt.Errorf("index out of range")
 	}
@@ -1408,7 +1409,7 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 	}
 
 	// Convert string to appropriate DB value
-	toDBValue := func(colName, raw string) interface{} {
+	toDBValue := func(colName, raw string) any {
 		attrType := ""
 		if attr, ok := rel.attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
@@ -1454,7 +1455,7 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 
 	// Build SET and WHERE clauses and args
 	valueArg := toDBValue(colName, newValue)
-	keyArgs := make([]interface{}, 0, len(rel.key))
+	keyArgs := make([]any, 0, len(rel.key))
 	whereParts := make([]string, 0, len(rel.key))
 	for i := range rel.key {
 		lookupKeyCol := rel.key[i]
@@ -1508,13 +1509,13 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 	if useReturning {
 		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
 		// Combine args: value + keys
-		args := make([]interface{}, 0, 1+len(keyArgs))
+		args := make([]any, 0, 1+len(keyArgs))
 		args = append(args, valueArg)
 		args = append(args, keyArgs...)
 
 		// Scan into pointers to capture returned values
-		rowVals := make([]interface{}, len(returningCols))
-		scanArgs := make([]interface{}, len(returningCols))
+		rowVals := make([]any, len(returningCols))
+		scanArgs := make([]any, len(returningCols))
 		for i := range rowVals {
 			scanArgs[i] = &rowVals[i]
 		}
@@ -1536,7 +1537,7 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 	}
 
 	// Execute update inside the transaction
-	args := make([]interface{}, 0, 1+len(keyArgs))
+	args := make([]any, 0, 1+len(keyArgs))
 	args = append(args, valueArg)
 	args = append(args, keyArgs...)
 	res, err := tx.Exec(query, args...)
@@ -1552,8 +1553,8 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 	// Re-select the updated row within the same transaction
 	selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s", returning, quotedTable, strings.Join(whereParts, " AND "))
 	row := tx.QueryRow(selQuery, keyArgs...)
-	rowVals := make([]interface{}, len(returningCols))
-	scanArgs := make([]interface{}, len(rowVals))
+	rowVals := make([]any, len(returningCols))
+	scanArgs := make([]any, len(rowVals))
 	for i := range rowVals {
 		scanArgs[i] = &rowVals[i]
 	}
@@ -1570,7 +1571,7 @@ func (rel *Relation) UpdateDBValue(records [][]interface{}, rowIdx int, colName 
 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
-func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []interface{}, inclusive, scrollDown bool) (*sql.Rows, error) {
+func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
 	query, err := selectQuery(rel.DBType, rel.name, columns, sortCol, rel.key, len(params) > 0, inclusive, scrollDown)
 	if err != nil {
 		return nil, err
@@ -1762,7 +1763,7 @@ func quoteIdent(dbType DatabaseType, ident string) string {
 	}
 }
 
-func getForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]interface{}, error) {
+func getForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]any, error) {
 	if len(columns) == 0 {
 		// choose non-key columns
 		columns = make([]string, 0, len(table.attributeOrder))

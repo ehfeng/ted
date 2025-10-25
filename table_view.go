@@ -5,6 +5,8 @@ import (
 	"github.com/rivo/tview"
 )
 
+const EmptyCellValue = '\000'
+
 // HeaderColumn represents a table column with header information
 type HeaderColumn struct {
 	Name  string
@@ -17,7 +19,7 @@ type TableView struct {
 
 	// Table data
 	headers []HeaderColumn
-	data    [][]interface{}
+	data    [][]any
 
 	// Display configuration
 	cellPadding   int
@@ -26,7 +28,7 @@ type TableView struct {
 	headerBgColor tcell.Color
 	separatorChar rune
 	bottom        bool
-	newRecordRow  []interface{} // if non-empty, render as new record row with special styling
+	insertRow     []any // if non-empty, render as insert mode row with special styling
 
 	// Selection state
 	selectedRow int
@@ -73,19 +75,24 @@ func (tv *TableView) SetHeaders(headers []HeaderColumn) *TableView {
 }
 
 // SetData sets the table data
-func (tv *TableView) SetData(data [][]interface{}) *TableView {
-	tv.data = make([][]interface{}, len(data))
+func (tv *TableView) SetData(data [][]any) *TableView {
+	tv.data = make([][]any, len(data))
 	for i, row := range data {
-		tv.data[i] = make([]interface{}, len(row))
+		tv.data[i] = make([]any, len(row))
 		copy(tv.data[i], row)
 	}
 	return tv
 }
 
-// SetNewRecordRow sets the new record row data (or nil to disable)
-func (tv *TableView) SetNewRecordRow(row []interface{}) *TableView {
-	tv.newRecordRow = row
-	return tv
+func (tv *TableView) SetupInsertRow() {
+	tv.insertRow = make([]any, len(tv.headers))
+	for i := range tv.insertRow {
+		tv.insertRow[i] = EmptyCellValue
+	}
+}
+
+func (tv *TableView) ClearInsertRow() {
+	tv.insertRow = nil
 }
 
 // GetSelection returns the currently selected data row and column
@@ -101,8 +108,8 @@ func (tv *TableView) GetDataLength() int {
 // Select selects a data cell
 func (tv *TableView) Select(row, col int) *TableView {
 	maxRow := len(tv.data)
-	if len(tv.newRecordRow) > 0 {
-		maxRow = len(tv.data) + 1 // Allow selecting the virtual new record row
+	if len(tv.insertRow) > 0 {
+		maxRow = len(tv.data) + 1 // Allow selecting the virtual insert mode row
 	}
 	if row >= 0 && row < maxRow && col >= 0 && col < len(tv.headers) {
 		tv.selectedRow = row
@@ -130,7 +137,7 @@ func (tv *TableView) SetSingleClickFunc(handler func(row, col int)) *TableView {
 }
 
 // GetCell returns the value at the specified data coordinates
-func (tv *TableView) GetCell(row, col int) interface{} {
+func (tv *TableView) GetCell(row, col int) any {
 	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
 		return tv.data[row][col]
 	}
@@ -138,7 +145,7 @@ func (tv *TableView) GetCell(row, col int) interface{} {
 }
 
 // SetCell sets the value at the specified data coordinates
-func (tv *TableView) SetCell(row, col int, value interface{}) *TableView {
+func (tv *TableView) SetCell(row, col int, value any) *TableView {
 	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
 		tv.data[row][col] = value
 	}
@@ -176,12 +183,12 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		currentY++
 	}
 
-	// Check if we should draw the bottom border (when final slice is nil or in new record mode)
+	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
 	drawBottomBorder := tv.bottom
 	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1]) == 0 {
 		drawBottomBorder = true
 	}
-	if len(tv.newRecordRow) > 0 {
+	if len(tv.insertRow) > 0 {
 		drawBottomBorder = true
 	}
 
@@ -192,9 +199,9 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		maxDataRows = height - 4 // Reserve additional space for bottom border
 	}
 
-	// When in new record mode, we need to reserve one more row for the new record
+	// When in insert mode, we need to reserve one more row for the insert mode row
 	maxRegularDataRows := maxDataRows
-	if len(tv.newRecordRow) > 0 {
+	if len(tv.insertRow) > 0 {
 		maxRegularDataRows = maxDataRows - 1
 	}
 	tv.BodyRowsAvailable = maxDataRows
@@ -209,8 +216,8 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		dataRowsDrawn++
 	}
 
-	// Draw new record row if enabled and there's space
-	if len(tv.newRecordRow) > 0 && currentY < y+height {
+	// Draw insert mode row if enabled and there's space
+	if len(tv.insertRow) > 0 && currentY < y+height {
 		tv.drawDataRow(screen, x, currentY, tableWidth, len(tv.data))
 		currentY++
 		dataRowsDrawn++
@@ -327,8 +334,8 @@ func (tv *TableView) drawHeaderSeparator(screen tcell.Screen, x, y, tableWidth i
 
 // drawDataRow draws a data row
 func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx int) {
-	// Check if this is the new record row (when newRecordRow is set and rowIdx is beyond data)
-	isNewRecordRow := len(tv.newRecordRow) > 0 && rowIdx == len(tv.data)
+	// Check if this is the insert mode row (when newRecordRow is set and rowIdx is beyond data)
+	isNewRecordRow := len(tv.insertRow) > 0 && rowIdx == len(tv.data)
 
 	// Left border
 	borderStyle := tcell.StyleDefault.Foreground(tv.borderColor)
@@ -340,10 +347,10 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 
 	// Data cells
 	for i, header := range tv.headers {
-		// Base style - use cyan background for new record row
+		// Base style - use cyan background for insert mode row
 		baseCellStyle := tcell.StyleDefault
 		if isNewRecordRow {
-			baseCellStyle = baseCellStyle.Background(tcell.ColorRoyalBlue).Foreground(tcell.ColorDarkGrey)
+			baseCellStyle = baseCellStyle.Background(tcell.ColorRoyalBlue)
 		}
 
 		// Apply selection highlight on top of base style
@@ -360,30 +367,30 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 
 		// Cell data
 		if isNewRecordRow {
-			// For new record row, render repeating dots if newRecordRow[i] is nil
-
-			cellText := formatCellValue(tv.newRecordRow[i])
-			if cellText == NullGlyph {
-				cellStyle = cellStyle.Italic(true)
-			}
-			cellText = padCellToWidth(cellText, header.Width)
-			for j, ch := range cellText {
-				screen.SetContent(pos+j, y, ch, nil, cellStyle)
+			// For insert mode row, render cell value with special styling
+			// EmptyCellValue means empty (column not included in INSERT) - show as ·
+			// nil means null
+			if tv.insertRow[i] == EmptyCellValue {
+				// Empty cell in insert mode - show repeating dots
+				for k := 0; k < header.Width; k++ {
+					screen.SetContent(pos+k, y, '·', nil, cellStyle)
+				}
+			} else {
+				cellText, cellStyle := formatCellValue(tv.insertRow[i], cellStyle)
+				cellText = padCellToWidth(cellText, header.Width)
+				for j, ch := range cellText {
+					screen.SetContent(pos+j, y, ch, nil, cellStyle)
+				}
 			}
 
 		} else {
 			// Normal rendering
-			var cellText string
 			if rowIdx < len(tv.data) && i < len(tv.data[rowIdx]) {
-				cellText = formatCellValue(tv.data[rowIdx][i])
-				if cellText == NullGlyph {
-					cellStyle.Italic(true)
+				cellText, cellStyle := formatCellValue(tv.data[rowIdx][i], cellStyle)
+				cellText = padCellToWidth(cellText, header.Width)
+				for j, ch := range cellText {
+					screen.SetContent(pos+j, y, ch, nil, cellStyle)
 				}
-			}
-			cellText = padCellToWidth(cellText, header.Width)
-
-			for j, ch := range cellText {
-				screen.SetContent(pos+j, y, ch, nil, cellStyle)
 			}
 		}
 		pos += header.Width
@@ -450,15 +457,15 @@ func (tv *TableView) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 
 		switch key {
 		case tcell.KeyUp:
-			if len(tv.newRecordRow) > 0 {
-				return // Disable vertical navigation in new record mode
+			if len(tv.insertRow) > 0 {
+				return // Disable vertical navigation in insert mode
 			}
 			if tv.selectedRow > 0 {
 				tv.selectedRow--
 			}
 		case tcell.KeyDown:
-			if len(tv.newRecordRow) > 0 {
-				return // Disable vertical navigation in new record mode
+			if len(tv.insertRow) > 0 {
+				return // Disable vertical navigation in insert mode
 			}
 			if tv.selectedRow < len(tv.data)-1 {
 				tv.selectedRow++
@@ -534,7 +541,7 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 }
 
 // UpdateCell updates a cell value and refreshes the display
-func (tv *TableView) UpdateCell(row, col int, value interface{}) *TableView {
+func (tv *TableView) UpdateCell(row, col int, value any) *TableView {
 	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
 		tv.data[row][col] = value
 	}
