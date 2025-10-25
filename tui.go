@@ -152,6 +152,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor.setupStatusBar()
 	editor.setupCommandPalette()
 	editor.setupLayout()
+	editor.setupResizeHandler()
 	editor.refreshData()
 	editor.table.Select(0, 0)
 	editor.pages.AddPage("table", editor.layout, true, true)
@@ -324,6 +325,43 @@ func (e *Editor) setupLayout() {
 		AddItem(e.table, 0, 1, true).
 		AddItem(e.statusBar, 1, 0, false).
 		AddItem(e.commandPalette, 1, 0, false)
+}
+
+func (e *Editor) setupResizeHandler() {
+	e.pages.SetChangedFunc(func() {
+		// Get the new terminal height
+		newHeight := getTerminalHeight()
+		newDataHeight := newHeight - 5 // 5 lines for header, status bar, command palette
+
+		// Only resize if the height has changed significantly
+		if newDataHeight != len(e.records) && newDataHeight > 0 {
+			// Create new records buffer with the new size
+			newRecords := make([][]any, newDataHeight)
+
+			// Copy existing data to the new buffer
+			copyCount := min(len(e.records), newDataHeight)
+			for i := 0; i < copyCount; i++ {
+				ptr := (i + e.pointer) % len(e.records)
+				newRecords[i] = e.records[ptr]
+			}
+
+			// If the new buffer is larger, fetch more rows to fill it
+			if newDataHeight > len(e.records) && e.records[len(e.records)-1] != nil {
+				// We need to fetch more rows
+				oldLen := len(e.records)
+				e.records = newRecords
+				e.pointer = 0
+				// Fetch additional rows
+				e.nextRows(newDataHeight - oldLen)
+			} else {
+				e.records = newRecords
+				e.pointer = 0
+			}
+
+			e.renderData()
+			e.app.Draw()
+		}
+	})
 }
 
 func (e *Editor) setupKeyBindings() {
