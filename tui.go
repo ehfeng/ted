@@ -1789,7 +1789,7 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if err := e.nextQuery.Scan(scanTargets...); err != nil {
 			return false, err
 		}
-		e.records[e.pointer+rowsFetched] = row
+		e.records[(e.pointer+rowsFetched)%len(e.records)] = row
 	}
 	// new pointer position
 	e.incrPtr(rowsFetched)
