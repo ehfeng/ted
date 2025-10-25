@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -1245,9 +1244,9 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 			continue
 		}
 
-		// If the column is NOT NULL but the value is nil/empty, we still need to include it
-		// so the database can return a proper constraint violation error
-
+		if dbVal == EmptyCellValue {
+			continue
+		}
 		cols = append(cols, quoteIdent(rel.DBType, attrName))
 		placeholders = append(placeholders, placeholder(paramPos))
 		args = append(args, dbVal)
@@ -1287,7 +1286,6 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 		// For databases without RETURNING, use a transaction
 		query := fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", quotedTable)
 		os.Stderr.WriteString("insert db new record query: " + query + "\n")
-		return nil, errors.New("not implemented")
 
 		tx, err := rel.DB.Begin()
 		if err != nil {

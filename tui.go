@@ -1277,7 +1277,7 @@ func (e *Editor) renderData() {
 
 	normalizedRecords := make([][]any, dataCount)
 	for i := 0; i < dataCount; i++ {
-		ptr := (i + e.pointer) % dataCount
+		ptr := (i + e.pointer) % len(e.records)
 		// insert mode row needs "space" at the top to still be able to render
 		// the last db row
 		if len(e.table.insertRow) > 0 && i == 0 {
@@ -1353,21 +1353,23 @@ func (e *Editor) executeInsert() error {
 			e.loadFromRowId(nil, false, 0)
 			e.renderData()
 			e.table.Select(len(e.records)-2, 0)
-			// e.app.Draw()
 			return nil
 		}
 		keyVals[i] = insertedRow[keyIdx]
 	}
 
 	// Load from the inserted row (from bottom)
-	if err := e.loadFromRowId(keyVals, false, 0); err != nil {
+	if err := e.loadFromRowId(keyVals, false, e.table.selectedCol); err != nil {
 		e.SetStatusError(err.Error())
 		return err
 	}
 
-	e.table.Select(0, 0)
 	// Select the first row (which should be the newly inserted one)
-	e.renderData()
+	if e.records[e.lastRowIdx()] == nil {
+		e.table.Select(len(e.records)-2, e.table.selectedCol)
+	} else {
+		e.table.Select(len(e.records)-1, e.table.selectedCol)
+	}
 	return nil
 }
 
@@ -1476,7 +1478,8 @@ func (e *Editor) refreshData() {
 		panic(err)
 	}
 	if rowsLoaded < len(e.records) {
-		e.records[rowsLoaded] = nil
+		e.records = e.records[:rowsLoaded-1]
+		e.records = append(e.records, nil)
 	}
 	e.renderData()
 }
@@ -1592,7 +1595,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 // returns bool, err. bool if the edge of table is reached
 func (e *Editor) nextRows(i int) (bool, error) {
 	// Check if we're already at the end (last record is nil)
-	if e.records[e.lastRowIdx()] == nil {
+	if len(e.records) == 0 || e.records[e.lastRowIdx()] == nil {
 		return false, nil // No-op, already at end of data
 	}
 
@@ -1601,8 +1604,12 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		e.stopRefreshTimer()
 
 		params := make([]any, len(e.relation.key))
+		lastRecordIdx := (e.pointer - 1 + len(e.records)) % len(e.records)
+		if e.records[lastRecordIdx] == nil {
+			return false, nil // Can't query from nil record
+		}
 		for i := range e.relation.key {
-			params[i] = e.records[(e.pointer-1+len(e.records))%len(e.records)][i]
+			params[i] = e.records[lastRecordIdx][i]
 		}
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {
@@ -1667,6 +1674,9 @@ func (e *Editor) prevRows(i int) (bool, error) {
 	if e.prevQuery == nil {
 		// Stop refresh timer when starting a new query
 		e.stopRefreshTimer()
+		if len(e.records) == 0 || e.records[e.pointer] == nil {
+			return false, nil // Can't query from nil or empty records
+		}
 		params := make([]any, len(e.relation.key))
 		for i := range e.relation.key {
 			params[i] = e.records[e.pointer][i]
