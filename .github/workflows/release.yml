@@ -47,6 +47,11 @@ jobs:
       - name: Download Go dependencies
         run: go mod download
 
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
       - name: Build binaries
         run: |
           # Linux amd64
@@ -141,10 +146,16 @@ jobs:
           mv artifacts/linux-windows-binaries/* .
           mv artifacts/macos-binaries/* .
 
-          # Package binaries into tar.gz with proper naming
-          tar -czf ted_${VERSION}_Linux_amd64.tar.gz ted-linux-amd64
-          tar -czf ted_${VERSION}_Darwin_amd64.tar.gz ted-darwin-amd64
-          tar -czf ted_${VERSION}_Darwin_arm64.tar.gz ted-darwin-arm64
+          # Rename binaries to ted
+          mv ted-linux-amd64 ted
+          tar -czf ted_${VERSION}_Linux_amd64.tar.gz ted
+
+          mv ted-darwin-amd64 ted
+          tar -czf ted_${VERSION}_Darwin_amd64.tar.gz ted
+
+          mv ted-darwin-arm64 ted
+          tar -czf ted_${VERSION}_Darwin_arm64.tar.gz ted
+
           zip ted_${VERSION}_Windows_amd64.zip ted-windows-amd64.exe
 
           # Create checksums for the archives
