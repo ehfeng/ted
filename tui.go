@@ -78,6 +78,7 @@ const (
 	PaletteModeGoto
 	PaletteModeUpdate
 	PaletteModeInsert
+	PaletteModeDelete
 )
 
 func (m PaletteMode) Glyph() string {
@@ -94,6 +95,8 @@ func (m PaletteMode) Glyph() string {
 		return "` "
 	case PaletteModeInsert:
 		return "` "
+	case PaletteModeDelete:
+		return "✗ "
 	default:
 		return "> "
 	}
@@ -287,6 +290,8 @@ func (e *Editor) setupCommandPalette() {
 				}
 			case PaletteModeGoto:
 				e.executeGoto(command)
+			case PaletteModeDelete:
+				e.executeDelete()
 			}
 
 			// For Goto mode, keep the palette open with text selected
@@ -300,6 +305,11 @@ func (e *Editor) setupCommandPalette() {
 		case tcell.KeyEscape:
 			if e.paletteMode == PaletteModeInsert && e.editMode {
 				return event
+			}
+			if e.paletteMode == PaletteModeDelete {
+				e.setPaletteMode(PaletteModeDefault, false)
+				e.app.SetFocus(e.table)
+				return nil
 			}
 			e.setPaletteMode(PaletteModeDefault, false)
 			e.app.SetFocus(e.table)
@@ -369,6 +379,24 @@ func (e *Editor) setupKeyBindings() {
 				e.executeInsert()
 				return nil
 			}
+			// Execute delete in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				// Check if we're at the bottom of the table
+				atBottom := e.records[e.lastRowIdx()] == nil
+
+				e.executeDelete()
+				e.setPaletteMode(PaletteModeDefault, false)
+				e.app.SetFocus(e.table)
+
+				if atBottom {
+					e.loadFromRowId(nil, false, col)
+				} else {
+					e.refreshData()
+				}
+
+				e.table.Select(row, col)
+				return nil
+			}
 			// Enter: enter edit mode
 			e.enterEditMode(row, col)
 			return nil
@@ -376,6 +404,13 @@ func (e *Editor) setupKeyBindings() {
 			if e.app.GetFocus() == e.commandPalette {
 				e.setPaletteMode(PaletteModeDefault, false)
 				e.app.SetFocus(e.table)
+				return nil
+			}
+
+			if e.paletteMode == PaletteModeDelete {
+				e.setPaletteMode(PaletteModeDefault, false)
+				e.app.SetFocus(e.table)
+				e.SetStatusMessage("Ready")
 				return nil
 			}
 
@@ -416,12 +451,24 @@ func (e *Editor) setupKeyBindings() {
 
 				return nil
 			}
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.navigateTab(false)
 			return nil
 		case key == tcell.KeyBacktab:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.navigateTab(true)
 			return nil
 		case key == tcell.KeyHome:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			if mod&tcell.ModCtrl != 0 {
 				if len(e.table.insertRow) > 0 {
 					return nil // Disable vertical navigation in insert mode
@@ -434,6 +481,10 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, 0)
 			return nil
 		case key == tcell.KeyEnd:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			if mod&tcell.ModCtrl != 0 {
 				if len(e.table.insertRow) > 0 {
 					return nil // Disable vertical navigation in insert mode
@@ -446,16 +497,16 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, len(e.columns)-1)
 			return nil
 		case key == tcell.KeyPgUp:
-			if len(e.table.insertRow) > 0 {
-				return nil // Disable vertical navigation in insert mode
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// Page up: scroll data backward while keeping selection in same visual position
 			pageSize := max(1, e.table.BodyRowsAvailable-1)
 			e.prevRows(pageSize)
 			return nil
 		case key == tcell.KeyPgDn:
-			if len(e.table.insertRow) > 0 {
-				return nil // Disable vertical navigation in insert mode
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// Page down: scroll data forward while keeping selection in same visual position
 			pageSize := max(1, e.table.BodyRowsAvailable-1)
@@ -485,26 +536,60 @@ func (e *Editor) setupKeyBindings() {
 			e.setPaletteMode(PaletteModeSQL, true)
 			return nil
 		case key == tcell.KeyLeft && mod&tcell.ModAlt != 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.moveColumn(col, -1)
 			return nil
 		case key == tcell.KeyRight && mod&tcell.ModAlt != 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.moveColumn(col, 1)
 			return nil
 		case key == tcell.KeyLeft && mod&tcell.ModCtrl != 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.adjustColumnWidth(col, -2)
 			return nil
 		case key == tcell.KeyRight && mod&tcell.ModCtrl != 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.adjustColumnWidth(col, 2)
 			return nil
 		case key == tcell.KeyLeft && mod&tcell.ModMeta != 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.table.Select(row, 0)
 			return nil
 		case key == tcell.KeyRight && mod&tcell.ModMeta != 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			e.table.Select(row, len(e.columns)-1)
 			return nil
+		case key == tcell.KeyLeft:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+		case key == tcell.KeyRight:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 		case key == tcell.KeyUp:
-			if len(e.table.insertRow) > 0 {
-				return nil // Disable vertical navigation in insert mode
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			if mod&tcell.ModMeta != 0 {
 				e.table.Select(0, col)
@@ -518,8 +603,8 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 		case key == tcell.KeyDown:
-			if len(e.table.insertRow) > 0 {
-				return nil // Disable vertical navigation in insert mode
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			if mod&tcell.ModMeta != 0 {
 				if len(e.records[len(e.records)-1]) == 0 {
@@ -541,10 +626,22 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 		case key == tcell.KeyBackspace || key == tcell.KeyBackspace2 || key == tcell.KeyDEL || key == tcell.KeyDelete:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
 			// Backspace or Delete: start editing with empty string
 			e.enterEditModeWithInitialValue(row, col, "")
 			return nil
+		case (rune == 'd' || rune == 4) && mod&tcell.ModCtrl != 0:
+			// Ctrl+D: enter delete mode
+			e.enterDeleteMode(row, col)
+			return nil
 		default:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return event
+			}
 			if key == tcell.KeyRune && rune != 0 &&
 				mod&(tcell.ModAlt|tcell.ModCtrl|tcell.ModMeta) == 0 {
 				e.enterEditModeWithInitialValue(row, col, string(rune))
@@ -1208,7 +1305,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	} else {
 		switch mode {
 		case PaletteModeDefault:
-			e.commandPalette.SetPlaceholder("Ctrl+… I: Insert · `: SQL · G: Goto · C: Exit")
+			e.commandPalette.SetPlaceholder("Ctrl+… I: Insert · `: SQL · G: Goto · D: Delete · C: Exit")
 		case PaletteModeCommand:
 			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
 		case PaletteModeSQL:
@@ -1221,6 +1318,9 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 			e.commandPalette.SetPlaceholder("")
 		case PaletteModeInsert:
 			// No placeholder in insert mode
+			e.commandPalette.SetPlaceholder("")
+		case PaletteModeDelete:
+			// No placeholder in delete mode
 			e.commandPalette.SetPlaceholder("")
 		}
 	}
@@ -1456,7 +1556,7 @@ func (e *Editor) refreshData() {
 	e.pointer = 0 // Reset pointer for fresh load
 
 	// Load initial rows up to the preallocated size
-	rowsLoaded := 0
+	idx := 0
 	for i := 0; i < len(e.records) && rows.Next(); i++ {
 		e.records[i] = make([]any, len(e.columns))
 		scanTargets := make([]any, len(e.columns))
@@ -1470,16 +1570,20 @@ func (e *Editor) refreshData() {
 			}
 			return
 		}
-		rowsLoaded++
+		idx++
 	}
 
 	// If we didn't fill the buffer, mark the end with nil
 	if err := rows.Close(); err != nil {
 		panic(err)
 	}
-	if rowsLoaded < len(e.records) {
-		e.records = e.records[:rowsLoaded-1]
-		e.records = append(e.records, nil)
+	if idx < len(e.records) {
+		if idx < len(e.records)-1 {
+			e.loadFromRowId(nil, false, e.currentCol)
+		} else {
+			e.records = e.records[:idx]
+			e.records = append(e.records, nil)
+		}
 	}
 	e.renderData()
 }
@@ -2048,6 +2152,51 @@ func (e *Editor) executeCommand(command string) {
 }
 
 // Goto execution
+// enterDeleteMode enters delete mode for the current row
+func (e *Editor) enterDeleteMode(row, col int) {
+	if row < 0 || row >= len(e.records) || e.records[row] == nil {
+		return
+	}
+
+	// Build DELETE preview
+	preview := e.relation.BuildDeletePreview(e.records, row)
+	if preview == "" {
+		e.SetStatusError("Cannot delete row without key values")
+		return
+	}
+
+	// Set mode to Delete and show preview
+	e.setPaletteMode(PaletteModeDelete, false)
+	e.commandPalette.SetPlaceholder(preview)
+	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
+	e.SetStatusMessage("Enter to confirm deletion · Esc to cancel")
+
+	// Store the row being deleted
+	e.currentRow = row
+	e.currentCol = col
+}
+
+// executeDelete executes the DELETE statement for the current row
+func (e *Editor) executeDelete() error {
+	if e.currentRow < 0 || e.currentRow >= len(e.records) || e.records[e.currentRow] == nil {
+		e.SetStatusError("Invalid row for deletion")
+		return fmt.Errorf("invalid row")
+	}
+
+	// Execute the delete
+	err := e.relation.DeleteDBRecord(e.records, e.currentRow)
+	if err != nil {
+		e.SetStatusError(err.Error())
+		return err
+	}
+
+	// Refresh data after deletion
+	e.refreshData()
+	e.SetStatusMessage("Record deleted successfully")
+
+	return nil
+}
+
 func (e *Editor) executeGoto(gotoValue string) {
 	if e.relation == nil {
 		e.SetStatusError("No database connection available")

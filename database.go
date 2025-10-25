@@ -936,51 +936,54 @@ func parseEnumValues(colType string) []string {
 	return values
 }
 
+// formatLiteral renders a value as a SQL literal string for preview purposes.
+// For NULL values, returns "NULL". For other values, formats them appropriately
+// based on type, quoting and escaping strings as needed.
+func (rel *Relation) formatLiteral(val any, attrType string) string {
+	if val == nil {
+		return "NULL"
+	}
+	at := strings.ToLower(attrType)
+	switch v := val.(type) {
+	case bool:
+		if rel.DBType == PostgreSQL {
+			if v {
+				return "TRUE"
+			}
+			return "FALSE"
+		}
+		if v {
+			return "1"
+		}
+		return "0"
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case []byte:
+		s := string(v)
+		s = strings.ReplaceAll(s, "'", "''")
+		return "'" + s + "'"
+	case string:
+		if v == NullGlyph {
+			return "NULL"
+		}
+		// For non-numeric types, quote and escape
+		if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
+			return v
+		}
+		s := strings.ReplaceAll(v, "'", "''")
+		return "'" + s + "'"
+	default:
+		// Fallback to string formatting quoted
+		s := strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
+		return "'" + s + "'"
+	}
+}
+
 // BuildInsertPreview constructs a SQL INSERT statement as a string with literal
 // values inlined for preview purposes. Intended only for UI preview.
 func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) string {
-	// Render a literal value for preview (no placeholders)
-	literal := func(val any, attrType string) string {
-		if val == nil {
-			return "NULL"
-		}
-		at := strings.ToLower(attrType)
-		switch v := val.(type) {
-		case bool:
-			if rel.DBType == PostgreSQL {
-				if v {
-					return "TRUE"
-				}
-				return "FALSE"
-			}
-			if v {
-				return "1"
-			}
-			return "0"
-		case int64:
-			return strconv.FormatInt(v, 10)
-		case float64:
-			return strconv.FormatFloat(v, 'f', -1, 64)
-		case []byte:
-			s := string(v)
-			s = strings.ReplaceAll(s, "'", "''")
-			return "'" + s + "'"
-		case string:
-			if v == NullGlyph {
-				return "NULL"
-			}
-			// For non-numeric types, quote and escape
-			if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
-				return v
-			}
-			s := strings.ReplaceAll(v, "'", "''")
-			return "'" + s + "'"
-		default:
-			// Fallback to string formatting quoted
-			s := strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
-			return "'" + s + "'"
-		}
-	}
 
 	// Check if all values are nil/empty
 	hasNonNullValue := false
@@ -1004,7 +1007,7 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) st
 		// nil means no update
 		if newRecordRow[i] != EmptyCellValue {
 			cols = append(cols, quoteIdent(rel.DBType, column.Name))
-			vals = append(vals, literal(newRecordRow[i], attr.Type))
+			vals = append(vals, rel.formatLiteral(newRecordRow[i], attr.Type))
 		}
 	}
 
@@ -1072,46 +1075,6 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 		}
 	}
 
-	// Render a literal value for preview (no placeholders)
-	literal := func(val any, attrType string) string {
-		if val == nil {
-			return "NULL"
-		}
-		at := strings.ToLower(attrType)
-		switch v := val.(type) {
-		case bool:
-			if rel.DBType == PostgreSQL {
-				if v {
-					return "TRUE"
-				}
-				return "FALSE"
-			}
-			if v {
-				return "1"
-			}
-			return "0"
-		case int64:
-			return strconv.FormatInt(v, 10)
-		case float64:
-			return strconv.FormatFloat(v, 'f', -1, 64)
-		case []byte:
-			s := string(v)
-			s = strings.ReplaceAll(s, "'", "''")
-			return "'" + s + "'"
-		case string:
-			// For non-numeric types, quote and escape
-			if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
-				return v
-			}
-			s := strings.ReplaceAll(v, "'", "''")
-			return "'" + s + "'"
-		default:
-			// Fallback to string formatting quoted
-			s := strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
-			return "'" + s + "'"
-		}
-	}
-
 	// Where clause with literal values
 	whereParts := make([]string, 0, len(rel.key))
 	for _, lookupKeyCol := range rel.key {
@@ -1128,7 +1091,7 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 		if !ok {
 			return ""
 		}
-		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, literal(row[idx], attr.Type)))
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, rel.formatLiteral(row[idx], attr.Type)))
 	}
 
 	// SET clause literal
@@ -1138,7 +1101,7 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 	}
 	valueArg := toDBValue(colName, newValue)
 	quotedTarget := quoteIdent(rel.DBType, colName)
-	setClause := fmt.Sprintf("%s = %s", quotedTarget, literal(valueArg, targetAttrType))
+	setClause := fmt.Sprintf("%s = %s", quotedTarget, rel.formatLiteral(valueArg, targetAttrType))
 
 	returningCols := make([]string, len(rel.attributeOrder))
 	for i, name := range rel.attributeOrder {
@@ -1160,6 +1123,79 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
 	}
 	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
+}
+
+// BuildDeletePreview constructs a SQL DELETE statement as a string with literal
+// values inlined for preview purposes. Intended only for UI preview.
+func (rel *Relation) BuildDeletePreview(records [][]any, rowIdx int) string {
+	if rowIdx < 0 || rowIdx >= len(records) || len(rel.key) == 0 {
+		return ""
+	}
+
+	// Where clause with literal values
+	whereParts := make([]string, 0, len(rel.key))
+	for _, lookupKeyCol := range rel.key {
+		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
+		idx, ok := rel.attributeIndex[lookupKeyCol]
+		if !ok || rowIdx >= len(records) {
+			return ""
+		}
+		row := records[rowIdx]
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		attr, ok := rel.attributes[lookupKeyCol]
+		if !ok {
+			return ""
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, rel.formatLiteral(row[idx], attr.Type)))
+	}
+
+	quotedTable := quoteQualified(rel.DBType, rel.name)
+	return fmt.Sprintf("DELETE FROM %s WHERE %s", quotedTable, strings.Join(whereParts, " AND "))
+}
+
+// DeleteDBRecord deletes a record from the database based on its key values.
+func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
+	if rowIdx < 0 || rowIdx >= len(records) || len(rel.key) == 0 {
+		return fmt.Errorf("invalid row index or no key columns")
+	}
+
+	// Build WHERE clause using key columns
+	whereParts := make([]string, 0, len(rel.key))
+	whereParams := make([]any, 0, len(rel.key))
+	for _, lookupKeyCol := range rel.key {
+		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
+		idx, ok := rel.attributeIndex[lookupKeyCol]
+		if !ok {
+			return fmt.Errorf("key column %s not found in attribute index", lookupKeyCol)
+		}
+		row := records[rowIdx]
+		if idx < 0 || idx >= len(row) {
+			return fmt.Errorf("key column %s index out of range", lookupKeyCol)
+		}
+		whereParts = append(whereParts, fmt.Sprintf("%s = ?", qKeyName))
+		whereParams = append(whereParams, row[idx])
+	}
+
+	quotedTable := quoteQualified(rel.DBType, rel.name)
+	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s", quotedTable, strings.Join(whereParts, " AND "))
+
+	// Execute the DELETE
+	result, err := rel.DB.Exec(deleteSQL, whereParams...)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("no rows were deleted")
+	}
+
+	return nil
 }
 
 // InsertDBRecord inserts a new record into the database. It returns the inserted
