@@ -209,7 +209,7 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 
 	// Draw regular data rows
 	for i := 0; i < len(tv.data) && dataRowsDrawn < maxRegularDataRows && currentY < y+height; i++ {
-		if tv.data[i] == nil {
+		if len(tv.data[i]) == 0 {
 			break // Stop drawing when we hit a nil slice
 		}
 		tv.drawDataRow(screen, x, currentY, tableWidth, i)

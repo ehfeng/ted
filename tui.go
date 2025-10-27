@@ -197,7 +197,7 @@ func (e *Editor) setupTable() {
 				return action, nil
 			}
 			if !reachedEnd {
-				e.table.Select(e.table.selectedRow-1, e.table.selectedCol)
+				e.table.Select(e.table.selectedRow+1, e.table.selectedCol)
 			}
 			go e.app.Draw()
 			return action, nil
@@ -332,7 +332,11 @@ func (e *Editor) setupResizeHandler() {
 		newDataHeight := newHeight - 5 // 5 lines for header, status bar, command palette
 
 		// Only resize if the height has changed significantly
-		if newDataHeight != len(e.records) && newDataHeight > 0 {
+		if newDataHeight != e.table.rowsHeight && newDataHeight > 0 {
+			if newDataHeight > len(e.records) && e.records[len(e.records)-1] == nil {
+				// the table is smaller than the new data height, no need to fetch more rows
+				return
+			}
 			// Create new records buffer with the new size
 			newRecords := make([][]any, newDataHeight)
 
@@ -518,7 +522,7 @@ func (e *Editor) setupKeyBindings() {
 				}
 				// Ctrl+End: jump to last row
 				e.loadFromRowId(nil, false, col)
-				e.table.Select(len(e.records)-2, col)
+				e.table.Select(e.lastRowIdx(), col)
 				return nil
 			}
 			e.table.Select(row, len(e.columns)-1)
@@ -698,11 +702,9 @@ func (e *Editor) consumeKittyCSI(key tcell.Key, r rune, mod tcell.ModMask) bool 
 						e.setPaletteMode(PaletteModeSQL, true)
 					} else if mask&4 != 0 && codepoint == 105 {
 						// Ctrl+I: Jump to end and enable insert mode
-						e.loadFromRowId(nil, false, 0)
-
 						e.table.SetupInsertRow()
+						e.loadFromRowId(nil, false, 0)
 						e.updateStatusForInsertMode()
-						e.renderData()
 						// Select the insert mode row (which is at index len(data))
 						_, col := e.table.GetSelection()
 						e.table.Select(e.table.GetDataLength(), col)
@@ -1474,7 +1476,6 @@ func (e *Editor) executeInsert() error {
 		if !ok || insertedRow == nil {
 			// Fallback: load from bottom without specific row
 			e.loadFromRowId(nil, false, 0)
-			e.renderData()
 			e.table.Select(len(e.records)-2, 0)
 			return nil
 		}
@@ -1592,6 +1593,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		// Mark end with nil if we didn't fill the buffer
 		if rowsLoaded < len(e.records) {
 			e.records[rowsLoaded] = nil
+			e.records = e.records[:rowsLoaded+1]
 		}
 	} else {
 		// Load from bottom: use QueryRows with inclusive true, scrollDown false
@@ -1642,7 +1644,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 
 	// Focus on the specified column
 	if fromTop {
-		e.table.Select(0, focusColumn)
+		e.table.Select(e.table.selectedRow, focusColumn)
 	} else {
 		e.table.Select(len(e.records)-1, focusColumn)
 	}
@@ -1886,7 +1888,7 @@ func (e *Editor) startRefreshTimer() {
 				if app != nil && e.relation != nil && e.relation.DB != nil {
 					app.QueueUpdateDraw(func() {
 						id := e.records[e.pointer][:len(e.relation.key)]
-						e.loadFromRowId(id, true, 0)
+						e.loadFromRowId(id, true, e.table.selectedCol)
 					})
 				}
 				timer.Reset(RefreshTimerInterval)
@@ -2158,7 +2160,6 @@ func (e *Editor) executeDelete() error {
 	// Refresh data after deletion
 	e.SetStatusMessage("Record deleted successfully")
 	e.loadFromRowId(nil, e.records[e.lastRowIdx()] != nil, e.currentCol)
-	e.renderData()
 	return nil
 }
 
