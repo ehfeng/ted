@@ -44,11 +44,11 @@ type TableView struct {
 	lastClickCol int
 
 	// Viewport information
-	BodyRowsAvailable int
+	rowsHeight int
 }
 
 // NewTableView creates a new table view component
-func NewTableView() *TableView {
+func NewTableView(height int) *TableView {
 	tv := &TableView{
 		Box:           tview.NewBox(),
 		cellPadding:   1,
@@ -61,6 +61,7 @@ func NewTableView() *TableView {
 		selectable:    true,
 		lastClickRow:  -1,
 		lastClickCol:  -1,
+		rowsHeight:    height,
 	}
 
 	tv.SetBorder(false) // We'll draw our own borders
@@ -173,7 +174,7 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 
 	// Draw header row
 	if currentY < y+height {
-		tv.drawHeaderRow(screen, x, currentY, tableWidth)
+		tv.drawHeaderRow(screen, x, currentY)
 		currentY++
 	}
 
@@ -204,7 +205,7 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 	if len(tv.insertRow) > 0 {
 		maxRegularDataRows = maxDataRows - 1
 	}
-	tv.BodyRowsAvailable = maxDataRows
+	tv.rowsHeight = maxDataRows
 
 	// Draw regular data rows
 	for i := 0; i < len(tv.data) && dataRowsDrawn < maxRegularDataRows && currentY < y+height; i++ {
@@ -269,7 +270,7 @@ func (tv *TableView) drawTopBorder(screen tcell.Screen, x, y, tableWidth int) {
 }
 
 // drawHeaderRow draws the header content row
-func (tv *TableView) drawHeaderRow(screen tcell.Screen, x, y, tableWidth int) {
+func (tv *TableView) drawHeaderRow(screen tcell.Screen, x, y int) {
 	// Left border
 	screen.SetContent(x, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 	pos := x + 1

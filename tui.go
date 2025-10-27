@@ -135,7 +135,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 		app: tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s",
 			dbname, tablename, databaseIcons[dbType])).EnableMouse(true),
 		pages:        tview.NewPages(),
-		table:        NewTableView(),
+		table:        NewTableView(tableDataHeight),
 		columns:      columns,
 		relation:     relation,
 		config:       config,
@@ -147,13 +147,13 @@ func runEditor(config *Config, dbname, tablename string) error {
 		records:      make([][]any, tableDataHeight),
 	}
 
+	editor.loadFromRowId(nil, true, 0)
 	editor.setupTable()
 	editor.setupKeyBindings()
 	editor.setupStatusBar()
 	editor.setupCommandPalette()
 	editor.setupLayout()
 	editor.setupResizeHandler()
-	editor.refreshData()
 	editor.table.Select(0, 0)
 	editor.pages.AddPage("table", editor.layout, true, true)
 
@@ -175,7 +175,6 @@ func (e *Editor) setupTable() {
 
 	// Configure the table
 	e.table.SetHeaders(headers).
-		SetData(e.records).
 		SetSelectable(true).
 		SetDoubleClickFunc(func(row, col int) {
 			// Double-click on a cell opens edit mode
@@ -287,7 +286,6 @@ func (e *Editor) setupCommandPalette() {
 			case PaletteModeSQL:
 				if strings.TrimSpace(command) != "" {
 					e.executeSQL(command)
-					e.refreshData()
 				}
 			case PaletteModeGoto:
 				e.executeGoto(command)
@@ -420,18 +418,9 @@ func (e *Editor) setupKeyBindings() {
 			// Execute delete in delete mode
 			if e.paletteMode == PaletteModeDelete {
 				// Check if we're at the bottom of the table
-				atBottom := e.records[e.lastRowIdx()] == nil
-
 				e.executeDelete()
 				e.setPaletteMode(PaletteModeDefault, false)
 				e.app.SetFocus(e.table)
-
-				if atBottom {
-					e.loadFromRowId(nil, false, col)
-				} else {
-					e.refreshData()
-				}
-
 				e.table.Select(row, col)
 				return nil
 			}
@@ -539,7 +528,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// Page up: scroll data backward while keeping selection in same visual position
-			pageSize := max(1, e.table.BodyRowsAvailable-1)
+			pageSize := max(1, e.table.rowsHeight-1)
 			e.prevRows(pageSize)
 			return nil
 		case key == tcell.KeyPgDn:
@@ -547,7 +536,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// Page down: scroll data forward while keeping selection in same visual position
-			pageSize := max(1, e.table.BodyRowsAvailable-1)
+			pageSize := max(1, e.table.rowsHeight-1)
 			// Keep selection at same position, just fetch next rows
 			e.nextRows(pageSize)
 			return nil
@@ -556,10 +545,6 @@ func (e *Editor) setupKeyBindings() {
 			return nil
 		case rune == ' ' && mod&tcell.ModCtrl != 0:
 			e.toggleColSelection(col)
-			return nil
-		// Ctrl+R sends DC2 (18) or 'r' depending on terminal
-		case (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0:
-			e.refreshData()
 			return nil
 		// Ctrl+G sends BEL (7) or 'g' depending on terminal
 		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
@@ -1555,77 +1540,7 @@ func (e *Editor) unhighlightColumn(col int) {
 	// This is a placeholder for future column highlighting implementation
 }
 
-// TODO rework this, currently used for initial load, refresh does not account for e.pointer
-func (e *Editor) refreshData() {
-	if e.nextQuery != nil || e.relation == nil || e.relation.DB == nil {
-		return
-	}
-
-	colCount := len(e.columns)
-	if colCount == 0 || len(e.records) == 0 {
-		return
-	}
-
-	selectCols := make([]string, colCount)
-	for i, col := range e.columns {
-		selectCols[i] = quoteIdent(e.relation.DBType, col.Name)
-	}
-
-	var rows *sql.Rows
-	var err error
-	if len(e.records) == 0 || e.records[e.pointer] == nil {
-		rows, err = e.relation.QueryRows(selectCols, nil, nil, true, true)
-		if err != nil {
-			if e.statusBar != nil {
-				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
-			}
-			return
-		}
-	} else {
-		rows, err = e.relation.QueryRows(selectCols, nil, e.records[e.pointer][:len(e.relation.key)], true, true)
-		if err != nil {
-			if e.statusBar != nil {
-				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
-			}
-			return
-		}
-	}
-
-	e.pointer = 0 // Reset pointer for fresh load
-
-	// Load initial rows up to the preallocated size
-	idx := 0
-	for i := 0; i < len(e.records) && rows.Next(); i++ {
-		e.records[i] = make([]any, len(e.columns))
-		scanTargets := make([]any, len(e.columns))
-		for j := 0; j < len(e.columns); j++ {
-			scanTargets[j] = &e.records[i][j]
-		}
-		if err := rows.Scan(scanTargets...); err != nil {
-			rows.Close()
-			if e.statusBar != nil {
-				e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
-			}
-			return
-		}
-		idx++
-	}
-
-	// If we didn't fill the buffer, mark the end with nil
-	if err := rows.Close(); err != nil {
-		panic(err)
-	}
-	if idx < len(e.records) {
-		if idx < len(e.records)-1 {
-			e.loadFromRowId(nil, false, e.currentCol)
-		} else {
-			e.records = e.records[:idx]
-			e.records = append(e.records, nil)
-		}
-	}
-	e.renderData()
-}
-
+// id can be nil, in which case load from the top or bottom
 func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	if e.relation == nil || e.relation.DB == nil {
 		return fmt.Errorf("no database connection available")
@@ -1647,6 +1562,9 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	var rows *sql.Rows
 	var err error
 	if fromTop {
+		// if id == nil {
+		// 	id = e.records[e.pointer][:len(e.relation.key)]
+		// }
 		// Load from top: use QueryRows with inclusive true, scrollDown true
 		rows, err = e.relation.QueryRows(selectCols, nil, id, true, true)
 		if err != nil {
@@ -1688,7 +1606,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		e.pointer = 0
 		scanTargets := make([]any, colCount)
 		rowsLoaded := 0
-		tempRows := make([][]any, 0, len(e.records))
+		var tempRows [][]any
 
 		// First collect all rows
 		for rows.Next() {
@@ -1885,9 +1803,16 @@ func (e *Editor) startRowsTimer() {
 	go func() {
 		resetChan := e.rowsTimerReset
 		timer := e.rowsTimer
+		if timer == nil {
+			return
+		}
 		for {
 			select {
-			case <-resetChan:
+			case _, ok := <-resetChan:
+				if !ok {
+					// Channel closed, exit goroutine
+					return
+				}
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
@@ -1926,8 +1851,6 @@ func (e *Editor) stopRowsTimer() {
 		e.prevQuery = nil
 	}
 
-	// Start refresh timer after closing queries
-	e.refreshData()
 	e.startRefreshTimer()
 }
 
@@ -1954,12 +1877,16 @@ func (e *Editor) startRefreshTimer() {
 		}
 		for {
 			select {
-			case <-stopChan:
-				return
+			case _, ok := <-stopChan:
+				if !ok {
+					// Channel closed, exit goroutine
+					return
+				}
 			case <-timer.C:
 				if app != nil && e.relation != nil && e.relation.DB != nil {
 					app.QueueUpdateDraw(func() {
-						e.refreshData()
+						id := e.records[e.pointer][:len(e.relation.key)]
+						e.loadFromRowId(id, true, 0)
 					})
 				}
 				timer.Reset(RefreshTimerInterval)
@@ -2114,6 +2041,9 @@ func (e *Editor) executeSQL(query string) {
 		return
 	}
 
+	// pause refresh timer
+	e.stopRefreshTimer()
+
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return
@@ -2146,6 +2076,7 @@ func (e *Editor) executeSQL(query string) {
 	} else {
 		e.SetStatusMessage("Query executed successfully")
 	}
+	e.startRefreshTimer()
 }
 
 // Command execution
@@ -2166,10 +2097,6 @@ func (e *Editor) executeCommand(command string) {
 	switch cmd {
 	case "quit", "q":
 		e.app.Stop()
-	case "refresh", "r":
-		e.SetStatusMessage("Refreshing data...")
-		e.refreshData()
-		e.SetStatusMessage("Data refreshed")
 	case "help", "h":
 		e.SetStatusMessage("Commands: quit, refresh, help")
 	case "log":
@@ -2229,9 +2156,9 @@ func (e *Editor) executeDelete() error {
 	}
 
 	// Refresh data after deletion
-	e.refreshData()
 	e.SetStatusMessage("Record deleted successfully")
-
+	e.loadFromRowId(nil, e.records[e.lastRowIdx()] != nil, e.currentCol)
+	e.renderData()
 	return nil
 }
 
