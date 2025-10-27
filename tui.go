@@ -175,6 +175,7 @@ func (e *Editor) setupTable() {
 
 	// Configure the table
 	e.table.SetHeaders(headers).
+		SetKeyColumnCount(len(e.relation.key)).
 		SetSelectable(true).
 		SetDoubleClickFunc(func(row, col int) {
 			// Double-click on a cell opens edit mode
