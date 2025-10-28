@@ -328,6 +328,11 @@ func (e *Editor) setupLayout() {
 
 func (e *Editor) setupResizeHandler() {
 	e.pages.SetChangedFunc(func() {
+		// Don't handle resize when in edit mode to avoid deadlock
+		if e.editMode {
+			return
+		}
+
 		// Get the new terminal height
 		newHeight := getTerminalHeight()
 		newDataHeight := newHeight - 5 // 5 lines for header, status bar, command palette
@@ -393,7 +398,7 @@ func (e *Editor) setupKeyBindings() {
 		}
 
 		// Ctrl+S: execute INSERT in insert mode (save and insert)
-		if (rune == 's' || rune == 19) && mod&tcell.ModAlt != 0 {
+		if (rune == 's' || rune == 19) && mod&tcell.ModCtrl != 0 {
 			if len(e.table.insertRow) > 0 && !e.editMode {
 				e.executeInsert()
 				return nil
@@ -750,19 +755,19 @@ func (e *Editor) enterEditMode(row, col int) {
 	var currentValue any
 	if len(e.table.insertRow) > 0 {
 		currentValue = e.table.insertRow[col]
-		currentText := ""
-		if currentValue != nil {
-			currentText, _ = formatCellValue(currentValue, tcell.StyleDefault)
-		}
-		e.enterEditModeWithInitialValue(row, col, currentText)
 	} else {
 		currentValue = e.table.GetCell(row, col)
-		currentText, _ := formatCellValue(currentValue, tcell.StyleDefault)
-		e.enterEditModeWithInitialValue(row, col, currentText)
 	}
+	currentText := ""
+	if currentValue != nil {
+		currentText, _ = formatCellValue(currentValue, tcell.StyleDefault)
+	}
+	e.enterEditModeWithInitialValue(row, col, currentText)
 }
 
 func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string) {
+	// must be set before any calls to app.Draw()
+	e.editMode = true
 	// In insert mode, allow editing the virtual insert mode row
 	// The virtual row index equals the length of the data array
 	// (which is shorter than records in insert mode)
@@ -851,17 +856,16 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 		}
 		return event
 	})
+	// Position the textarea to align with the cell
+	modal = e.createCellEditOverlay(textArea, row, col, initialText)
+	// Set editMode early to prevent resize handler from running during AddPage
+	e.pages.AddPage("editor", modal, true, true)
 
-	// Set up dynamic resizing on text changes and update SQL preview
+	// Set up dynamic resizing on text changes and update SQL preview AFTER initial page add
 	textArea.SetChangedFunc(func() {
 		resizeTextarea()
 		e.updateEditPreview(textArea.GetText())
 	})
-
-	// Position the textarea to align with the cell
-	modal = e.createCellEditOverlay(textArea, row, col, initialText)
-	e.pages.AddPage("editor", modal, true, true)
-
 	// Set up native cursor positioning using terminal escapes
 	e.app.SetAfterDrawFunc(func(screen tcell.Screen) {
 		if !e.editMode {
@@ -895,7 +899,6 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 	// Set cursor to bar style (style 5 = blinking bar)
 	e.setCursorStyle(5)
 	e.app.SetFocus(textArea)
-	e.editMode = true
 
 	// Set palette mode based on whether we're in insert mode or update mode
 	if isNewRecordRow {
@@ -969,7 +972,6 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int,
 
 	// Create positioned overlay that aligns text with the original cell
 	leftPadding := tview.NewBox()
-
 	return tview.NewFlex().
 		AddItem(nil, leftOffset, 0, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
@@ -1006,7 +1008,7 @@ func (e *Editor) exitEditMode() {
 }
 
 func (e *Editor) updateStatusForInsertMode() {
-	e.SetStatusMessage("Alt+S to insert · Esc to cancel")
+	e.SetStatusMessage("Ctrl+S to insert · Esc to cancel")
 }
 
 // updateStatusForEditMode sets helpful status bar text based on column type and constraints
