@@ -33,7 +33,7 @@ Examples:
   ted test users
   ted mydb.sqlite users
   ted -h localhost -p 5432 -U myuser mydb users`,
-	Args: cobra.MinimumNArgs(1),
+	Args: cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		dbname := args[0]
 		tablename := args[1]
