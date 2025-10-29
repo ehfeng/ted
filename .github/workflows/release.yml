@@ -146,16 +146,20 @@ jobs:
           mv artifacts/linux-windows-binaries/* .
           mv artifacts/macos-binaries/* .
 
-          # Rename binaries to ted
+          # Rename binaries to ted and make executable
           mv ted-linux-amd64 ted
+          chmod +x ted
           tar -czf ted_${VERSION}_Linux_amd64.tar.gz ted
 
           mv ted-darwin-amd64 ted
+          chmod +x ted
           tar -czf ted_${VERSION}_Darwin_amd64.tar.gz ted
 
           mv ted-darwin-arm64 ted
+          chmod +x ted
           tar -czf ted_${VERSION}_Darwin_arm64.tar.gz ted
 
+          chmod +x ted-windows-amd64.exe
           zip ted_${VERSION}_Windows_amd64.zip ted-windows-amd64.exe
 
           # Create checksums for the archives

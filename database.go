@@ -1321,7 +1321,6 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 		// For databases without RETURNING, use a transaction
 		query := fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", quotedTable)
-		os.Stderr.WriteString("insert db new record query: " + query + "\n")
 
 		tx, err := rel.DB.Begin()
 		if err != nil {

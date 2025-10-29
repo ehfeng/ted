@@ -159,7 +159,6 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 		}
 		username = currentUser.Username
 	}
-	os.Stderr.WriteString(fmt.Sprintf("DEBUG: postgres: %t, mysql: %t\n", postgres, mysql))
 	if len(args) == 0 {
 		if postgres {
 			// get postgres databases in localhost
@@ -169,14 +168,12 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			}
 			db, err := sql.Open("postgres", connStr)
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("DEBUG: error opening postgres database: %v\n", err))
-				return nil, cobra.ShellCompDirectiveNoFileComp
+							return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
 			rows, err := db.Query("SELECT datname FROM pg_database")
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("DEBUG: error querying postgres databases: %v\n", err))
-				return nil, cobra.ShellCompDirectiveNoFileComp
+							return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer rows.Close()
 			results := []string{}
@@ -237,8 +234,7 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			return results, cobra.ShellCompDirectiveNoFileComp
 		}
 	} else if len(args) == 1 {
-		os.Stderr.WriteString(fmt.Sprintf("DEBUG: args: %v\n", args))
-		if postgres {
+			if postgres {
 			// get postgres tables in current database
 			dbname := args[0]
 			connStr := fmt.Sprintf("host=localhost user=%s dbname=%s sslmode=disable", username, dbname)
@@ -247,14 +243,12 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			}
 			db, err := sql.Open("postgres", connStr)
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("DEBUG: error opening postgres database: %v\n", err))
-				return nil, cobra.ShellCompDirectiveNoFileComp
+							return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
 			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("DEBUG: error querying postgres database: %v\n", err))
-				return nil, cobra.ShellCompDirectiveNoFileComp
+							return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer rows.Close()
 			results := []string{}
@@ -262,26 +256,22 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 				var tableName string
 				err = rows.Scan(&tableName)
 				if err != nil {
-					os.Stderr.WriteString(fmt.Sprintf("DEBUG: error scanning postgres table name: %v\n", err))
-					return nil, cobra.ShellCompDirectiveNoFileComp
+									return nil, cobra.ShellCompDirectiveNoFileComp
 				}
 				results = append(results, tableName)
 			}
-			os.Stderr.WriteString(fmt.Sprintf("DEBUG: results: %v\n", results))
-			return results, cobra.ShellCompDirectiveNoFileComp
+					return results, cobra.ShellCompDirectiveNoFileComp
 		}
 		if mysql {
 			// get mysql tables in current database
 			db, err := sql.Open("mysql", fmt.Sprintf("root:%s@tcp(localhost:3306)/", password))
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("DEBUG: error opening mysql database: %v\n", err))
-				return nil, cobra.ShellCompDirectiveNoFileComp
+							return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
 			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = $1", args[0])
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("DEBUG: error querying mysql database: %v\n", err))
-				return nil, cobra.ShellCompDirectiveNoFileComp
+							return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer rows.Close()
 			results := []string{}
@@ -289,24 +279,20 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 				var tableName string
 				err = rows.Scan(&tableName)
 				if err != nil {
-					os.Stderr.WriteString(fmt.Sprintf("DEBUG: error scanning mysql table name: %v\n", err))
-					return nil, cobra.ShellCompDirectiveNoFileComp
+									return nil, cobra.ShellCompDirectiveNoFileComp
 				}
 				results = append(results, tableName)
 			}
-			os.Stderr.WriteString(fmt.Sprintf("DEBUG: results: %v\n", results))
-			return results, cobra.ShellCompDirectiveNoFileComp
+					return results, cobra.ShellCompDirectiveNoFileComp
 		}
 		// get sqlite tables in current database
 		db, err := sql.Open("sqlite3", args[0])
 		if err != nil {
-			os.Stderr.WriteString(fmt.Sprintf("DEBUG: error opening sqlite database: %v\n", err))
-			return nil, cobra.ShellCompDirectiveNoFileComp
+					return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 		rows, err := db.Query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
 		if err != nil {
-			os.Stderr.WriteString(fmt.Sprintf("DEBUG: error querying sqlite database: %v\n", err))
-			return nil, cobra.ShellCompDirectiveNoFileComp
+					return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 		defer rows.Close()
 		results := []string{}
@@ -314,13 +300,11 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			var tableName string
 			err = rows.Scan(&tableName)
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("DEBUG: error scanning sqlite table name: %v\n", err))
-				return nil, cobra.ShellCompDirectiveNoFileComp
+							return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			results = append(results, tableName)
 		}
-		os.Stderr.WriteString(fmt.Sprintf("DEBUG: results: %v\n", results))
-		return results, cobra.ShellCompDirectiveNoFileComp
+			return results, cobra.ShellCompDirectiveNoFileComp
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
