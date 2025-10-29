@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"os/user"
+	"strings"
 	"syscall"
+	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
 )
 
@@ -73,6 +77,65 @@ Examples:
 	ValidArgsFunction: completionFunc,
 }
 
+var telemetryCmd = &cobra.Command{
+	Use:   "telemetry",
+	Short: "Manage telemetry settings",
+	Long:  "Enable, disable, or check the status of telemetry collection.",
+}
+
+var telemetryEnableCmd = &cobra.Command{
+	Use:   "enable",
+	Short: "Enable telemetry",
+	Run: func(cmd *cobra.Command, args []string) {
+		settings, err := LoadSettings()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
+			os.Exit(1)
+		}
+		settings.TelemetryEnabled = true
+		if err := SaveSettings(settings); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Telemetry enabled.")
+	},
+}
+
+var telemetryDisableCmd = &cobra.Command{
+	Use:   "disable",
+	Short: "Disable telemetry",
+	Run: func(cmd *cobra.Command, args []string) {
+		settings, err := LoadSettings()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
+			os.Exit(1)
+		}
+		settings.TelemetryEnabled = false
+		if err := SaveSettings(settings); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Telemetry disabled.")
+	},
+}
+
+var telemetryStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show telemetry status",
+	Run: func(cmd *cobra.Command, args []string) {
+		settings, err := LoadSettings()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
+			os.Exit(1)
+		}
+		status := "disabled"
+		if settings.TelemetryEnabled {
+			status = "enabled"
+		}
+		fmt.Printf("Telemetry status: %s\n", status)
+	},
+}
+
 func init() {
 	rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
 	rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
@@ -85,6 +148,12 @@ func init() {
 	rootCmd.Flags().BoolVar(&usePostgres, "pg", false, "Use PostgreSQL for server connections")
 	rootCmd.Flags().BoolVar(&useMySQL, "mysql", false, "Use MySQL for server connections")
 	rootCmd.Flags().BoolVar(&useMySQL, "my", false, "Use MySQL for server connections")
+
+	// Add telemetry subcommands
+	rootCmd.AddCommand(telemetryCmd)
+	telemetryCmd.AddCommand(telemetryEnableCmd)
+	telemetryCmd.AddCommand(telemetryDisableCmd)
+	telemetryCmd.AddCommand(telemetryStatusCmd)
 
 	if err := rootCmd.RegisterFlagCompletionFunc("pg", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return []string{"hi", "pg"}, cobra.ShellCompDirectiveNoFileComp
@@ -168,12 +237,12 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			}
 			db, err := sql.Open("postgres", connStr)
 			if err != nil {
-							return nil, cobra.ShellCompDirectiveNoFileComp
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
 			rows, err := db.Query("SELECT datname FROM pg_database")
 			if err != nil {
-							return nil, cobra.ShellCompDirectiveNoFileComp
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer rows.Close()
 			results := []string{}
@@ -234,7 +303,7 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			return results, cobra.ShellCompDirectiveNoFileComp
 		}
 	} else if len(args) == 1 {
-			if postgres {
+		if postgres {
 			// get postgres tables in current database
 			dbname := args[0]
 			connStr := fmt.Sprintf("host=localhost user=%s dbname=%s sslmode=disable", username, dbname)
@@ -243,12 +312,12 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			}
 			db, err := sql.Open("postgres", connStr)
 			if err != nil {
-							return nil, cobra.ShellCompDirectiveNoFileComp
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
 			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
 			if err != nil {
-							return nil, cobra.ShellCompDirectiveNoFileComp
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer rows.Close()
 			results := []string{}
@@ -256,22 +325,22 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 				var tableName string
 				err = rows.Scan(&tableName)
 				if err != nil {
-									return nil, cobra.ShellCompDirectiveNoFileComp
+					return nil, cobra.ShellCompDirectiveNoFileComp
 				}
 				results = append(results, tableName)
 			}
-					return results, cobra.ShellCompDirectiveNoFileComp
+			return results, cobra.ShellCompDirectiveNoFileComp
 		}
 		if mysql {
 			// get mysql tables in current database
 			db, err := sql.Open("mysql", fmt.Sprintf("root:%s@tcp(localhost:3306)/", password))
 			if err != nil {
-							return nil, cobra.ShellCompDirectiveNoFileComp
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
 			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = $1", args[0])
 			if err != nil {
-							return nil, cobra.ShellCompDirectiveNoFileComp
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer rows.Close()
 			results := []string{}
@@ -279,20 +348,20 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 				var tableName string
 				err = rows.Scan(&tableName)
 				if err != nil {
-									return nil, cobra.ShellCompDirectiveNoFileComp
+					return nil, cobra.ShellCompDirectiveNoFileComp
 				}
 				results = append(results, tableName)
 			}
-					return results, cobra.ShellCompDirectiveNoFileComp
+			return results, cobra.ShellCompDirectiveNoFileComp
 		}
 		// get sqlite tables in current database
 		db, err := sql.Open("sqlite3", args[0])
 		if err != nil {
-					return nil, cobra.ShellCompDirectiveNoFileComp
+			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 		rows, err := db.Query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
 		if err != nil {
-					return nil, cobra.ShellCompDirectiveNoFileComp
+			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 		defer rows.Close()
 		results := []string{}
@@ -300,17 +369,76 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			var tableName string
 			err = rows.Scan(&tableName)
 			if err != nil {
-							return nil, cobra.ShellCompDirectiveNoFileComp
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			results = append(results, tableName)
 		}
-			return results, cobra.ShellCompDirectiveNoFileComp
+		return results, cobra.ShellCompDirectiveNoFileComp
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
+// Sentry DSN (hard-coded)
+const SentryDSN = "https://685bea62d5921e602f7adcad1aae6201@o30558.ingest.us.sentry.io/4510273814855680"
+
+func runFirstRunPrompt() error {
+	settings, err := LoadSettings()
+	if err != nil {
+		return err
+	}
+
+	// Skip if already completed first run
+	if settings.FirstRunComplete {
+		return nil
+	}
+
+	fmt.Println("Welcome to ted! Let's set up telemetry.")
+	fmt.Println()
+
+	// Ask about telemetry
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Enable telemetry and error reporting? (y/n) [y]: ")
+	response, _ := reader.ReadString('\n')
+	response = strings.TrimSpace(response)
+	if response == "" || strings.ToLower(response) == "y" {
+		settings.TelemetryEnabled = true
+	}
+
+	settings.FirstRunComplete = true
+
+	if err := SaveSettings(settings); err != nil {
+		return err
+	}
+
+	fmt.Println("Setup complete!")
+	fmt.Println()
+
+	return nil
+}
+
 func main() {
 	log.SetOutput(os.Stderr)
+
+	// Initialize breadcrumbs buffer
+	InitBreadcrumbs(100)
+
+	// Run first-run prompt if needed (but skip for telemetry commands)
+	if len(os.Args) < 2 || (os.Args[1] != "telemetry" && os.Args[1] != "help" && os.Args[1] != "--help") {
+		if err := runFirstRunPrompt(); err != nil {
+			log.Printf("Warning: Could not run first-run setup: %v\n", err)
+		}
+	}
+
+	// Load settings for telemetry
+	settings, err := LoadSettings()
+	if err != nil {
+		log.Printf("Warning: Could not load settings: %v\n", err)
+	} else if settings.TelemetryEnabled {
+		if err := InitSentry(SentryDSN); err != nil {
+			log.Printf("Warning: Could not initialize Sentry: %v\n", err)
+		}
+		defer FlushAndShutdown()
+	}
 
 	// Set up signal handling for graceful cleanup
 	sigChan := make(chan os.Signal, 1)
@@ -318,12 +446,29 @@ func main() {
 
 	go func() {
 		<-sigChan
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
+		FlushAndShutdown()
 		runCleanup()
 		os.Exit(0)
 	}()
 
 	// Also run cleanup on normal exit
 	defer runCleanup()
+
+	defer func() {
+		if err := recover(); err != nil {
+			// Capture the panic and send to Sentry
+			// Flush any pending breadcrumbs
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
+			sentry.CurrentHub().Recover(err)
+			sentry.Flush(time.Second * 2)
+			fmt.Printf("Recovered from panic: %v\n", err)
+		}
+	}()
 
 	rootCmd.SetHelpCommand(&cobra.Command{
 		Use:    "no-help",
@@ -332,6 +477,10 @@ func main() {
 	rootCmd.PersistentFlags().BoolP("help", "", false, "help for ted")
 
 	if err := rootCmd.Execute(); err != nil {
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
+		FlushAndShutdown()
 		os.Exit(1)
 	}
 }

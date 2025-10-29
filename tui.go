@@ -102,6 +102,28 @@ func (m PaletteMode) Glyph() string {
 	}
 }
 
+// mouseActionString converts tview.MouseAction to a human-readable string
+func mouseActionString(action tview.MouseAction) string {
+	switch action {
+	case tview.MouseScrollUp:
+		return "ScrollUp"
+	case tview.MouseScrollDown:
+		return "ScrollDown"
+	case tview.MouseLeftClick:
+		return "LeftClick"
+	case tview.MouseRightClick:
+		return "RightClick"
+	case tview.MouseMiddleClick:
+		return "MiddleClick"
+	case tview.MouseMove:
+		return "Move"
+	case tview.MouseLeftDoubleClick:
+		return "LeftDoubleClick"
+	default:
+		return fmt.Sprintf("Unknown(%d)", action)
+	}
+}
+
 func runEditor(config *Config, dbname, tablename string) error {
 	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
 
@@ -191,6 +213,12 @@ func (e *Editor) setupTable() {
 	// Set up mouse scroll handling
 	e.table.SetMouseCapture(func(action tview.MouseAction,
 		event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		// Record mouse event in breadcrumbs
+		if breadcrumbs != nil && event != nil {
+			actionStr := mouseActionString(action)
+			breadcrumbs.RecordMouse(actionStr)
+		}
+
 		switch action {
 		case tview.MouseScrollUp:
 			reachedEnd, err := e.prevRows(1)
@@ -379,6 +407,25 @@ func (e *Editor) setupKeyBindings() {
 		mod := event.Modifiers()
 
 		row, col := e.table.GetSelection()
+
+		// Record keyboard event in breadcrumbs (but not during edit mode or command input)
+		if breadcrumbs != nil && !e.editMode {
+			keyStr := fmt.Sprintf("%v", key)
+			if key == tcell.KeyRune {
+				keyStr = string(rune)
+			}
+			modStr := ""
+			if mod&tcell.ModCtrl != 0 {
+				modStr += "Ctrl+"
+			}
+			if mod&tcell.ModShift != 0 {
+				modStr += "Shift+"
+			}
+			if mod&tcell.ModAlt != 0 {
+				modStr += "Alt+"
+			}
+			breadcrumbs.RecordKeyboard(keyStr, modStr)
+		}
 
 		if e.consumeKittyCSI(key, rune, mod) {
 			return nil
@@ -1309,6 +1356,28 @@ func (e *Editor) getPaletteMode() PaletteMode {
 }
 
 func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
+	// Record navigation event in breadcrumbs
+	if breadcrumbs != nil && mode != e.paletteMode {
+		modeStr := fmt.Sprintf("%v", mode)
+		switch mode {
+		case PaletteModeDefault:
+			modeStr = "Default"
+		case PaletteModeCommand:
+			modeStr = "Command"
+		case PaletteModeSQL:
+			modeStr = "SQL"
+		case PaletteModeGoto:
+			modeStr = "Goto"
+		case PaletteModeUpdate:
+			modeStr = "Update"
+		case PaletteModeInsert:
+			modeStr = "Insert"
+		case PaletteModeDelete:
+			modeStr = "Delete"
+		}
+		breadcrumbs.RecordNavigation(modeStr, "Palette mode changed")
+	}
+
 	e.paletteMode = mode
 	e.commandPalette.SetLabel(mode.Glyph())
 	// Clear input when switching modes

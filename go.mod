@@ -4,6 +4,7 @@ go 1.25.1
 
 require (
 	github.com/gdamore/tcell/v2 v2.9.0
+	github.com/getsentry/sentry-go v0.30.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.32

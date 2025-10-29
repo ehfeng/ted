@@ -1161,6 +1161,11 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 		return fmt.Errorf("invalid row index or no key columns")
 	}
 
+	// Record database operation in breadcrumbs
+	if breadcrumbs != nil {
+		breadcrumbs.RecordDatabase("DELETE", rel.name, "")
+	}
+
 	// Build WHERE clause using key columns
 	whereParts := make([]string, 0, len(rel.key))
 	whereParams := make([]any, 0, len(rel.key))
@@ -1168,11 +1173,19 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
 		idx, ok := rel.attributeIndex[lookupKeyCol]
 		if !ok {
-			return fmt.Errorf("key column %s not found in attribute index", lookupKeyCol)
+			err := fmt.Errorf("key column %s not found in attribute index", lookupKeyCol)
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
+			return err
 		}
 		row := records[rowIdx]
 		if idx < 0 || idx >= len(row) {
-			return fmt.Errorf("key column %s index out of range", lookupKeyCol)
+			err := fmt.Errorf("key column %s index out of range", lookupKeyCol)
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
+			return err
 		}
 		whereParts = append(whereParts, fmt.Sprintf("%s = ?", qKeyName))
 		whereParams = append(whereParams, row[idx])
@@ -1184,15 +1197,25 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 	// Execute the DELETE
 	result, err := rel.DB.Exec(deleteSQL, whereParams...)
 	if err != nil {
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return err
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return err
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("no rows were deleted")
+		err := fmt.Errorf("no rows were deleted")
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
+		return err
 	}
 
 	return nil
@@ -1204,6 +1227,11 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 	if len(newRecordRow) != len(rel.attributeOrder) {
 		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.attributeOrder), len(newRecordRow))
+	}
+
+	// Record database operation in breadcrumbs
+	if breadcrumbs != nil {
+		breadcrumbs.RecordDatabase("INSERT", rel.name, "")
 	}
 
 	// Convert string values to appropriate DB values
@@ -1314,6 +1342,9 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 			}
 
 			if err := rel.DB.QueryRow(query).Scan(scanArgs...); err != nil {
+				if breadcrumbs != nil {
+					breadcrumbs.Flush()
+				}
 				return nil, fmt.Errorf("insert failed: %w", err)
 			}
 			return rowVals, nil
@@ -1324,12 +1355,18 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 		tx, err := rel.DB.Begin()
 		if err != nil {
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
 			return nil, fmt.Errorf("begin tx failed: %w", err)
 		}
 
 		result, err := tx.Exec(query)
 		if err != nil {
 			_ = tx.Rollback()
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
 			return nil, fmt.Errorf("insert failed: %w", err)
 		}
 
@@ -1349,10 +1386,16 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 			if err := row.Scan(scanArgs...); err != nil {
 				_ = tx.Rollback()
+				if breadcrumbs != nil {
+					breadcrumbs.Flush()
+				}
 				return nil, fmt.Errorf("scan failed: %w", err)
 			}
 
 			if err := tx.Commit(); err != nil {
+				if breadcrumbs != nil {
+					breadcrumbs.Flush()
+				}
 				return nil, fmt.Errorf("commit failed: %w", err)
 			}
 			return rowVals, nil
@@ -1360,6 +1403,9 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 		// Fallback: commit and return nil (caller should refresh manually)
 		if err := tx.Commit(); err != nil {
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
 			return nil, fmt.Errorf("commit failed: %w", err)
 		}
 		return nil, nil
@@ -1377,6 +1423,9 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 		}
 
 		if err := rel.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
 			return nil, fmt.Errorf("insert failed: %w", err)
 		}
 		return rowVals, nil
@@ -1388,12 +1437,18 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 	tx, err := rel.DB.Begin()
 	if err != nil {
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return nil, fmt.Errorf("begin tx failed: %w", err)
 	}
 
 	result, err := tx.Exec(query, args...)
 	if err != nil {
 		_ = tx.Rollback()
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return nil, fmt.Errorf("insert failed: %w", err)
 	}
 
@@ -1413,10 +1468,16 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 		if err := row.Scan(scanArgs...); err != nil {
 			_ = tx.Rollback()
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
 			return nil, fmt.Errorf("scan failed: %w", err)
 		}
 
 		if err := tx.Commit(); err != nil {
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
 			return nil, fmt.Errorf("commit failed: %w", err)
 		}
 		return rowVals, nil
@@ -1424,6 +1485,9 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 	// Fallback: commit and return nil (caller should refresh manually)
 	if err := tx.Commit(); err != nil {
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 	return nil, nil
@@ -1439,6 +1503,11 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	}
 	if len(rel.key) == 0 {
 		return nil, fmt.Errorf("no lookup key configured")
+	}
+
+	// Record database operation in breadcrumbs
+	if breadcrumbs != nil {
+		breadcrumbs.RecordDatabase("UPDATE", rel.name, "")
 	}
 
 	// Convert string to appropriate DB value
@@ -1502,11 +1571,19 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, ph))
 		colIdx, ok := rel.attributeIndex[lookupKeyCol]
 		if !ok || rowIdx >= len(records) {
-			return nil, fmt.Errorf("lookup key column %s not found in records", lookupKeyCol)
+			err := fmt.Errorf("lookup key column %s not found in records", lookupKeyCol)
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
+			return nil, err
 		}
 		row := records[rowIdx]
 		if colIdx < 0 || colIdx >= len(row) {
-			return nil, fmt.Errorf("lookup key column %s not loaded", lookupKeyCol)
+			err := fmt.Errorf("lookup key column %s not loaded", lookupKeyCol)
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
+			return nil, err
 		}
 		keyArgs = append(keyArgs, row[colIdx])
 	}
@@ -1554,6 +1631,9 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 		}
 
 		if err := rel.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
+			if breadcrumbs != nil {
+				breadcrumbs.Flush()
+			}
 			return nil, fmt.Errorf("update failed: %w", err)
 		}
 		return rowVals, nil
@@ -1566,6 +1646,9 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	// Begin transaction
 	tx, err := rel.DB.Begin()
 	if err != nil {
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return nil, fmt.Errorf("begin tx failed: %w", err)
 	}
 
@@ -1576,11 +1659,18 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	res, err := tx.Exec(query, args...)
 	if err != nil {
 		_ = tx.Rollback()
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return nil, fmt.Errorf("update failed: %w", err)
 	}
 	if ra, _ := res.RowsAffected(); ra == 0 {
 		_ = tx.Rollback()
-		return nil, fmt.Errorf("no rows updated")
+		err := fmt.Errorf("no rows updated")
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
+		return nil, err
 	}
 
 	// Re-select the updated row within the same transaction
@@ -1593,10 +1683,16 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	}
 	if err := row.Scan(scanArgs...); err != nil {
 		_ = tx.Rollback()
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
+		if breadcrumbs != nil {
+			breadcrumbs.Flush()
+		}
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 	return rowVals, nil
