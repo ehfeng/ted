@@ -7,6 +7,8 @@ ted displays database tables as markdown table and provides spreadsheet-like edi
 ```sh
 ted [dbname] [tbl]
 ted test users
+
+ted --pg test users
 ```
 
 `dbname` can either be a database file (sqlite or duckdb) or a database name.
@@ -30,8 +32,8 @@ brew install ted
 
 ### Database shorthands
 
-- `--pg`
-- `--my` or `--mysql`
+- `--postgres` or `--pg`
+- `--mysql` or `--my`
 
 ## Supported keyboard shortcuts
 
@@ -141,16 +143,25 @@ Pasting cells (separate from pasting values). Unclear how you'd map things, espe
 ## Development
 
 ```sh
+# initial
+go install
+ted completion zsh > /usr/local/share/zsh/site-functions/_ted
+exec zsh
+
+# development
 make watch
 ted test.db users 2>/tmp/ted.log
 tail -f /tmp/ted.log
+
+# testing completions
+ted __complete "pg" "t" 2>&1
 ```
 
-Release a new version
+### Release
 
 ```sh
 git tag -a v0.1.2 -m "Release notes"
 git push origin v0.1.2
 ```
 
-Then go to `ehfeng/homebrew-ted`, run `.update-checksums` and push.
+Go to `ehfeng/homebrew-ted`, run `.update-checksums` and push.
