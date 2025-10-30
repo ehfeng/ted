@@ -39,6 +39,7 @@ type TableView struct {
 	// Callbacks
 	doubleClickFunc func(row, col int)
 	singleClickFunc func(row, col int)
+	selectionChangeFunc func(row, col int)
 
 	// Double-click tracking
 	lastClickRow int
@@ -122,6 +123,10 @@ func (tv *TableView) Select(row, col int) *TableView {
 	if row >= 0 && row < maxRow && col >= 0 && col < len(tv.headers) {
 		tv.selectedRow = row
 		tv.selectedCol = col
+		// Trigger selection change callback
+		if tv.selectionChangeFunc != nil {
+			tv.selectionChangeFunc(row, col)
+		}
 	}
 	return tv
 }
@@ -141,6 +146,12 @@ func (tv *TableView) SetDoubleClickFunc(handler func(row, col int)) *TableView {
 // SetSingleClickFunc sets the function to call when a cell is single-clicked
 func (tv *TableView) SetSingleClickFunc(handler func(row, col int)) *TableView {
 	tv.singleClickFunc = handler
+	return tv
+}
+
+// SetSelectionChangeFunc sets the function to call when the selection changes
+func (tv *TableView) SetSelectionChangeFunc(handler func(row, col int)) *TableView {
+	tv.selectionChangeFunc = handler
 	return tv
 }
 

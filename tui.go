@@ -176,6 +176,9 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor.setupCommandPalette()
 	editor.setupLayout()
 	editor.setupResizeHandler()
+	editor.table.SetSelectionChangeFunc(func(row, col int) {
+		editor.updateStatusWithCellContent()
+	})
 	editor.table.Select(0, 0)
 	editor.pages.AddPage("table", editor.layout, true, true)
 
@@ -511,7 +514,6 @@ func (e *Editor) setupKeyBindings() {
 				e.renderData()
 				_, col := e.table.GetSelection()
 				e.table.Select(lastIdx, col)
-				e.SetStatusMessage("")
 				return nil
 			}
 			e.exitEditMode()
@@ -1045,7 +1047,11 @@ func (e *Editor) exitEditMode() {
 		// Return palette to default mode after editing
 		if e.table.insertRow == nil {
 			e.setPaletteMode(PaletteModeDefault, false)
-			e.SetStatusMessage("Ready")
+			// Trigger status update via selection change callback
+			row, col := e.table.GetSelection()
+			if e.table.selectionChangeFunc != nil {
+				e.table.selectionChangeFunc(row, col)
+			}
 		} else {
 			preview := e.relation.BuildInsertPreview(e.table.insertRow, e.columns)
 			e.commandPalette.SetPlaceholder(preview)
@@ -2106,6 +2112,48 @@ func (e *Editor) SetStatusLog(message string) {
 		e.statusBar.SetText("[blue]LOG: " + message + "[white]")
 		e.app.Draw()
 	}
+}
+
+// updateStatusWithCellContent displays the full text of the current cell selection in the status bar
+// This is only called when not in edit mode
+func (e *Editor) updateStatusWithCellContent() {
+	// Don't update status when in edit mode, insert mode, or delete mode
+	if e.editMode || len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+		return
+	}
+
+	row, col := e.table.GetSelection()
+
+	// Validate bounds
+	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.columns) {
+		return
+	}
+
+	// Get the cell value
+	var cellValue any
+	if col < len(e.records[row]) {
+		cellValue = e.records[row][col]
+	}
+
+	// Format the cell value
+	cellText, _ := formatCellValue(cellValue, tcell.StyleDefault)
+
+	// Get column name and type info
+	colName := e.columns[col].Name
+	var colType string
+	if attr, ok := e.relation.attributes[colName]; ok {
+		colType = attr.Type
+	}
+
+	// Build the status message with explicit colors
+	var statusMsg string
+	if colType != "" {
+		statusMsg = fmt.Sprintf("[black]%s[darkgreen] %s", colType, cellText)
+	} else {
+		statusMsg = fmt.Sprintf("[darkgreen]%s", cellText)
+	}
+
+	e.SetStatusMessage(statusMsg)
 }
 
 // SQL execution
