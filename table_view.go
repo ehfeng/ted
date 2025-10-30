@@ -171,6 +171,33 @@ func (tv *TableView) SetCell(row, col int, value any) *TableView {
 	return tv
 }
 
+// UpdateRowsHeightFromRect calculates and updates rowsHeight based on the provided height.
+// This should be called before loading rows from the database to ensure the correct number
+// of rows are fetched based on the current display height. This method accepts the height
+// as a parameter to avoid calling GetRect() from the UI event loop which can cause deadlocks.
+func (tv *TableView) UpdateRowsHeightFromRect(height int) {
+	// Calculate maxDataRows based on the provided height
+	// Reserve space for top border, header row, and header separator
+	maxDataRows := height - 3
+
+	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
+	drawBottomBorder := tv.bottom
+	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1]) == 0 {
+		drawBottomBorder = true
+	}
+	if len(tv.insertRow) > 0 {
+		drawBottomBorder = true
+	}
+
+	// Reserve additional space for bottom border if needed
+	if drawBottomBorder {
+		maxDataRows = height - 4
+	}
+
+	// Update the rowsHeight field
+	tv.rowsHeight = maxDataRows
+}
+
 // Draw renders the table view
 func (tv *TableView) Draw(screen tcell.Screen) {
 	tv.Box.DrawForSubclass(screen, tv)

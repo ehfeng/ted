@@ -1975,7 +1975,12 @@ func (e *Editor) startRefreshTimer() {
 				}
 			case <-timer.C:
 				if app != nil && e.relation != nil && e.relation.DB != nil {
+					// Calculate data height before queueing the update
+					terminalHeight := getTerminalHeight()
+					dataHeight := terminalHeight - 5 // 5 lines for header, status bar, command palette
 					app.QueueUpdateDraw(func() {
+						// Update table rowsHeight before loading rows from database
+						e.table.UpdateRowsHeightFromRect(dataHeight)
 						id := e.records[e.pointer][:len(e.relation.key)]
 						e.loadFromRowId(id, true, e.table.selectedCol)
 					})
