@@ -45,6 +45,11 @@ type TableView struct {
 	lastClickRow int
 	lastClickCol int
 
+	// Drag state for column resizing
+	resizingColumn   int // -1 if not resizing, otherwise column index
+	resizeStartX     int // Initial X position of mouse when drag started
+	resizeStartWidth int // Original column width before drag
+
 	// Viewport information
 	rowsHeight int
 }
@@ -63,6 +68,7 @@ func NewTableView(height int) *TableView {
 		selectable:    true,
 		lastClickRow:  -1,
 		lastClickCol:  -1,
+		resizingColumn: -1,
 		rowsHeight:    height,
 	}
 
@@ -565,6 +571,17 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 			// Set focus when clicked
 			setFocus(tv)
 			consumed = true
+
+			// Check if clicked on column separator for drag resize
+			separatorCol := tv.GetColumnSeparatorAtPosition(x, y)
+			if separatorCol >= 0 {
+				// Start drag resize
+				tv.resizingColumn = separatorCol
+				tv.resizeStartX = x
+				tv.resizeStartWidth = tv.headers[separatorCol].Width
+				return true, tv // Capture further mouse events
+			}
+
 			if tv.selectable {
 				// Convert screen coordinates to cell coordinates
 				row, col := tv.GetCellAtPosition(x, y)
@@ -575,6 +592,21 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 					// tv.lastClickCol = col
 					consumed = true
 				}
+			}
+		case tview.MouseMove:
+			// Handle column resizing drag
+			if tv.resizingColumn >= 0 {
+				// Calculate new width based on mouse movement
+				delta := x - tv.resizeStartX
+				newWidth := tv.resizeStartWidth + delta
+				tv.SetColumnWidth(tv.resizingColumn, newWidth)
+				return true, tv // Continue capturing
+			}
+		case tview.MouseLeftUp:
+			// End drag resize
+			if tv.resizingColumn >= 0 {
+				tv.resizingColumn = -1
+				return true, nil // Release capture
 			}
 		case tview.MouseLeftClick:
 			row, col := tv.GetCellAtPosition(x, y)
@@ -680,6 +712,45 @@ func (tv *TableView) GetCellAtPosition(screenX, screenY int) (row, col int) {
 	}
 
 	return -1, -1 // Clicked beyond table content
+}
+
+// GetColumnSeparatorAtPosition returns the column index if the position is on a column separator,
+// or -1 if not on a separator. Uses tolerance of ±1 for easier clicking.
+func (tv *TableView) GetColumnSeparatorAtPosition(screenX, screenY int) int {
+	x, y, width, _ := tv.GetInnerRect()
+
+	// Check if click is within the table bounds (horizontally)
+	if screenX < x || screenX >= x+width {
+		return -1
+	}
+
+	// Allow clicking on header row (row 1) or any data row (rows 3+)
+	relativeY := screenY - y
+	if relativeY != 1 && relativeY < 3 {
+		return -1 // Not on header or data area
+	}
+
+	relativeX := screenX - x
+	if relativeX < 1 {
+		return -1 // Before left border
+	}
+
+	// Walk through columns to find column separators
+	currentX := 1 // Start after left border
+	for i, header := range tv.headers {
+		cellWidth := header.Width + 2*tv.cellPadding
+		currentX += cellWidth
+
+		// Check if we're on a separator (with tolerance of ±1)
+		if i < len(tv.headers)-1 {
+			if relativeX >= currentX-1 && relativeX <= currentX+1 {
+				return i // Return the column to the left of this separator
+			}
+			currentX += 1
+		}
+	}
+
+	return -1 // Not on any separator
 }
 
 // padCellToWidth pads text to a specific width, truncating if too long
