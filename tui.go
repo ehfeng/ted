@@ -631,19 +631,19 @@ func (e *Editor) setupKeyBindings() {
 			}
 			e.moveColumn(col, 1)
 			return nil
-		case key == tcell.KeyLeft && mod&tcell.ModCtrl != 0:
+		case key == tcell.KeyRune && rune == '=' && mod&tcell.ModCtrl != 0:
 			// Disable in delete mode
 			if e.paletteMode == PaletteModeDelete {
 				return nil
 			}
-			e.adjustColumnWidth(col, -2)
+			e.adjustColumnWidth(col, 1)
 			return nil
-		case key == tcell.KeyRight && mod&tcell.ModCtrl != 0:
+		case key == tcell.KeyRune && rune == '-' && mod&tcell.ModCtrl != 0:
 			// Disable in delete mode
 			if e.paletteMode == PaletteModeDelete {
 				return nil
 			}
-			e.adjustColumnWidth(col, 2)
+			e.adjustColumnWidth(col, -1)
 			return nil
 		case key == tcell.KeyLeft && mod&tcell.ModMeta != 0:
 			// Disable in delete mode
@@ -753,16 +753,27 @@ func (e *Editor) consumeKittyCSI(key tcell.Key, r rune, mod tcell.ModMask) bool 
 				modifier, err2 := strconv.Atoi(parts[1])
 				if err1 == nil && err2 == nil {
 					mask := modifier - 1
-					if mask&4 != 0 && codepoint == 96 {
-						e.setPaletteMode(PaletteModeSQL, true)
-					} else if mask&4 != 0 && codepoint == 105 {
-						// Ctrl+I: Jump to end and enable insert mode
-						e.table.SetupInsertRow()
-						e.loadFromRowId(nil, false, 0)
-						e.updateStatusForInsertMode()
-						// Select the insert mode row (which is at index len(data))
+					// Check if Ctrl is pressed (bit 2, value 4)
+					if mask&4 != 0 {
 						_, col := e.table.GetSelection()
-						e.table.Select(e.table.GetDataLength(), col)
+						switch codepoint {
+						case 96: // Ctrl+` (backtick)
+							e.setPaletteMode(PaletteModeSQL, true)
+						case 105: // Ctrl+I: Jump to end and enable insert mode
+							e.table.SetupInsertRow()
+							e.loadFromRowId(nil, false, 0)
+							e.updateStatusForInsertMode()
+							// Select the insert mode row (which is at index len(data))
+							e.table.Select(e.table.GetDataLength(), col)
+						case 61: // Ctrl+= (increase column width)
+							if e.paletteMode != PaletteModeDelete {
+								e.adjustColumnWidth(col, 1)
+							}
+						case 45: // Ctrl+- (decrease column width)
+							if e.paletteMode != PaletteModeDelete {
+								e.adjustColumnWidth(col, -1)
+							}
+						}
 					}
 				}
 			}
