@@ -180,3 +180,53 @@ jobs:
             checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew tap
+        if: ${{ !contains(github.ref, '-') }}
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+
+          # Calculate SHA256 checksums
+          DARWIN_AMD64_SHA=$(sha256sum ted_${VERSION}_Darwin_amd64.tar.gz | awk '{print $1}')
+          DARWIN_ARM64_SHA=$(sha256sum ted_${VERSION}_Darwin_arm64.tar.gz | awk '{print $1}')
+
+          # Clone the homebrew tap
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/ehfeng/homebrew-ted.git
+          cd homebrew-ted
+
+          # Update the formula
+          cat > ted.rb << EOF
+          class Ted < Formula
+            desc "Terminal editor for tabular data"
+            homepage "https://github.com/ehfeng/ted"
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/ehfeng/ted/releases/download/v${VERSION}/ted_${VERSION}_Darwin_arm64.tar.gz"
+                sha256 "${DARWIN_ARM64_SHA}"
+              else
+                url "https://github.com/ehfeng/ted/releases/download/v${VERSION}/ted_${VERSION}_Darwin_amd64.tar.gz"
+                sha256 "${DARWIN_AMD64_SHA}"
+              end
+            end
+
+            def install
+              bin.install "ted"
+              generate_completions_from_executable(bin/"ted", "completion")
+            end
+
+            test do
+              system "#{bin}/ted", "--help"
+            end
+          end
+          EOF
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ted.rb
+          git commit -m "Update ted to v${VERSION}"
+          git push
