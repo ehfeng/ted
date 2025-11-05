@@ -215,7 +215,9 @@ jobs:
 
             def install
               bin.install "ted"
-              generate_completions_from_executable(bin/"ted", "completion")
+
+              # Generate shell completions
+              generate_completions_from_executable(bin/"ted", "--completion", shells: [:bash, :zsh, :fish])
             end
 
             test do

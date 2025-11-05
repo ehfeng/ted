@@ -25,6 +25,8 @@ var (
 	command     string
 	usePostgres bool
 	useMySQL    bool
+	telemetry   string
+	completion  string
 )
 
 var rootCmd = &cobra.Command{
@@ -36,8 +38,72 @@ Examples:
   ted test users
   ted mydb.sqlite users
   ted -h localhost -p 5432 -U myuser mydb users`,
-	Args: cobra.MinimumNArgs(2),
+	Args: func(cmd *cobra.Command, args []string) error {
+		// Allow 0 args if using --telemetry or --completion flags
+		if telemetry != "" || completion != "" {
+			return nil
+		}
+		// Otherwise require at least 2 args
+		if len(args) < 2 {
+			return fmt.Errorf("requires at least 2 arg(s), only received %d", len(args))
+		}
+		return nil
+	},
 	Run: func(cmd *cobra.Command, args []string) {
+		// Handle telemetry flag
+		if telemetry != "" {
+			settings, err := LoadSettings()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
+				os.Exit(1)
+			}
+
+			switch telemetry {
+			case "enable":
+				settings.TelemetryEnabled = true
+				if err := SaveSettings(settings); err != nil {
+					fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("Telemetry enabled.")
+			case "disable":
+				settings.TelemetryEnabled = false
+				if err := SaveSettings(settings); err != nil {
+					fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("Telemetry disabled.")
+			case "status":
+				status := "disabled"
+				if settings.TelemetryEnabled {
+					status = "enabled"
+				}
+				fmt.Printf("Telemetry status: %s\n", status)
+			default:
+				fmt.Fprintf(os.Stderr, "Error: invalid telemetry action '%s'. Use 'enable', 'disable', or 'status'\n", telemetry)
+				os.Exit(1)
+			}
+			return
+		}
+
+		// Handle completion flag
+		if completion != "" {
+			switch completion {
+			case "bash":
+				cmd.Root().GenBashCompletion(os.Stdout)
+			case "zsh":
+				cmd.Root().GenZshCompletion(os.Stdout)
+			case "fish":
+				cmd.Root().GenFishCompletion(os.Stdout, true)
+			case "powershell":
+				cmd.Root().GenPowerShellCompletion(os.Stdout)
+			default:
+				fmt.Fprintf(os.Stderr, "Error: invalid shell '%s'. Use 'bash', 'zsh', 'fish', or 'powershell'\n", completion)
+				os.Exit(1)
+			}
+			return
+		}
+
 		dbname := args[0]
 		tablename := args[1]
 
@@ -77,64 +143,6 @@ Examples:
 	ValidArgsFunction: completionFunc,
 }
 
-var telemetryCmd = &cobra.Command{
-	Use:   "telemetry",
-	Short: "Manage telemetry settings",
-	Long:  "Enable, disable, or check the status of telemetry collection.",
-}
-
-var telemetryEnableCmd = &cobra.Command{
-	Use:   "enable",
-	Short: "Enable telemetry",
-	Run: func(cmd *cobra.Command, args []string) {
-		settings, err := LoadSettings()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
-			os.Exit(1)
-		}
-		settings.TelemetryEnabled = true
-		if err := SaveSettings(settings); err != nil {
-			fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Telemetry enabled.")
-	},
-}
-
-var telemetryDisableCmd = &cobra.Command{
-	Use:   "disable",
-	Short: "Disable telemetry",
-	Run: func(cmd *cobra.Command, args []string) {
-		settings, err := LoadSettings()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
-			os.Exit(1)
-		}
-		settings.TelemetryEnabled = false
-		if err := SaveSettings(settings); err != nil {
-			fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Telemetry disabled.")
-	},
-}
-
-var telemetryStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show telemetry status",
-	Run: func(cmd *cobra.Command, args []string) {
-		settings, err := LoadSettings()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
-			os.Exit(1)
-		}
-		status := "disabled"
-		if settings.TelemetryEnabled {
-			status = "enabled"
-		}
-		fmt.Printf("Telemetry status: %s\n", status)
-	},
-}
 
 func init() {
 	rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
@@ -149,11 +157,9 @@ func init() {
 	rootCmd.Flags().BoolVar(&useMySQL, "mysql", false, "Use MySQL for server connections")
 	rootCmd.Flags().BoolVar(&useMySQL, "my", false, "Use MySQL for server connections")
 
-	// Add telemetry subcommands
-	rootCmd.AddCommand(telemetryCmd)
-	telemetryCmd.AddCommand(telemetryEnableCmd)
-	telemetryCmd.AddCommand(telemetryDisableCmd)
-	telemetryCmd.AddCommand(telemetryStatusCmd)
+	// Telemetry and completion flags
+	rootCmd.Flags().StringVar(&telemetry, "telemetry", "", "Manage telemetry settings (enable, disable, status)")
+	rootCmd.Flags().StringVar(&completion, "completion", "", "Generate shell completions (bash, zsh, fish, powershell)")
 
 	if err := rootCmd.RegisterFlagCompletionFunc("pg", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return []string{"hi", "pg"}, cobra.ShellCompDirectiveNoFileComp
@@ -378,6 +384,7 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
+
 // Sentry DSN (hard-coded)
 const SentryDSN = "https://685bea62d5921e602f7adcad1aae6201@o30558.ingest.us.sentry.io/4510273814855680"
 
@@ -422,8 +429,16 @@ func main() {
 	// Initialize breadcrumbs buffer
 	InitBreadcrumbs(100)
 
-	// Run first-run prompt if needed (but skip for telemetry commands)
-	if len(os.Args) < 2 || (os.Args[1] != "telemetry" && os.Args[1] != "help" && os.Args[1] != "--help") {
+	// Run first-run prompt if needed (but skip for telemetry/completion flags or help)
+	skipFirstRun := false
+	for _, arg := range os.Args[1:] {
+		if arg == "help" || arg == "--help" || arg == "-h" ||
+			strings.HasPrefix(arg, "--telemetry") || strings.HasPrefix(arg, "--completion") {
+			skipFirstRun = true
+			break
+		}
+	}
+	if !skipFirstRun {
 		if err := runFirstRunPrompt(); err != nil {
 			log.Printf("Warning: Could not run first-run setup: %v\n", err)
 		}
