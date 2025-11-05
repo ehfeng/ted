@@ -7,6 +7,106 @@ import (
 
 const EmptyCellValue = '\000'
 
+// Viewport handles horizontal scrolling for the table
+type Viewport struct {
+	scrollX     int          // Current horizontal offset
+	screen      tcell.Screen // Reference to the tcell screen
+	tableWidth  int          // Total width of the table content
+	screenWidth int          // Width of the visible area
+}
+
+// NewViewport creates a new viewport
+func NewViewport() *Viewport {
+	return &Viewport{
+		scrollX: 0,
+	}
+}
+
+// SetScreen sets the screen reference for the viewport
+func (v *Viewport) SetScreen(screen tcell.Screen) {
+	v.screen = screen
+}
+
+// SetDimensions sets the table and screen dimensions for scroll limiting
+func (v *Viewport) SetDimensions(tableWidth, screenWidth int) {
+	v.tableWidth = tableWidth
+	v.screenWidth = screenWidth
+	// Clamp current scroll position if needed
+	if v.tableWidth > v.screenWidth {
+		maxScroll := v.tableWidth - v.screenWidth
+		if v.scrollX > maxScroll {
+			v.scrollX = maxScroll
+		}
+	} else {
+		v.scrollX = 0
+	}
+}
+
+// SetContent calls screen.SetContent with x adjusted by scrollX
+func (v *Viewport) SetContent(x, y int, ch rune, combc []rune, style tcell.Style) {
+	if v.screen != nil {
+		v.screen.SetContent(x-v.scrollX, y, ch, combc, style)
+	}
+}
+
+// ScrollLeft scrolls the viewport left by one unit
+func (v *Viewport) ScrollLeft() {
+	if v.scrollX > 0 {
+		v.scrollX--
+	}
+}
+
+// ScrollRight scrolls the viewport right by one unit
+func (v *Viewport) ScrollRight() {
+	// Only scroll if there's more content to reveal
+	if v.tableWidth > v.screenWidth {
+		maxScroll := v.tableWidth - v.screenWidth
+		if v.scrollX < maxScroll {
+			v.scrollX++
+		}
+	}
+}
+
+// GetScrollX returns the current horizontal offset
+func (v *Viewport) GetScrollX() int {
+	return v.scrollX
+}
+
+// SetScrollX sets the horizontal offset directly
+func (v *Viewport) SetScrollX(offset int) {
+	if offset < 0 {
+		v.scrollX = 0
+	} else {
+		v.scrollX = offset
+	}
+}
+
+// EnsureColumnVisible adjusts scrollX so that a column range is visible
+// startX is the left edge of the column, endX is the right edge
+func (v *Viewport) EnsureColumnVisible(startX, endX, screenWidth int) {
+	// endX is exclusive (one past the last character of the column)
+	// We need the column to fit within the visible area: [scrollX, scrollX + screenWidth)
+
+	if endX-startX >= screenWidth {
+		// Column is wider than screen, just show from the start of the column
+		v.scrollX = startX
+		return
+	}
+
+	if startX < v.scrollX {
+		// Column starts before visible area - scroll left
+		v.scrollX = startX
+	} else if endX > v.scrollX+screenWidth {
+		// Column ends after visible area - scroll right
+		v.scrollX = endX - screenWidth
+	}
+
+	// Clamp scrollX to valid range
+	if v.scrollX < 0 {
+		v.scrollX = 0
+	}
+}
+
 // HeaderColumn represents a table column with header information
 type HeaderColumn struct {
 	Name  string
@@ -37,8 +137,8 @@ type TableView struct {
 	selectable  bool
 
 	// Callbacks
-	doubleClickFunc func(row, col int)
-	singleClickFunc func(row, col int)
+	doubleClickFunc     func(row, col int)
+	singleClickFunc     func(row, col int)
 	selectionChangeFunc func(row, col int)
 
 	// Double-click tracking
@@ -50,6 +150,9 @@ type TableView struct {
 	resizeStartX     int // Initial X position of mouse when drag started
 	resizeStartWidth int // Original column width before drag
 
+	// Viewport for horizontal scrolling
+	viewport *Viewport
+
 	// Viewport information
 	rowsHeight int
 }
@@ -57,19 +160,20 @@ type TableView struct {
 // NewTableView creates a new table view component
 func NewTableView(height int) *TableView {
 	tv := &TableView{
-		Box:           tview.NewBox(),
-		cellPadding:   1,
-		borderColor:   tcell.ColorWhite,
-		headerColor:   tcell.ColorWhite,
-		headerBgColor: tcell.ColorDarkSlateGray,
-		separatorChar: '│',
-		selectedRow:   0,
-		selectedCol:   0,
-		selectable:    true,
-		lastClickRow:  -1,
-		lastClickCol:  -1,
+		Box:            tview.NewBox(),
+		cellPadding:    1,
+		borderColor:    tcell.ColorWhite,
+		headerColor:    tcell.ColorWhite,
+		headerBgColor:  tcell.ColorDarkSlateGray,
+		separatorChar:  '│',
+		selectedRow:    0,
+		selectedCol:    0,
+		selectable:     true,
+		lastClickRow:   -1,
+		lastClickCol:   -1,
 		resizingColumn: -1,
-		rowsHeight:    height,
+		viewport:       NewViewport(),
+		rowsHeight:     height,
 	}
 
 	tv.SetBorder(false) // We'll draw our own borders
@@ -127,10 +231,11 @@ func (tv *TableView) Select(row, col int) *TableView {
 		maxRow = len(tv.data) + 1 // Allow selecting the virtual insert mode row
 	}
 	if row >= 0 && row < maxRow && col >= 0 && col < len(tv.headers) {
+		// Only trigger callback if selection actually changed
+		selectionChanged := (tv.selectedRow != row || tv.selectedCol != col)
 		tv.selectedRow = row
 		tv.selectedCol = col
-		// Trigger selection change callback
-		if tv.selectionChangeFunc != nil {
+		if selectionChanged && tv.selectionChangeFunc != nil {
 			tv.selectionChangeFunc(row, col)
 		}
 	}
@@ -213,25 +318,32 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		return
 	}
 
+	// Initialize viewport with the screen
+	tv.viewport.SetScreen(screen)
+
 	// Calculate table dimensions
 	tableWidth := tv.calculateTableWidth()
-	if tableWidth > width {
-		tableWidth = width
+	displayWidth := tableWidth
+	if displayWidth > width {
+		displayWidth = width
 	}
 
+	// Set viewport dimensions for scroll limiting
+	tv.viewport.SetDimensions(tableWidth, width)
+
 	// Draw top border
-	tv.drawTopBorder(screen, x, y, tableWidth)
+	tv.drawTopBorder(x, y, tableWidth)
 	currentY := y + 1
 
 	// Draw header row
 	if currentY < y+height {
-		tv.drawHeaderRow(screen, x, currentY)
+		tv.drawHeaderRow(x, currentY)
 		currentY++
 	}
 
 	// Draw header separator
 	if currentY < y+height {
-		tv.drawHeaderSeparator(screen, x, currentY, tableWidth)
+		tv.drawHeaderSeparator(x, currentY, tableWidth)
 		currentY++
 	}
 
@@ -263,21 +375,21 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		if len(tv.data[i]) == 0 {
 			break // Stop drawing when we hit a nil slice
 		}
-		tv.drawDataRow(screen, x, currentY, tableWidth, i)
+		tv.drawDataRow(x, currentY, tableWidth, i)
 		currentY++
 		dataRowsDrawn++
 	}
 
 	// Draw insert mode row if enabled and there's space
 	if len(tv.insertRow) > 0 && currentY < y+height {
-		tv.drawDataRow(screen, x, currentY, tableWidth, len(tv.data))
+		tv.drawDataRow(x, currentY, tableWidth, len(tv.data))
 		currentY++
 		dataRowsDrawn++
 	}
 
 	// Draw bottom border (if enabled or if final slice is nil)
 	if drawBottomBorder && currentY < y+height {
-		tv.drawBottomBorder(screen, x, currentY, tableWidth)
+		tv.drawBottomBorder(x, currentY, tableWidth)
 	}
 }
 
@@ -295,9 +407,9 @@ func (tv *TableView) calculateTableWidth() int {
 }
 
 // drawTopBorder draws the top border of the table
-func (tv *TableView) drawTopBorder(screen tcell.Screen, x, y, tableWidth int) {
+func (tv *TableView) drawTopBorder(x, y, tableWidth int) {
 	// Left corner
-	screen.SetContent(x, y, '┌', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+	tv.viewport.SetContent(x, y, '┌', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 	pos := x + 1
 
 	// Column sections
@@ -306,7 +418,7 @@ func (tv *TableView) drawTopBorder(screen tcell.Screen, x, y, tableWidth int) {
 
 		// Horizontal line for this column
 		for j := 0; j < cellWidth; j++ {
-			screen.SetContent(pos+j, y, '─', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos+j, y, '─', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 		}
 		pos += cellWidth
 
@@ -314,56 +426,56 @@ func (tv *TableView) drawTopBorder(screen tcell.Screen, x, y, tableWidth int) {
 		if i < len(tv.headers)-1 {
 			// Use special junction after last key column
 			junction := '┬'
-			screen.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
 			pos++
 		} else {
-			screen.SetContent(pos, y, '┐', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, '┐', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 		}
 	}
 }
 
 // drawHeaderRow draws the header content row
-func (tv *TableView) drawHeaderRow(screen tcell.Screen, x, y int) {
+func (tv *TableView) drawHeaderRow(x, y int) {
 	// Left border
-	screen.SetContent(x, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+	tv.viewport.SetContent(x, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 	pos := x + 1
 
 	// Header cells
 	for i, header := range tv.headers {
 		// Padding before content
 		for j := 0; j < tv.cellPadding; j++ {
-			screen.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+			tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
 		}
 		pos += tv.cellPadding
 
 		// Header text
 		headerText := padCellToWidth(header.Name, header.Width)
 		for j, ch := range headerText {
-			screen.SetContent(pos+j, y, ch, nil, tcell.StyleDefault.Bold(true).Foreground(tv.headerColor).Background(tv.headerBgColor))
+			tv.viewport.SetContent(pos+j, y, ch, nil, tcell.StyleDefault.Bold(true).Foreground(tv.headerColor).Background(tv.headerBgColor))
 		}
 		pos += header.Width
 
 		// Padding after content
 		for j := 0; j < tv.cellPadding; j++ {
-			screen.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+			tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
 		}
 		pos += tv.cellPadding
 
 		// Column separator
 		if i < len(tv.headers)-1 {
-			screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 			pos++
 		}
 	}
 
 	// Right border
-	screen.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+	tv.viewport.SetContent(pos, y, '│', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 }
 
 // drawHeaderSeparator draws the heavy line separator between header and data
-func (tv *TableView) drawHeaderSeparator(screen tcell.Screen, x, y, tableWidth int) {
+func (tv *TableView) drawHeaderSeparator(x, y, tableWidth int) {
 	// Left junction
-	screen.SetContent(x, y, '┝', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+	tv.viewport.SetContent(x, y, '┝', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 	pos := x + 1
 
 	// Column sections
@@ -372,7 +484,7 @@ func (tv *TableView) drawHeaderSeparator(screen tcell.Screen, x, y, tableWidth i
 
 		// Heavy horizontal line for this column
 		for j := 0; j < cellWidth; j++ {
-			screen.SetContent(pos+j, y, '━', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos+j, y, '━', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 		}
 		pos += cellWidth
 
@@ -383,16 +495,16 @@ func (tv *TableView) drawHeaderSeparator(screen tcell.Screen, x, y, tableWidth i
 			if tv.keyColumnCount > 0 && i == tv.keyColumnCount-1 {
 				junction = '╈' // Heavy cross junction
 			}
-			screen.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
 			pos++
 		} else {
-			screen.SetContent(pos, y, '┥', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, '┥', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 		}
 	}
 }
 
 // drawDataRow draws a data row
-func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx int) {
+func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 	// Check if this is the insert mode row (when newRecordRow is set and rowIdx is beyond data)
 	isNewRecordRow := len(tv.insertRow) > 0 && rowIdx == len(tv.data)
 
@@ -401,7 +513,7 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 	if isNewRecordRow {
 		borderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
 	}
-	screen.SetContent(x, y, '│', nil, borderStyle)
+	tv.viewport.SetContent(x, y, '│', nil, borderStyle)
 	pos := x + 1
 
 	// Data cells
@@ -420,7 +532,7 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 
 		// Padding before content
 		for j := 0; j < tv.cellPadding; j++ {
-			screen.SetContent(pos+j, y, ' ', nil, cellStyle)
+			tv.viewport.SetContent(pos+j, y, ' ', nil, cellStyle)
 		}
 		pos += tv.cellPadding
 
@@ -432,13 +544,13 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 			if tv.insertRow[i] == EmptyCellValue {
 				// Empty cell in insert mode - show repeating dots
 				for k := 0; k < header.Width; k++ {
-					screen.SetContent(pos+k, y, '·', nil, cellStyle)
+					tv.viewport.SetContent(pos+k, y, '·', nil, cellStyle)
 				}
 			} else {
 				cellText, cellStyle := formatCellValue(tv.insertRow[i], cellStyle)
 				cellText = padCellToWidth(cellText, header.Width)
 				for j, ch := range cellText {
-					screen.SetContent(pos+j, y, ch, nil, cellStyle)
+					tv.viewport.SetContent(pos+j, y, ch, nil, cellStyle)
 				}
 			}
 
@@ -448,7 +560,7 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 				cellText, cellStyle := formatCellValue(tv.data[rowIdx][i], cellStyle)
 				cellText = padCellToWidth(cellText, header.Width)
 				for j, ch := range cellText {
-					screen.SetContent(pos+j, y, ch, nil, cellStyle)
+					tv.viewport.SetContent(pos+j, y, ch, nil, cellStyle)
 				}
 			}
 		}
@@ -456,7 +568,7 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 
 		// Padding after content
 		for j := 0; j < tv.cellPadding; j++ {
-			screen.SetContent(pos+j, y, ' ', nil, cellStyle)
+			tv.viewport.SetContent(pos+j, y, ' ', nil, cellStyle)
 		}
 		pos += tv.cellPadding
 
@@ -471,7 +583,7 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 			if tv.keyColumnCount > 0 && i == tv.keyColumnCount-1 {
 				separator = '┃' // Heavy vertical line
 			}
-			screen.SetContent(pos, y, separator, nil, sepStyle)
+			tv.viewport.SetContent(pos, y, separator, nil, sepStyle)
 			pos++
 		}
 	}
@@ -481,13 +593,13 @@ func (tv *TableView) drawDataRow(screen tcell.Screen, x, y, tableWidth, rowIdx i
 	if isNewRecordRow {
 		rightBorderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
 	}
-	screen.SetContent(pos, y, '│', nil, rightBorderStyle)
+	tv.viewport.SetContent(pos, y, '│', nil, rightBorderStyle)
 }
 
 // drawBottomBorder draws the bottom border of the table
-func (tv *TableView) drawBottomBorder(screen tcell.Screen, x, y, tableWidth int) {
+func (tv *TableView) drawBottomBorder(x, y, tableWidth int) {
 	// Left corner
-	screen.SetContent(x, y, '└', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+	tv.viewport.SetContent(x, y, '└', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 	pos := x + 1
 
 	// Column sections
@@ -496,7 +608,7 @@ func (tv *TableView) drawBottomBorder(screen tcell.Screen, x, y, tableWidth int)
 
 		// Horizontal line for this column
 		for j := 0; j < cellWidth; j++ {
-			screen.SetContent(pos+j, y, '─', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos+j, y, '─', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 		}
 		pos += cellWidth
 
@@ -507,10 +619,10 @@ func (tv *TableView) drawBottomBorder(screen tcell.Screen, x, y, tableWidth int)
 			if tv.keyColumnCount > 0 && i == tv.keyColumnCount-1 {
 				junction = '┸' // Heavy vertical junction
 			}
-			screen.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
 			pos++
 		} else {
-			screen.SetContent(pos, y, '┘', nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, '┘', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 		}
 	}
 }
@@ -530,27 +642,27 @@ func (tv *TableView) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 				return // Disable vertical navigation in insert mode
 			}
 			if tv.selectedRow > 0 {
-				tv.selectedRow--
+				tv.Select(tv.selectedRow-1, tv.selectedCol)
 			}
 		case tcell.KeyDown:
 			if len(tv.insertRow) > 0 {
 				return // Disable vertical navigation in insert mode
 			}
 			if tv.selectedRow < len(tv.data)-1 {
-				tv.selectedRow++
+				tv.Select(tv.selectedRow+1, tv.selectedCol)
 			}
 		case tcell.KeyLeft:
 			if tv.selectedCol > 0 {
-				tv.selectedCol--
+				tv.Select(tv.selectedRow, tv.selectedCol-1)
 			}
 		case tcell.KeyRight:
 			if tv.selectedCol < len(tv.headers)-1 {
-				tv.selectedCol++
+				tv.Select(tv.selectedRow, tv.selectedCol+1)
 			}
 		case tcell.KeyHome:
-			tv.selectedCol = 0
+			tv.Select(tv.selectedRow, 0)
 		case tcell.KeyEnd:
-			tv.selectedCol = len(tv.headers) - 1
+			tv.Select(tv.selectedRow, len(tv.headers)-1)
 		}
 	})
 }
@@ -586,10 +698,7 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 				// Convert screen coordinates to cell coordinates
 				row, col := tv.GetCellAtPosition(x, y)
 				if row >= 0 && col >= 0 {
-					tv.selectedRow = row
-					tv.selectedCol = col
-					// tv.lastClickRow = row
-					// tv.lastClickCol = col
+					tv.Select(row, col)
 					consumed = true
 				}
 			}
@@ -659,6 +768,31 @@ func (tv *TableView) SetColumnWidth(col int, width int) *TableView {
 	return tv
 }
 
+// GetColumnPosition returns the start and end x positions of a column relative to the table
+// startX is the leftmost position of the column content (including padding)
+// endX is one past the rightmost position of the column content (including padding)
+func (tv *TableView) GetColumnPosition(col int) (startX, endX int) {
+	if col < 0 || col >= len(tv.headers) {
+		return 0, 0
+	}
+
+	// Start after the left border
+	pos := 1
+
+	// Add width of all previous columns (including padding and separators)
+	for i := 0; i < col; i++ {
+		pos += tv.headers[i].Width + 2*tv.cellPadding
+		if i < len(tv.headers)-1 {
+			pos += 1 // Column separator
+		}
+	}
+
+	startX = pos
+	endX = pos + tv.headers[col].Width + 2*tv.cellPadding
+
+	return startX, endX
+}
+
 // GetCellAtPosition returns the data row and column indices for screen coordinates
 // Returns (-1, -1) if the position is not within a data cell
 func (tv *TableView) GetCellAtPosition(screenX, screenY int) (row, col int) {
@@ -685,7 +819,8 @@ func (tv *TableView) GetCellAtPosition(screenX, screenY int) (row, col int) {
 	}
 
 	// Calculate which column was clicked
-	relativeX := screenX - x
+	// Account for viewport scrolling - adjust screen coordinate to table coordinate
+	relativeX := screenX - x + tv.viewport.GetScrollX()
 	if relativeX < 1 {
 		return -1, -1 // Clicked on left border
 	}
@@ -730,7 +865,8 @@ func (tv *TableView) GetColumnSeparatorAtPosition(screenX, screenY int) int {
 		return -1 // Not on header or data area
 	}
 
-	relativeX := screenX - x
+	// Account for viewport scrolling - adjust screen coordinate to table coordinate
+	relativeX := screenX - x + tv.viewport.GetScrollX()
 	if relativeX < 1 {
 		return -1 // Before left border
 	}

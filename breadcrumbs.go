@@ -154,7 +154,7 @@ func (b *BreadcrumbBuffer) RecordNavigation(mode string, description string) {
 }
 
 // RecordDatabase records a database operation
-func (b *BreadcrumbBuffer) RecordDatabase(operation string, table string, query string) {
+func (b *BreadcrumbBuffer) RecordDatabase(operation string) {
 	entry := BreadcrumbEntry{
 		Type:      BreadcrumbDatabase,
 		Message:   fmt.Sprintf("DB: %s", operation),

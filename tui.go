@@ -178,6 +178,10 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor.setupResizeHandler()
 	editor.table.SetSelectionChangeFunc(func(row, col int) {
 		editor.updateStatusWithCellContent()
+		// Auto-scroll viewport to show the selected column
+		editor.ensureColumnVisible(col)
+		// Request immediate redraw to avoid lag
+		go editor.app.Draw()
 	})
 	editor.table.Select(0, 0)
 	editor.pages.AddPage("table", editor.layout, true, true)
@@ -241,6 +245,16 @@ func (e *Editor) setupTable() {
 			if !reachedEnd {
 				e.table.Select(e.table.selectedRow-1, e.table.selectedCol)
 			}
+			go e.app.Draw()
+			return action, nil
+		case tview.MouseScrollLeft:
+			// Scroll table left
+			e.table.viewport.ScrollLeft()
+			go e.app.Draw()
+			return action, nil
+		case tview.MouseScrollRight:
+			// Scroll table right
+			e.table.viewport.ScrollRight()
 			go e.app.Draw()
 			return action, nil
 		}
@@ -949,6 +963,9 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 		}
 		leftOffset += 1 // Cell padding (space after "│ ")
 
+		// Account for viewport horizontal scrolling
+		leftOffset -= e.table.viewport.GetScrollX()
+
 		// Calculate cursor position relative to the cell content area
 		cursorX := leftOffset + toCol - offsetColumn
 		cursorY := tableRow + toRow - offsetRow
@@ -992,6 +1009,9 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int,
 	}
 	leftOffset += 1 // Cell padding (space after "│ ")
 	leftOffset -= 1 // Move overlay one position to the left
+
+	// Account for viewport horizontal scrolling
+	leftOffset -= e.table.viewport.GetScrollX()
 
 	// Calculate vertical position relative to table
 	topOffset := tableRow
@@ -2170,6 +2190,38 @@ func (e *Editor) updateStatusWithCellContent() {
 	}
 
 	e.SetStatusMessage(statusMsg)
+}
+
+// ensureColumnVisible adjusts the viewport to show the selected column and its borders
+func (e *Editor) ensureColumnVisible(col int) {
+	if col < 0 || col >= len(e.table.headers) {
+		return
+	}
+
+	// Get the inner rectangle dimensions of the table
+	_, _, width, _ := e.table.GetInnerRect()
+	if width <= 0 {
+		return
+	}
+
+	// Get the column position
+	startX, endX := e.table.GetColumnPosition(col)
+
+	// Adjust to include column borders/separators
+	// For the first column, include the left table border
+	// For other columns, include the separator before the column
+	if col == 0 {
+		startX = 0 // Include left table border
+	} else {
+		startX-- // Include separator before the column
+	}
+
+	// Always include the separator/border after the column
+	endX++
+
+	// Call the viewport's EnsureColumnVisible method
+	// The column positions are already relative to the table content area
+	e.table.viewport.EnsureColumnVisible(startX, endX, width)
 }
 
 // SQL execution

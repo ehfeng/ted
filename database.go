@@ -1163,7 +1163,7 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 
 	// Record database operation in breadcrumbs
 	if breadcrumbs != nil {
-		breadcrumbs.RecordDatabase("DELETE", rel.name, "")
+		breadcrumbs.RecordDatabase("DELETE")
 	}
 
 	// Build WHERE clause using key columns
@@ -1231,7 +1231,7 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 	// Record database operation in breadcrumbs
 	if breadcrumbs != nil {
-		breadcrumbs.RecordDatabase("INSERT", rel.name, "")
+		breadcrumbs.RecordDatabase("INSERT")
 	}
 
 	// Convert string values to appropriate DB values
@@ -1507,7 +1507,7 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 
 	// Record database operation in breadcrumbs
 	if breadcrumbs != nil {
-		breadcrumbs.RecordDatabase("UPDATE", rel.name, "")
+		breadcrumbs.RecordDatabase("UPDATE")
 	}
 
 	// Convert string to appropriate DB value
