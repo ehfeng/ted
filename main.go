@@ -143,7 +143,6 @@ Examples:
 	ValidArgsFunction: completionFunc,
 }
 
-
 func init() {
 	rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
 	rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
@@ -198,15 +197,28 @@ func runCleanup() {
 }
 
 func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	// Check for both --postgres and --pg flags
 	postgres, err := cmd.Flags().GetBool("postgres")
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
+	pg, err := cmd.Flags().GetBool("pg")
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	postgres = postgres || pg
 
+	// Check for both --mysql and --my flags
 	mysql, err := cmd.Flags().GetBool("mysql")
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
+	my, err := cmd.Flags().GetBool("my")
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	mysql = mysql || my
+
 	// mutually exclusive flags
 	if mysql && postgres {
 		return nil, cobra.ShellCompDirectiveNoFileComp
@@ -215,13 +227,14 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	// mutually exclusive flags
-	if mysql && postgres && database != "" {
+	// database flag cannot be combined with database type flags
+	if database != "" && (mysql || postgres) {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	postgres = database == "postgres"
-	mysql = database == "mysql"
+	postgres = postgres || database == "postgres"
+	mysql = mysql || database == "mysql"
 
+	// Get connection parameters
 	username, err := cmd.Flags().GetString("username")
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
@@ -234,12 +247,37 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 		}
 		username = currentUser.Username
 	}
+
+	hostFlag, err := cmd.Flags().GetString("host")
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	portFlag, err := cmd.Flags().GetString("port")
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	passwordFlag, err := cmd.Flags().GetString("password")
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	if len(args) == 0 {
 		if postgres {
-			// get postgres databases in localhost
-			connStr := fmt.Sprintf("host=localhost user=%s dbname=postgres sslmode=disable", username)
-			if password != "" {
-				connStr = fmt.Sprintf("host=localhost user=%s password=%s dbname=postgres sslmode=disable", username, password)
+			// Get PostgreSQL databases
+			dbHost := hostFlag
+			if dbHost == "" {
+				dbHost = "localhost"
+			}
+			dbPort := portFlag
+			if dbPort == "" {
+				dbPort = "5432"
+			}
+
+			connStr := fmt.Sprintf("host=%s port=%s user=%s dbname=postgres sslmode=disable", dbHost, dbPort, username)
+			if passwordFlag != "" {
+				connStr = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=postgres sslmode=disable", dbHost, dbPort, username, passwordFlag)
 			}
 			db, err := sql.Open("postgres", connStr)
 			if err != nil {
@@ -262,8 +300,23 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			}
 			return results, cobra.ShellCompDirectiveNoFileComp
 		} else if mysql {
-			// get mysql databases in localhost
-			db, err := sql.Open("mysql", "root:password@tcp(localhost:3306)/")
+			// Get MySQL databases
+			dbHost := hostFlag
+			if dbHost == "" {
+				dbHost = "localhost"
+			}
+			dbPort := portFlag
+			if dbPort == "" {
+				dbPort = "3306"
+			}
+
+			// Build MySQL connection string
+			connStr := fmt.Sprintf("%s@tcp(%s:%s)/", username, dbHost, dbPort)
+			if passwordFlag != "" {
+				connStr = fmt.Sprintf("%s:%s@tcp(%s:%s)/", username, passwordFlag, dbHost, dbPort)
+			}
+
+			db, err := sql.Open("mysql", connStr)
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
@@ -310,11 +363,20 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 		}
 	} else if len(args) == 1 {
 		if postgres {
-			// get postgres tables in current database
+			// Get PostgreSQL tables in current database
 			dbname := args[0]
-			connStr := fmt.Sprintf("host=localhost user=%s dbname=%s sslmode=disable", username, dbname)
-			if password != "" {
-				connStr = fmt.Sprintf("host=localhost user=%s password=%s dbname=%s sslmode=disable", username, password, dbname)
+			dbHost := hostFlag
+			if dbHost == "" {
+				dbHost = "localhost"
+			}
+			dbPort := portFlag
+			if dbPort == "" {
+				dbPort = "5432"
+			}
+
+			connStr := fmt.Sprintf("host=%s port=%s user=%s dbname=%s sslmode=disable", dbHost, dbPort, username, dbname)
+			if passwordFlag != "" {
+				connStr = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", dbHost, dbPort, username, passwordFlag, dbname)
 			}
 			db, err := sql.Open("postgres", connStr)
 			if err != nil {
@@ -338,13 +400,29 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			return results, cobra.ShellCompDirectiveNoFileComp
 		}
 		if mysql {
-			// get mysql tables in current database
-			db, err := sql.Open("mysql", fmt.Sprintf("root:%s@tcp(localhost:3306)/", password))
+			// Get MySQL tables in current database
+			dbname := args[0]
+			dbHost := hostFlag
+			if dbHost == "" {
+				dbHost = "localhost"
+			}
+			dbPort := portFlag
+			if dbPort == "" {
+				dbPort = "3306"
+			}
+
+			// Build MySQL connection string
+			connStr := fmt.Sprintf("%s@tcp(%s:%s)/%s", username, dbHost, dbPort, dbname)
+			if passwordFlag != "" {
+				connStr = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", username, passwordFlag, dbHost, dbPort, dbname)
+			}
+
+			db, err := sql.Open("mysql", connStr)
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
-			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = $1", args[0])
+			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = ?", dbname)
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
@@ -383,7 +461,6 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
-
 
 // Sentry DSN (hard-coded)
 const SentryDSN = "https://685bea62d5921e602f7adcad1aae6201@o30558.ingest.us.sentry.io/4510273814855680"
