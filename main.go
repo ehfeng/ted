@@ -143,7 +143,6 @@ Examples:
 	ValidArgsFunction: completionFunc,
 }
 
-
 func init() {
 	rootCmd.Flags().StringVarP(&database, "database", "d", "", "Database name or file")
 	rootCmd.Flags().StringVarP(&host, "host", "h", "", "Database host")
@@ -228,8 +227,8 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	// mutually exclusive flags
-	if mysql && postgres && database != "" {
+	// database flag cannot be combined with database type flags
+	if database != "" && (mysql || postgres) {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	postgres = postgres || database == "postgres"
@@ -462,7 +461,6 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
-
 
 // Sentry DSN (hard-coded)
 const SentryDSN = "https://685bea62d5921e602f7adcad1aae6201@o30558.ingest.us.sentry.io/4510273814855680"
