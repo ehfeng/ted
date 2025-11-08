@@ -1445,8 +1445,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 		case PaletteModeSQL:
 			e.commandPalette.SetPlaceholder("Execute SQL… (Esc to exit)")
 		case PaletteModeGoto:
-			e.commandPalette.SetPlaceholder("Goto next row matching value… (Esc to exit)")
-			e.SetStatusMessage("hi")
+			e.commandPalette.SetPlaceholder("Goto next matching value… (Esc to exit)")
 		case PaletteModeUpdate:
 			// No placeholder in update mode
 			e.commandPalette.SetPlaceholder("")
