@@ -45,6 +45,12 @@ Examples:
 		}
 		// Otherwise require at least 2 args
 		if len(args) < 2 {
+			if len(args) == 0 {
+				return fmt.Errorf("missing database name\n\nTip: \x1b[3mted <TAB>\x1b[0m for available databases\n")
+			}
+			if len(args) == 1 {
+				return fmt.Errorf("missing table name\n\nTip: \x1b[3mted dbname <TAB>\x1b[0m for available tables\n")
+			}
 			return fmt.Errorf("requires at least 2 arg(s), only received %d", len(args))
 		}
 		return nil
