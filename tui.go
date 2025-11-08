@@ -125,22 +125,30 @@ func mouseActionString(action tview.MouseAction) string {
 }
 
 func runEditor(config *Config, dbname, tablename string) error {
+	debugLog("runEditor: starting for table %s\n", tablename)
 	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
 
+	debugLog("runEditor: connecting to database\n")
 	db, dbType, err := config.connect()
 	if err != nil {
+		debugLog("runEditor: connection error: %v\n", err)
 		return err
 	}
 	defer db.Close()
+	debugLog("runEditor: connected to database, type=%v\n", dbType)
 
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
 	tableDataHeight := terminalHeight - 5 // 5 lines for header, status bar, command palette
+	debugLog("runEditor: terminal height=%d, data height=%d\n", terminalHeight, tableDataHeight)
 
+	debugLog("runEditor: loading relation for table %s\n", tablename)
 	relation, err := NewRelation(db, dbType, tablename)
 	if err != nil {
+		debugLog("runEditor: NewRelation error: %v\n", err)
 		return err
 	}
+	debugLog("runEditor: relation loaded, %d attributes\n", len(relation.attributeOrder))
 
 	// force key to be first column(s)
 	columns := make([]Column, 0, len(relation.attributeOrder))
@@ -169,7 +177,10 @@ func runEditor(config *Config, dbname, tablename string) error {
 		records:      make([][]any, tableDataHeight),
 	}
 
+	debugLog("runEditor: editor created with %d columns, records buffer size=%d\n", len(columns), tableDataHeight)
+	debugLog("runEditor: calling loadFromRowId for initial load\n")
 	editor.loadFromRowId(nil, true, 0)
+	debugLog("runEditor: initial load complete\n")
 	editor.setupTable()
 	editor.setupKeyBindings()
 	editor.setupStatusBar()
@@ -1496,6 +1507,7 @@ func (e *Editor) updateEditPreview(newText string) {
 
 // e.table.SetData based on e.records and e.pointer
 func (e *Editor) renderData() {
+	debugLog("renderData: starting, len(e.records)=%d, pointer=%d\n", len(e.records), e.pointer)
 	// When in insert mode, we need to reserve one slot for the insert mode row
 	// that will be rendered by TableView
 	dataCount := len(e.records)
@@ -1506,9 +1518,11 @@ func (e *Editor) renderData() {
 			lastIdx--
 		}
 		dataCount = lastIdx + 1 // Only pass real data, TableView will add insert mode row
+		debugLog("renderData: in insert mode, dataCount=%d\n", dataCount)
 	}
 
 	normalizedRecords := make([][]any, dataCount)
+	debugLog("renderData: normalizing %d records\n", dataCount)
 	for i := 0; i < dataCount; i++ {
 		ptr := (i + e.pointer) % len(e.records)
 		// insert mode row needs "space" at the top to still be able to render
@@ -1520,8 +1534,11 @@ func (e *Editor) renderData() {
 	}
 	if len(e.table.insertRow) > 0 {
 		normalizedRecords = slices.Delete(normalizedRecords, 0, 1)
+		debugLog("renderData: deleted first record for insert mode\n")
 	}
+	debugLog("renderData: calling SetData with %d records\n", len(normalizedRecords))
 	e.table.SetData(normalizedRecords)
+	debugLog("renderData: completed\n")
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
@@ -1651,6 +1668,7 @@ func (e *Editor) unhighlightColumn(col int) {
 
 // id can be nil, in which case load from the top or bottom
 func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
+	debugLog("loadFromRowId: starting, fromTop=%v, focusColumn=%d, id=%v\n", fromTop, focusColumn, id)
 	if e.relation == nil || e.relation.DB == nil {
 		return fmt.Errorf("no database connection available")
 	}
@@ -1671,9 +1689,6 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	var rows *sql.Rows
 	var err error
 	if fromTop {
-		// if id == nil {
-		// 	id = e.records[e.pointer][:len(e.relation.key)]
-		// }
 		// Load from top: use QueryRows with inclusive true, scrollDown true
 		rows, err = e.relation.QueryRows(selectCols, nil, id, true, true)
 		if err != nil {
@@ -1756,7 +1771,6 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	} else {
 		e.table.Select(len(e.records)-1, focusColumn)
 	}
-
 	return nil
 }
 
