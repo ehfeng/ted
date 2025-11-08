@@ -125,30 +125,24 @@ func mouseActionString(action tview.MouseAction) string {
 }
 
 func runEditor(config *Config, dbname, tablename string) error {
-	debugLog("runEditor: starting for table %s\n", tablename)
 	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
 
-	debugLog("runEditor: connecting to database\n")
 	db, dbType, err := config.connect()
 	if err != nil {
-		debugLog("runEditor: connection error: %v\n", err)
+		CaptureError(err)
 		return err
 	}
 	defer db.Close()
-	debugLog("runEditor: connected to database, type=%v\n", dbType)
 
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
 	tableDataHeight := terminalHeight - 5 // 5 lines for header, status bar, command palette
-	debugLog("runEditor: terminal height=%d, data height=%d\n", terminalHeight, tableDataHeight)
 
-	debugLog("runEditor: loading relation for table %s\n", tablename)
 	relation, err := NewRelation(db, dbType, tablename)
 	if err != nil {
-		debugLog("runEditor: NewRelation error: %v\n", err)
+		CaptureError(err)
 		return err
 	}
-	debugLog("runEditor: relation loaded, %d attributes\n", len(relation.attributeOrder))
 
 	// force key to be first column(s)
 	columns := make([]Column, 0, len(relation.attributeOrder))
@@ -177,10 +171,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 		records:      make([][]any, tableDataHeight),
 	}
 
-	debugLog("runEditor: editor created with %d columns, records buffer size=%d\n", len(columns), tableDataHeight)
-	debugLog("runEditor: calling loadFromRowId for initial load\n")
 	editor.loadFromRowId(nil, true, 0)
-	debugLog("runEditor: initial load complete\n")
 	editor.setupTable()
 	editor.setupKeyBindings()
 	editor.setupStatusBar()
@@ -198,6 +189,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	editor.pages.AddPage("table", editor.layout, true, true)
 
 	if err := editor.app.SetRoot(editor.pages, true).Run(); err != nil {
+		CaptureError(err)
 		return err
 	}
 	return nil
@@ -1226,7 +1218,7 @@ func (e *Editor) updateForeignKeyPreview(col int, newText string) {
 		// TODO pass config columns if available
 		preview, err := getForeignRow(e.relation.DB, ref.ForeignTable, foreignKeys, nil)
 		if err != nil {
-			e.SetStatusError(err.Error())
+			e.SetStatusErrorWithSentry(err)
 			return
 		}
 		previewStr := ""
@@ -1507,7 +1499,6 @@ func (e *Editor) updateEditPreview(newText string) {
 
 // e.table.SetData based on e.records and e.pointer
 func (e *Editor) renderData() {
-	debugLog("renderData: starting, len(e.records)=%d, pointer=%d\n", len(e.records), e.pointer)
 	// When in insert mode, we need to reserve one slot for the insert mode row
 	// that will be rendered by TableView
 	dataCount := len(e.records)
@@ -1518,11 +1509,9 @@ func (e *Editor) renderData() {
 			lastIdx--
 		}
 		dataCount = lastIdx + 1 // Only pass real data, TableView will add insert mode row
-		debugLog("renderData: in insert mode, dataCount=%d\n", dataCount)
 	}
 
 	normalizedRecords := make([][]any, dataCount)
-	debugLog("renderData: normalizing %d records\n", dataCount)
 	for i := 0; i < dataCount; i++ {
 		ptr := (i + e.pointer) % len(e.records)
 		// insert mode row needs "space" at the top to still be able to render
@@ -1534,11 +1523,8 @@ func (e *Editor) renderData() {
 	}
 	if len(e.table.insertRow) > 0 {
 		normalizedRecords = slices.Delete(normalizedRecords, 0, 1)
-		debugLog("renderData: deleted first record for insert mode\n")
 	}
-	debugLog("renderData: calling SetData with %d records\n", len(normalizedRecords))
 	e.table.SetData(normalizedRecords)
-	debugLog("renderData: completed\n")
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
@@ -1585,7 +1571,7 @@ func (e *Editor) executeInsert() error {
 	// Execute the insert
 	insertedRow, err := e.relation.InsertDBRecord(e.table.insertRow)
 	if err != nil {
-		e.SetStatusError(err.Error())
+		e.SetStatusErrorWithSentry(err)
 		return err
 	}
 
@@ -1609,7 +1595,7 @@ func (e *Editor) executeInsert() error {
 
 	// Load from the inserted row (from bottom)
 	if err := e.loadFromRowId(keyVals, false, e.table.selectedCol); err != nil {
-		e.SetStatusError(err.Error())
+		e.SetStatusErrorWithSentry(err)
 		return err
 	}
 
@@ -2156,6 +2142,15 @@ func (e *Editor) SetStatusError(message string) {
 	}
 }
 
+// SetStatusErrorWithSentry sets an error status and sends it to Sentry
+func (e *Editor) SetStatusErrorWithSentry(err error) {
+	if e.statusBar != nil {
+		e.statusBar.SetText("[red]ERROR: " + err.Error() + "[white]")
+		e.app.Draw()
+	}
+	CaptureError(err)
+}
+
 func (e *Editor) SetStatusLog(message string) {
 	if e.statusBar != nil {
 		e.statusBar.SetText("[blue]LOG: " + message + "[white]")
@@ -2354,7 +2349,7 @@ func (e *Editor) executeDelete() error {
 	// Execute the delete
 	err := e.relation.DeleteDBRecord(e.records, e.currentRow)
 	if err != nil {
-		e.SetStatusError(err.Error())
+		e.SetStatusErrorWithSentry(err)
 		return err
 	}
 
@@ -2399,7 +2394,7 @@ func (e *Editor) executeGoto(gotoValue string) {
 	// Use FindNextRow to search for the next matching row
 	foundKeys, foundBelow, err := e.relation.FindNextRow(gotoCol, gotoValue, nil, nil, currentKeys)
 	if err != nil {
-		e.SetStatusError(err.Error())
+		e.SetStatusErrorWithSentry(err)
 		return
 	}
 
@@ -2440,13 +2435,13 @@ func (e *Editor) executeGoto(gotoValue string) {
 		if foundBelow {
 			// Found row is after current window, load from bottom (reverse order)
 			if err := e.loadFromRowId(foundKeys, false, col); err != nil {
-				e.SetStatusError(err.Error())
+				e.SetStatusErrorWithSentry(err)
 				return
 			}
 		} else {
 			// Found row wrapped around to before current window, load from top
 			if err := e.loadFromRowId(foundKeys, true, col); err != nil {
-				e.SetStatusError(err.Error())
+				e.SetStatusErrorWithSentry(err)
 				return
 			}
 		}

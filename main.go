@@ -17,16 +17,16 @@ import (
 )
 
 var (
-	database    string
-	host        string
-	port        string
-	username    string
-	password    string
-	command     string
-	usePostgres bool
-	useMySQL    bool
-	telemetry   string
-	completion  string
+	database       string
+	host           string
+	port           string
+	username       string
+	password       string
+	command        string
+	usePostgres    bool
+	useMySQL       bool
+	crashReporting string
+	completion     string
 )
 
 var rootCmd = &cobra.Command{
@@ -39,8 +39,8 @@ Examples:
   ted mydb.sqlite users
   ted -h localhost -p 5432 -U myuser mydb users`,
 	Args: func(cmd *cobra.Command, args []string) error {
-		// Allow 0 args if using --telemetry or --completion flags
-		if telemetry != "" || completion != "" {
+		// Allow 0 args if using --crash-reporting or --completion flags
+		if crashReporting != "" || completion != "" {
 			return nil
 		}
 		// Otherwise require at least 2 args
@@ -56,37 +56,37 @@ Examples:
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		// Handle telemetry flag
-		if telemetry != "" {
+		// Handle crash-reporting flag
+		if crashReporting != "" {
 			settings, err := LoadSettings()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error loading settings: %v\n", err)
 				os.Exit(1)
 			}
 
-			switch telemetry {
+			switch crashReporting {
 			case "enable":
-				settings.TelemetryEnabled = true
+				settings.CrashReportingEnabled = true
 				if err := SaveSettings(settings); err != nil {
 					fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
 					os.Exit(1)
 				}
-				fmt.Println("Telemetry enabled.")
+				fmt.Println("Crash reporting enabled.")
 			case "disable":
-				settings.TelemetryEnabled = false
+				settings.CrashReportingEnabled = false
 				if err := SaveSettings(settings); err != nil {
 					fmt.Fprintf(os.Stderr, "Error saving settings: %v\n", err)
 					os.Exit(1)
 				}
-				fmt.Println("Telemetry disabled.")
+				fmt.Println("Crash reporting disabled.")
 			case "status":
 				status := "disabled"
-				if settings.TelemetryEnabled {
+				if settings.CrashReportingEnabled {
 					status = "enabled"
 				}
-				fmt.Printf("Telemetry status: %s\n", status)
+				fmt.Printf("Crash reporting status: %s\n", status)
 			default:
-				fmt.Fprintf(os.Stderr, "Error: invalid telemetry action '%s'. Use 'enable', 'disable', or 'status'\n", telemetry)
+				fmt.Fprintf(os.Stderr, "Error: invalid crash-reporting action '%s'. Use 'enable', 'disable', or 'status'\n", crashReporting)
 				os.Exit(1)
 			}
 			return
@@ -162,8 +162,12 @@ func init() {
 	rootCmd.Flags().BoolVar(&useMySQL, "mysql", false, "Use MySQL for server connections")
 	rootCmd.Flags().BoolVar(&useMySQL, "my", false, "Use MySQL for server connections")
 
-	// Telemetry and completion flags
-	rootCmd.Flags().StringVar(&telemetry, "telemetry", "", "Manage telemetry settings (enable, disable, status)")
+	// Crash reporting and completion flags
+	rootCmd.Flags().StringVar(&crashReporting, "crash-reporting", "", "Manage crash reporting settings (enable, disable, status)")
+	rootCmd.Flags().StringVar(&crashReporting, "telemetry", "", "Deprecated: use --crash-reporting to manage crash reporting (enable, disable, status)")
+	if legacy := rootCmd.Flags().Lookup("telemetry"); legacy != nil {
+		legacy.Hidden = true
+	}
 	rootCmd.Flags().StringVar(&completion, "completion", "", "Generate shell completions (bash, zsh, fish, powershell)")
 
 	if err := rootCmd.RegisterFlagCompletionFunc("pg", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -482,16 +486,16 @@ func runFirstRunPrompt() error {
 		return nil
 	}
 
-	fmt.Println("Welcome to ted! Let's set up telemetry.")
+	fmt.Println("Welcome to ted! Let's set up crash reporting.")
 	fmt.Println()
 
-	// Ask about telemetry
+	// Ask about crash reporting
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enable telemetry and error reporting? (y/n) [y]: ")
+	fmt.Print("Enable crash reporting? (y/n) [y]: ")
 	response, _ := reader.ReadString('\n')
 	response = strings.TrimSpace(response)
 	if response == "" || strings.ToLower(response) == "y" {
-		settings.TelemetryEnabled = true
+		settings.CrashReportingEnabled = true
 	}
 
 	settings.FirstRunComplete = true
@@ -512,11 +516,12 @@ func main() {
 	// Initialize breadcrumbs buffer
 	InitBreadcrumbs(100)
 
-	// Run first-run prompt if needed (but skip for telemetry/completion flags or help)
+	// Run first-run prompt if needed (but skip for crash-reporting/completion flags or help)
 	skipFirstRun := false
 	for _, arg := range os.Args[1:] {
 		if arg == "help" || arg == "--help" || arg == "-h" ||
-			strings.HasPrefix(arg, "--telemetry") || strings.HasPrefix(arg, "--completion") {
+			strings.HasPrefix(arg, "--crash-reporting") || strings.HasPrefix(arg, "--telemetry") ||
+			strings.HasPrefix(arg, "--completion") {
 			skipFirstRun = true
 			break
 		}
@@ -527,11 +532,11 @@ func main() {
 		}
 	}
 
-	// Load settings for telemetry
+	// Load settings for crash reporting
 	settings, err := LoadSettings()
 	if err != nil {
 		log.Printf("Warning: Could not load settings: %v\n", err)
-	} else if settings.TelemetryEnabled {
+	} else if settings.CrashReportingEnabled {
 		if err := InitSentry(SentryDSN); err != nil {
 			log.Printf("Warning: Could not initialize Sentry: %v\n", err)
 		}

@@ -1706,20 +1706,14 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
 func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
-	debugLog("QueryRows: generating query, sortCol=%v, params=%v, inclusive=%v, scrollDown=%v\n", sortCol, params, inclusive, scrollDown)
 	query, err := selectQuery(rel.DBType, rel.name, columns, sortCol, rel.key, len(params) > 0, inclusive, scrollDown)
 	if err != nil {
-		debugLog("QueryRows: selectQuery error: %v\n", err)
 		return nil, err
 	}
-	debugLog("QueryRows: executing query: %s\n", query)
-	debugLog("QueryRows: calling DB.Query\n")
 	rows, err := rel.DB.Query(query, params...)
 	if err != nil {
-		debugLog("QueryRows: DB.Query error: %v\n", err)
 		return nil, err
 	}
-	debugLog("QueryRows: DB.Query succeeded\n")
 	return rows, nil
 }
 

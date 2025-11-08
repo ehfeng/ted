@@ -9,8 +9,32 @@ import (
 
 // Settings represents the application configuration
 type Settings struct {
-	TelemetryEnabled bool `json:"telemetry_enabled"`
-	FirstRunComplete bool `json:"first_run_complete"`
+	CrashReportingEnabled bool `json:"crash_reporting_enabled"`
+	FirstRunComplete      bool `json:"first_run_complete"`
+}
+
+// UnmarshalJSON ensures backward compatibility with legacy telemetry settings.
+func (s *Settings) UnmarshalJSON(data []byte) error {
+	type Alias Settings
+	aux := &struct {
+		*Alias
+		LegacyTelemetry *bool `json:"telemetry_enabled"`
+	}{
+		Alias: (*Alias)(s),
+	}
+
+	// Reset to zero value before unmarshalling into the alias.
+	*s = Settings{}
+
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	if aux.LegacyTelemetry != nil && !s.CrashReportingEnabled {
+		s.CrashReportingEnabled = *aux.LegacyTelemetry
+	}
+
+	return nil
 }
 
 // getConfigDir returns the configuration directory following XDG Base Directory spec
@@ -70,8 +94,8 @@ func LoadSettings() (*Settings, error) {
 		}
 		// File doesn't exist, return default settings (first run)
 		return &Settings{
-			TelemetryEnabled: false,
-			FirstRunComplete: false,
+			CrashReportingEnabled: false,
+			FirstRunComplete:      false,
 		}, nil
 	}
 
