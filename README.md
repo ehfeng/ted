@@ -7,7 +7,6 @@ ted displays database tables as markdown table and provides spreadsheet-like edi
 ```sh
 ted [dbname] [tbl]
 ted test users
-
 ted --pg test users
 ```
 
@@ -20,7 +19,7 @@ brew tap ehfeng/ted
 brew install ted
 ```
 
-## Common flags
+## Common cli flags
 
 ### Connection info
 
@@ -46,9 +45,9 @@ brew install ted
 1. end
 1. page up
 1. page down
-1. ctrl+home/end
+1. ctrl+home/end*
 
-cmd+up/down are captured by Ghostty, micro also uses these shortcuts.
+*cmd+up/down are captured by Ghostty
 
 ### Data
 
@@ -65,80 +64,13 @@ cmd+up/down are captured by Ghostty, micro also uses these shortcuts.
 
 ## Mouse
 
-Lets you interact with elements, selecting cells, resizing or unhiding columns. Selecting a range of cells lets you copy a csv to clipboard.
-
-1. click: select cell, change column sort, adjust col widths, show hidden cols
-1. scroll
-
-## Table UI
-
-Get terminal size to size column widths and how many rows to display.
-
-Focusing a cell always brings its full width into the view.
-
-Each column has a default width of 8 characters + 2 spaces + pipe = 11 characters. 7 columns + 1 pipe = 78 characters. Column minimum width is 3 characters. `…` indicates overflow. Additional columns flow off screen, just like spreadsheets. Focusing a cell minimally scrolls to fit the cell into the editor window.
-
-When editing values with overflow, it overlays _on top_ of the table with a light background. Overflow overlay flows to the right and below the cell. When value overflows the editor window, it word wraps. The editing overlay _never_ exceeds the terminal window size.
-
-For most data types, an empty cell means null. Only for nullable text does it have another valid meaning. If that's the case, then empty should mean `null`. Using `''` to input an empty string? What if you actually want to input the string `'` or `''`?
-
-Default null sentinel is `\N` (configurable). It's grey for easy viewing in single width columns.
-
-JSON is treated as text. JSONB is pretty printed.
-
-## Status Bar
-
-Status bar in the bottom row where contextual information can be displayed, like warnings, errors, contextual information.
-
-In view mode, show column data type, constraints. In editing mode, input-specific context, including whether input is "valid"
-
-- run check constraints, test against unique index
-- valid int, bool, float, json
-- enums
-- date time format
-- references: foreign row preview
-
-When highlighting or editing foreign key references, the status bar shows a logfmt preview. Say we highlight `accounts.owner`, which references the users table: `users: id=1 name='Eric' plan='free'…`. Multi-column references only work if both columns are shown. Show info message (other column hidden) otherwise.
-
-If a table lacks a key (no primary, unique index with not null columns or nulls not distinct), the status bar shows read-only and reason.
-
-If an update fails, status bar shows error message.
-
-## Command palette
-
-At the bottom, command input. Command palette has different modes: sql, goto, etc.
-
-## Data flow
-
-Use streaming to fetch results and split pipe results to display and a temporary file.
-
-The "view" of the table is always just a cache.
-
-Updates are run with `RETURNING *` clause, attempt to update just the row and *not* refresh the entire table.
-
-When updating cells, identify a table's primary keys or unique constraints (even if they are multicolumn). If none exists, warn that updates are "best effort" and are made by `WHERE`'ing matching values. If the number of rows updated >1, message in the status bar.
-
-## Nice to have's
-
-Undo/redo with `cmd+z` and `cmd+shift+z` shortcuts.
-
-If primary key does not exist, use sqlite/duckdb `rowid` or postgres `ctid`. This approach is vulnerable to non-exclusive access (updates) or VACUUMs. Also requires modifying update `RETURNING *, rowid|ctid`. It does not work for mysql or clickhouse. Throw a warning in the status bar if using this approach.
-
-Tabs, split views
+You can select cells, resize columns, and scroll with the mouse.
 
 ## Non-goals
 
 Transactions. This is an editor, not a sql editor or a psql replacement.
 
-Column filtering or sorting. You're re-implementing SQL at this point.
-
-Support for views. Incredibly difficult to trace a view column to its source table. Editing via views is not useful. `WHERE`, `ORDER BY` and `LIMIT` are supported as flags, which should cover most cases.
-
-DDL. This is for editing data, not schemas. DDL is best done with SQL.
-
-Real-time database updates. This is not possible without modifying the database (adding triggers). You also do not want to lock the table from external writes: this should not be necessary in local development and is never a good idea in production.
-
-Pasting cells (separate from pasting values). Unclear how you'd map things, especially if focus is not on the first column.
+Column filtering or sorting. That's better done in [SQL views](https://github.com/ehfeng/ted/issues/9).
 
 ## Development
 
@@ -163,5 +95,3 @@ ted __complete "pg" "t" 2>&1
 git tag -a v0.1.2 -m "Release notes"
 git push origin v0.1.2
 ```
-
-Go to `ehfeng/homebrew-ted`, run `.update-checksums` and push.
