@@ -257,9 +257,11 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 		tp.searchText = text
 	})
 
-	// Handle Enter key: select current item from dropdown
+	// Handle keyboard navigation and selection
 	inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		fmt.Fprintf(os.Stderr, "[DEBUG] Input field capture: %v\n", event.Key())
+		filtered, _ := tp.calculateFiltered(tp.searchText)
+
 		switch event.Key() {
 		case tcell.KeyEscape:
 			// Close the fuzzy selector
@@ -268,15 +270,23 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 			}
 			return nil // Consume the event
 		case tcell.KeyDown, tcell.KeyTab:
-			// Move focus to dropdown list
-			filtered, _ := tp.calculateFiltered(tp.searchText)
+			// Move focus to dropdown list (select first item)
 			if tp.dropdownList != nil && len(filtered) > 0 {
-				// Focus will move to dropdownList (it's next in the flex)
-				return event
+				tp.selectedIndex++
+				tp.dropdownList.SetCurrentItem(tp.selectedIndex)
+				return tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)
 			}
+			return nil
+		case tcell.KeyUp, tcell.KeyBacktab:
+			// Move focus to dropdown list (select last item)
+			if tp.dropdownList != nil && len(filtered) > 0 {
+				tp.selectedIndex--
+				tp.dropdownList.SetCurrentItem(tp.selectedIndex)
+				return tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)
+			}
+			return nil
 		case tcell.KeyEnter:
 			// Select the currently highlighted item in dropdown
-			filtered, _ := tp.calculateFiltered(tp.searchText)
 			if tp.dropdownList != nil && len(filtered) > 0 {
 				if idx := tp.dropdownList.GetCurrentItem(); idx >= 0 && idx < len(filtered) {
 					if tp.onSelect != nil {
@@ -328,11 +338,32 @@ func (tp *FuzzySelector) createDropdownListWithData(filtered []string, matchPosi
 		tp.dropdownList.SetCurrentItem(tp.selectedIndex)
 	}
 
-	// Handle Escape key in dropdown to return focus to input field
+	// Handle navigation in dropdown
 	tp.dropdownList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape {
-			// Focus will return to input field
+		currentItem := tp.dropdownList.GetCurrentItem()
+
+		switch event.Key() {
+		case tcell.KeyEscape:
+			// Return focus to input field
+			return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+		case tcell.KeyUp:
+			// If at first item, move focus back to input field
+			if currentItem == 0 {
+				return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+			}
+			// Otherwise, let the list handle up navigation
 			return event
+		case tcell.KeyBacktab:
+			// Shift+Tab always returns to input field
+			return event
+		case tcell.KeyEnter:
+			// Select the current item
+			if currentItem >= 0 && currentItem < len(filtered) {
+				if tp.onSelect != nil {
+					tp.onSelect(filtered[currentItem])
+				}
+			}
+			return nil // Consume the event
 		}
 		return event
 	})
