@@ -683,7 +683,7 @@ func (e *Editor) setupKeyBindings() {
 				}
 				// Ctrl+End: jump to last row
 				e.loadFromRowId(nil, false, col, false)
-				e.table.Select(e.lastRowIdx(), col)
+				e.table.Select(e.lastRowIdx()-1, col) // -1 because the last row is the bottom border
 				return nil
 			}
 			e.table.Select(row, len(e.columns)-1)
