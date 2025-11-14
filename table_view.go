@@ -121,7 +121,7 @@ type TableView struct {
 
 	// Table data
 	headers   []HeaderColumn
-	data      [][]any
+	data      []Row
 	tableName string // Name of the current table to display in header
 
 	// Display configuration
@@ -240,11 +240,34 @@ func (tv *TableView) SetTableName(name string) *TableView {
 
 // SetData sets the table data
 func (tv *TableView) SetData(data [][]any) *TableView {
-	tv.data = make([][]any, len(data))
+	tv.data = make([]Row, len(data))
 	for i, row := range data {
-		tv.data[i] = make([]any, len(row))
-		copy(tv.data[i], row)
+		tv.data[i].data = make([]any, len(row))
+		copy(tv.data[i].data, row)
+		tv.data[i].state = RowStateNormal
 	}
+	return tv
+}
+
+func (tv *TableView) SetDataWithStates(data [][]any, states []RowState) *TableView {
+	tv.data = make([]Row, len(data))
+	for i, row := range data {
+		tv.data[i].data = make([]any, len(row))
+		copy(tv.data[i].data, row)
+		if i < len(states) {
+			tv.data[i].state = states[i]
+		} else {
+			tv.data[i].state = RowStateNormal
+		}
+	}
+	return tv
+}
+
+// SetDataReferences sets table data using references instead of deep copies.
+// This is more efficient when the data is already owned by the caller and won't be modified.
+// The data slices are stored as references to avoid unnecessary allocations.
+func (tv *TableView) SetDataReferences(data []Row) *TableView {
+	tv.data = data
 	return tv
 }
 
@@ -331,16 +354,16 @@ func (tv *TableView) SetTableNameClickFunc(handler func()) *TableView {
 
 // GetCell returns the value at the specified data coordinates
 func (tv *TableView) GetCell(row, col int) any {
-	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
-		return tv.data[row][col]
+	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row].data) {
+		return tv.data[row].data[col]
 	}
 	return nil
 }
 
 // SetCell sets the value at the specified data coordinates
 func (tv *TableView) SetCell(row, col int, value any) *TableView {
-	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
-		tv.data[row][col] = value
+	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row].data) {
+		tv.data[row].data[col] = value
 	}
 	return tv
 }
@@ -361,7 +384,7 @@ func (tv *TableView) UpdateRowsHeightFromRect(height int) {
 
 	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
 	drawBottomBorder := tv.bottom
-	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1]) == 0 {
+	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1].data) == 0 {
 		drawBottomBorder = true
 	}
 	if len(tv.insertRow) > 0 {
@@ -425,7 +448,7 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 
 	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
 	drawBottomBorder := tv.bottom
-	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1]) == 0 {
+	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1].data) == 0 {
 		drawBottomBorder = true
 	}
 	if len(tv.insertRow) > 0 {
@@ -455,7 +478,7 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 
 	// Draw regular data rows
 	for i := 0; i < len(tv.data) && dataRowsDrawn < maxRegularDataRows && currentY < y+height; i++ {
-		if len(tv.data[i]) == 0 {
+		if tv.data[i].data == nil || len(tv.data[i].data) == 0 {
 			break // Stop drawing when we hit a nil slice
 		}
 		tv.drawDataRow(x, currentY, tableWidth, i)
@@ -615,6 +638,12 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 	// Check if this is the insert mode row (when newRecordRow is set and rowIdx is beyond data)
 	isNewRecordRow := len(tv.insertRow) > 0 && rowIdx == len(tv.data)
 
+	// Get the row state for background color
+	var rowState RowState
+	if rowIdx < len(tv.data) {
+		rowState = tv.data[rowIdx].state
+	}
+
 	// Left border
 	borderStyle := tcell.StyleDefault.Foreground(tv.borderColor)
 	isSelectedRowInDeleteMode := tv.selectable && tv.deleteMode && rowIdx == tv.selectedRow
@@ -622,16 +651,38 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 		borderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
 	} else if isSelectedRowInDeleteMode {
 		borderStyle = tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite)
+	} else if rowState == RowStateNew {
+		borderStyle = borderStyle.Background(tcell.ColorDarkGreen)
+	} else if rowState == RowStateDeleted {
+		borderStyle = borderStyle.Background(tcell.ColorDarkRed)
 	}
 	tv.viewport.SetContent(x, y, '│', nil, borderStyle)
 	pos := x + 1
 
 	// Data cells
 	for i, header := range tv.headers {
+		// Check if this specific cell is modified
+		isCellModified := false
+		if rowIdx < len(tv.data) && tv.data[rowIdx].modified != nil {
+			for _, modIdx := range tv.data[rowIdx].modified {
+				if modIdx == i {
+					isCellModified = true
+					break
+				}
+			}
+		}
+
 		// Base style - use cyan background for insert mode row
 		baseCellStyle := tcell.StyleDefault
 		if isNewRecordRow {
 			baseCellStyle = baseCellStyle.Background(tcell.ColorRoyalBlue)
+		} else if rowState == RowStateNew {
+			baseCellStyle = baseCellStyle.Background(tcell.ColorDarkGreen)
+		} else if rowState == RowStateDeleted {
+			baseCellStyle = baseCellStyle.Background(tcell.ColorDarkRed)
+		} else if isCellModified {
+			// Modified cell - use dark green background
+			baseCellStyle = baseCellStyle.Background(tcell.ColorDarkGreen)
 		}
 
 		// Apply selection highlight on top of base style
@@ -672,8 +723,8 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 
 		} else {
 			// Normal rendering
-			if rowIdx < len(tv.data) && i < len(tv.data[rowIdx]) {
-				cellText, cellStyle := formatCellValue(tv.data[rowIdx][i], cellStyle)
+			if rowIdx < len(tv.data) && i < len(tv.data[rowIdx].data) {
+				cellText, cellStyle := formatCellValue(tv.data[rowIdx].data[i], cellStyle)
 				cellText = padCellToWidth(cellText, header.Width)
 				for j, ch := range cellText {
 					tv.viewport.SetContent(pos+j, y, ch, nil, cellStyle)
@@ -695,6 +746,10 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 				sepStyle = baseCellStyle
 			} else if isSelectedRowInDeleteMode {
 				sepStyle = cellStyle
+			} else if rowState == RowStateNew {
+				sepStyle = sepStyle.Background(tcell.ColorDarkGreen)
+			} else if rowState == RowStateDeleted {
+				sepStyle = sepStyle.Background(tcell.ColorDarkRed)
 			}
 			// Use thicker separator after last key column
 			separator := '│'
@@ -712,6 +767,10 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 		rightBorderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
 	} else if isSelectedRowInDeleteMode {
 		rightBorderStyle = tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite)
+	} else if rowState == RowStateNew {
+		rightBorderStyle = rightBorderStyle.Background(tcell.ColorDarkGreen)
+	} else if rowState == RowStateDeleted {
+		rightBorderStyle = rightBorderStyle.Background(tcell.ColorDarkRed)
 	}
 	tv.viewport.SetContent(pos, y, '│', nil, rightBorderStyle)
 }
@@ -885,8 +944,8 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 
 // UpdateCell updates a cell value and refreshes the display
 func (tv *TableView) UpdateCell(row, col int, value any) *TableView {
-	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
-		tv.data[row][col] = value
+	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row].data) {
+		tv.data[row].data[col] = value
 	}
 	return tv
 }
@@ -964,7 +1023,7 @@ func (tv *TableView) GetCellAtPosition(screenX, screenY int) (row, col int) {
 	}
 
 	dataRow := relativeY - headerOffset
-	if dataRow < 0 || dataRow >= len(tv.data) || tv.data[dataRow] == nil {
+	if dataRow < 0 || dataRow >= len(tv.data) || tv.data[dataRow].data == nil {
 		return -1, -1 // Beyond available data
 	}
 

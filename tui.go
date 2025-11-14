@@ -28,6 +28,20 @@ type Column struct {
 	Width int
 }
 
+type RowState int
+
+const (
+	RowStateNormal RowState = iota
+	RowStateNew
+	RowStateDeleted
+)
+
+type Row struct {
+	state    RowState
+	data     []any
+	modified []int // indices of columns that were modified in the last refresh
+}
+
 // columns are display, relation.attributes stores the database attributes
 // lookup key is unique: it's always selected
 // if a multicolumn reference is selected, all columns in the reference are selected
@@ -60,7 +74,7 @@ type Editor struct {
 	nextQuery *sql.Rows // nextRows
 	prevQuery *sql.Rows // prevRows
 	pointer   int       // pointer to the current record
-	records   [][]any   // columns are keyed off e.columns
+	records   []Row     // columns are keyed off e.columns
 
 	// timer for auto-closing rows
 	rowsTimer      *time.Timer
@@ -190,7 +204,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 		tablePicker: nil, // Will be initialized after editor is created
 		paletteMode: PaletteModeDefault,
 		pointer:     0,
-		records:     make([][]any, tableDataHeight),
+		records:     make([]Row, tableDataHeight),
 	}
 
 	// Create selector with callback now that editor exists
@@ -308,12 +322,12 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 		// Only resize if the height has changed significantly
 		if newDataHeight != editor.table.rowsHeight && newDataHeight > 0 {
-			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1] == nil {
+			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1].data == nil {
 				// the table is smaller than the new data height, no need to fetch more rows
 				return
 			}
 			// Create new records buffer with the new size
-			newRecords := make([][]any, newDataHeight)
+			newRecords := make([]Row, newDataHeight)
 
 			// Copy existing data to the new buffer
 			copyCount := min(len(editor.records), newDataHeight)
@@ -323,7 +337,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 			}
 
 			// If the new buffer is larger, fetch more rows to fill it
-			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1] != nil {
+			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1].data != nil {
 				// We need to fetch more rows
 				oldLen := len(editor.records)
 				editor.records = newRecords
@@ -605,7 +619,7 @@ func (e *Editor) setupKeyBindings() {
 
 				// Find the last non-nil record
 				lastIdx := len(e.records) - 1
-				for lastIdx >= 0 && e.records[lastIdx] == nil {
+				for lastIdx >= 0 && e.records[lastIdx].data == nil {
 					lastIdx--
 				}
 
@@ -781,7 +795,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			if mod&tcell.ModMeta != 0 {
-				if len(e.records[len(e.records)-1]) == 0 {
+				if len(e.records[len(e.records)-1].data) == 0 {
 					e.table.Select(len(e.records)-2, col)
 				} else {
 					e.table.Select(len(e.records)-1, col)
@@ -791,7 +805,7 @@ func (e *Editor) setupKeyBindings() {
 				if row == len(e.records)-1 {
 					e.nextRows(1)
 				} else {
-					if len(e.records[row+1]) == 0 {
+					if len(e.records[row+1].data) == 0 {
 						e.table.Select(row+2, col)
 					} else {
 						e.table.Select(row+1, col)
@@ -1254,7 +1268,7 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 			if attrIdx == col {
 				foreignKeys[foreignCol] = newText
 			} else {
-				foreignKeys[foreignCol] = e.records[row][attrIdx]
+				foreignKeys[foreignCol] = e.records[row].data[attrIdx]
 			}
 		}
 		// TODO pass config columns if available
@@ -1549,7 +1563,12 @@ func (e *Editor) updateEditPreview(newText string) {
 	} else {
 		// Show UPDATE preview and set palette mode to Update
 		e.setPaletteMode(PaletteModeUpdate, false)
-		preview = e.relation.BuildUpdatePreview(e.records, row, colName, newText)
+		// Convert records to [][]any for BuildUpdatePreview
+		recordsData := make([][]any, len(e.records))
+		for i := range e.records {
+			recordsData[i] = e.records[i].data
+		}
+		preview = e.relation.BuildUpdatePreview(recordsData, row, colName, newText)
 	}
 	e.commandPalette.SetPlaceholderStyle(e.commandPalette.GetPlaceholderStyle())
 	e.commandPalette.SetPlaceholder(preview)
@@ -1568,13 +1587,13 @@ func (e *Editor) renderData() {
 	if len(e.table.insertRow) > 0 {
 		// Find the last non-nil record
 		lastIdx := len(e.records) - 1
-		for lastIdx >= 0 && e.records[lastIdx] == nil {
+		for lastIdx >= 0 && e.records[lastIdx].data == nil {
 			lastIdx--
 		}
 		dataCount = lastIdx + 1 // Only pass real data, TableView will add insert mode row
 	}
 
-	normalizedRecords := make([][]any, dataCount)
+	normalizedRows := make([]Row, dataCount)
 	for i := 0; i < dataCount; i++ {
 		ptr := (i + e.pointer) % len(e.records)
 		// insert mode row needs "space" at the top to still be able to render
@@ -1582,12 +1601,12 @@ func (e *Editor) renderData() {
 		if len(e.table.insertRow) > 0 && i == 0 {
 			ptr++
 		}
-		normalizedRecords[i] = e.records[ptr]
+		normalizedRows[i] = e.records[ptr] // Reference to Row, not a copy
 	}
 	if len(e.table.insertRow) > 0 {
-		normalizedRecords = slices.Delete(normalizedRecords, 0, 1)
+		normalizedRows = slices.Delete(normalizedRows, 0, 1)
 	}
-	e.table.SetData(normalizedRecords)
+	e.table.SetDataReferences(normalizedRows)
 }
 
 func (e *Editor) updateCell(row, col int, newValue string) {
@@ -1606,20 +1625,25 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 	}
 
 	// Basic bounds check against current data
-	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.records[row]) {
+	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.records[row].data) {
 		e.exitEditMode()
 		return
 	}
 
 	// Delegate DB work to database.go
-	updated, err := e.relation.UpdateDBValue(e.records, row, e.columns[col].Name, newValue)
+	// Convert records to [][]any for UpdateDBValue
+	recordsData := make([][]any, len(e.records))
+	for i := range e.records {
+		recordsData[i] = e.records[i].data
+	}
+	updated, err := e.relation.UpdateDBValue(recordsData, row, e.columns[col].Name, newValue)
 	if err != nil {
 		e.exitEditMode()
 		return
 	}
 	// Update in-memory data and refresh table
 	ptr := (row + e.pointer) % len(e.records)
-	e.records[ptr] = updated
+	e.records[ptr] = Row{state: RowStateNormal, data: updated}
 
 	e.renderData()
 	e.exitEditMode()
@@ -1663,12 +1687,49 @@ func (e *Editor) executeInsert() error {
 	}
 
 	// Select the first row (which should be the newly inserted one)
-	if e.records[e.lastRowIdx()] == nil {
+	if e.records[e.lastRowIdx()].data == nil {
 		e.table.Select(len(e.records)-2, e.table.selectedCol)
 	} else {
 		e.table.Select(len(e.records)-1, e.table.selectedCol)
 	}
 	return nil
+}
+
+// extractKeys returns a copy of the key values from a row
+func (e *Editor) extractKeys(row []any) []any {
+	if row == nil || len(row) < len(e.relation.key) {
+		return nil
+	}
+	keys := make([]any, len(e.relation.key))
+	copy(keys, row[0:len(e.relation.key)])
+	return keys
+}
+
+// keysEqual compares two key slices for equality
+func keysEqual(k1, k2 []any) bool {
+	if len(k1) != len(k2) {
+		return false
+	}
+	for i := range k1 {
+		if k1[i] != k2[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// diffRows compares two rows and returns the indices of columns that differ
+func diffRows(oldRow, newRow []any) []int {
+	if len(oldRow) != len(newRow) {
+		return nil
+	}
+	var modified []int
+	for i := range oldRow {
+		if oldRow[i] != newRow[i] {
+			modified = append(modified, i)
+		}
+	}
+	return modified
 }
 
 // id can be nil, in which case load from the top or bottom
@@ -1706,7 +1767,37 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		e.pointer = 0
 		rowsLoaded := 0
 		scanTargets := make([]any, colCount)
-		for i := 0; i < len(e.records) && rows.Next(); i++ {
+
+		// Build a map of old keys to check if new rows existed before
+		// Also store old row data for diffing
+		oldKeyMap := make(map[string]int) // key string -> index
+		oldKeyData := make(map[string][]any) // key string -> row data
+		oldKeyStrings := make([]string, len(e.records))
+		for i := 0; i < len(e.records); i++ {
+			if e.records[i].data == nil {
+				break
+			}
+			// Clear modified state from previous refresh
+			e.records[i].modified = nil
+			// Skip already deleted rows
+			if e.records[i].state == RowStateDeleted {
+				continue
+			}
+			oldKeys := e.extractKeys(e.records[i].data)
+			if oldKeys != nil {
+				keyStr := fmt.Sprintf("%v", oldKeys)
+				oldKeyStrings[i] = keyStr
+				oldKeyMap[keyStr] = i
+				oldKeyData[keyStr] = e.records[i].data
+			}
+		}
+
+		// Track which old keys are still present in new data
+		matchedOldKeys := make(map[string]bool)
+
+		// Scan all new rows into temporary storage
+		var newRows []Row
+		for rows.Next() {
 			row := make([]any, colCount)
 			for j := 0; j < colCount; j++ {
 				scanTargets[j] = &row[j]
@@ -1714,13 +1805,75 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 			if err := rows.Scan(scanTargets...); err != nil {
 				return err
 			}
-			e.records[i] = row
+
+			// Determine state by checking if key existed in old buffer
+			newKeys := e.extractKeys(row)
+			keyStr := fmt.Sprintf("%v", newKeys)
+			newState := RowStateNormal
+			var modified []int
+
+			if _, existedBefore := oldKeyMap[keyStr]; existedBefore {
+				// This key existed before - mark it as matched
+				matchedOldKeys[keyStr] = true
+				// Diff old and new rows to find modified columns
+				if oldData := oldKeyData[keyStr]; oldData != nil {
+					modified = diffRows(oldData, row)
+				}
+			} else if len(oldKeyMap) > 0 {
+				// This key didn't exist in old buffer (and there were old rows) - it's new
+				newState = RowStateNew
+			}
+			// else: first load (no old rows), keep as Normal
+
+			newRows = append(newRows, Row{state: newState, data: row, modified: modified})
+		}
+
+		// Build final buffer: merge new rows with deleted old rows
+		finalRecords := make([]Row, 0, len(e.records))
+		newRowIdx := 0
+
+		for i := 0; i < len(e.records) && i < len(oldKeyStrings); i++ {
+			if e.records[i].data == nil {
+				break
+			}
+
+			oldKeyStr := oldKeyStrings[i]
+			if oldKeyStr == "" || e.records[i].state == RowStateDeleted {
+				// Skip empty or already deleted rows
+				continue
+			}
+
+			if !matchedOldKeys[oldKeyStr] {
+				// This old row doesn't exist in new data - mark as deleted
+				e.records[i].state = RowStateDeleted
+				finalRecords = append(finalRecords, e.records[i])
+			} else if newRowIdx < len(newRows) {
+				// Insert corresponding new row
+				finalRecords = append(finalRecords, newRows[newRowIdx])
+				newRowIdx++
+			}
+		}
+
+		// Append any remaining new rows
+		for newRowIdx < len(newRows) {
+			finalRecords = append(finalRecords, newRows[newRowIdx])
+			newRowIdx++
+		}
+
+		// Copy final records back to e.records
+		for i := 0; i < len(finalRecords) && i < len(e.records); i++ {
+			e.records[i] = finalRecords[i]
 			rowsLoaded++
+		}
+
+		// If we have more final records than buffer size, truncate
+		if len(finalRecords) > len(e.records) {
+			rowsLoaded = len(e.records)
 		}
 
 		// Mark end with nil if we didn't fill the buffer
 		if rowsLoaded < len(e.records) {
-			e.records[rowsLoaded] = nil
+			e.records[rowsLoaded] = Row{}
 			e.records = e.records[:rowsLoaded+1]
 		}
 	} else {
@@ -1736,9 +1889,36 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		e.pointer = 0
 		scanTargets := make([]any, colCount)
 		rowsLoaded := 0
-		var tempRows [][]any
 
-		// First collect all rows
+		// Build a map of old keys to check if new rows existed before
+		// Also store old row data for diffing
+		oldKeyMap := make(map[string]int) // key string -> index
+		oldKeyData := make(map[string][]any) // key string -> row data
+		oldKeyStrings := make([]string, len(e.records))
+		for i := 0; i < len(e.records); i++ {
+			if e.records[i].data == nil {
+				break
+			}
+			// Clear modified state from previous refresh
+			e.records[i].modified = nil
+			// Skip already deleted rows
+			if e.records[i].state == RowStateDeleted {
+				continue
+			}
+			oldKeys := e.extractKeys(e.records[i].data)
+			if oldKeys != nil {
+				keyStr := fmt.Sprintf("%v", oldKeys)
+				oldKeyStrings[i] = keyStr
+				oldKeyMap[keyStr] = i
+				oldKeyData[keyStr] = e.records[i].data
+			}
+		}
+
+		// Track which old keys are still present in new data
+		matchedOldKeys := make(map[string]bool)
+
+		// Scan all new rows into temporary storage
+		var newRows []Row
 		for rows.Next() {
 			row := make([]any, colCount)
 			for j := 0; j < colCount; j++ {
@@ -1747,25 +1927,88 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 			if err := rows.Scan(scanTargets...); err != nil {
 				return err
 			}
-			tempRows = append(tempRows, row)
-			rowsLoaded++
-			if rowsLoaded >= len(e.records)-1 {
+
+			// Determine state by checking if key existed in old buffer
+			newKeys := e.extractKeys(row)
+			keyStr := fmt.Sprintf("%v", newKeys)
+			newState := RowStateNormal
+			var modified []int
+
+			if _, existedBefore := oldKeyMap[keyStr]; existedBefore {
+				// This key existed before - mark it as matched
+				matchedOldKeys[keyStr] = true
+				// Diff old and new rows to find modified columns
+				if oldData := oldKeyData[keyStr]; oldData != nil {
+					modified = diffRows(oldData, row)
+				}
+			} else if len(oldKeyMap) > 0 {
+				// This key didn't exist in old buffer (and there were old rows) - it's new
+				newState = RowStateNew
+			}
+			// else: first load (no old rows), keep as Normal
+
+			newRows = append(newRows, Row{state: newState, data: row, modified: modified})
+			if len(newRows) >= len(e.records)-1 {
 				break
 			}
 		}
 
-		// Reverse the rows and place them at the end of the buffer
-		for i := len(tempRows) - 1; i >= 0; i-- {
-			idx := len(tempRows) - 1 - i
-			e.records[idx] = tempRows[i]
+		// Build final buffer: merge new rows with deleted old rows
+		finalRecords := make([]Row, 0, len(e.records))
+		newRowIdx := 0
+
+		for i := 0; i < len(e.records) && i < len(oldKeyStrings); i++ {
+			if e.records[i].data == nil {
+				break
+			}
+
+			oldKeyStr := oldKeyStrings[i]
+			if oldKeyStr == "" || e.records[i].state == RowStateDeleted {
+				// Skip empty or already deleted rows
+				continue
+			}
+
+			if !matchedOldKeys[oldKeyStr] {
+				// This old row doesn't exist in new data - mark as deleted
+				e.records[i].state = RowStateDeleted
+				finalRecords = append(finalRecords, e.records[i])
+			} else if newRowIdx < len(newRows) {
+				// Insert corresponding new row
+				finalRecords = append(finalRecords, newRows[newRowIdx])
+				newRowIdx++
+			}
 		}
-		e.records[len(e.records)-1] = nil
+
+		// Append any remaining new rows
+		for newRowIdx < len(newRows) {
+			finalRecords = append(finalRecords, newRows[newRowIdx])
+			newRowIdx++
+		}
+
+		// Reverse the final records for fromBottom
+		for i := 0; i < len(finalRecords)/2; i++ {
+			j := len(finalRecords) - 1 - i
+			finalRecords[i], finalRecords[j] = finalRecords[j], finalRecords[i]
+		}
+
+		// Copy final records back to e.records
+		for i := 0; i < len(finalRecords) && i < len(e.records); i++ {
+			e.records[i] = finalRecords[i]
+			rowsLoaded++
+		}
+
+		// If we have more final records than buffer size, truncate
+		if len(finalRecords) > len(e.records) {
+			rowsLoaded = len(e.records)
+		}
+
+		e.records[len(e.records)-1] = Row{}
 
 		// Mark end with nil if we didn't fill the buffer
 		if rowsLoaded < len(e.records) {
-			e.records[rowsLoaded] = nil
+			e.records[rowsLoaded] = Row{}
 		}
-		e.records[len(e.records)-1] = nil
+		e.records[len(e.records)-1] = Row{}
 		e.pointer = 0
 	}
 	e.renderData()
@@ -1784,7 +2027,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 // returns bool, err. bool if the edge of table is reached
 func (e *Editor) nextRows(i int) (bool, error) {
 	// Check if we're already at the end (last record is nil)
-	if len(e.records) == 0 || e.records[e.lastRowIdx()] == nil {
+	if len(e.records) == 0 || e.records[e.lastRowIdx()].data == nil {
 		return false, nil // No-op, already at end of data
 	}
 
@@ -1794,11 +2037,11 @@ func (e *Editor) nextRows(i int) (bool, error) {
 
 		params := make([]any, len(e.relation.key))
 		lastRecordIdx := (e.pointer - 1 + len(e.records)) % len(e.records)
-		if e.records[lastRecordIdx] == nil {
+		if e.records[lastRecordIdx].data == nil {
 			return false, nil // Can't query from nil record
 		}
 		for i := range e.relation.key {
-			params[i] = e.records[lastRecordIdx][i]
+			params[i] = e.records[lastRecordIdx].data[i]
 		}
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {
@@ -1836,14 +2079,14 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if err := e.nextQuery.Scan(scanTargets...); err != nil {
 			return false, err
 		}
-		e.records[(e.pointer+rowsFetched)%len(e.records)] = row
+		e.records[(e.pointer+rowsFetched)%len(e.records)] = Row{state: RowStateNormal, data: row}
 	}
 	// new pointer position
 	e.incrPtr(rowsFetched)
 	// If we fetched fewer rows than requested, we've reached the end
 	if rowsFetched < i {
 		e.incrPtr(1)
-		e.records[e.lastRowIdx()] = nil // Mark end of data
+		e.records[e.lastRowIdx()] = Row{} // Mark end of data
 	}
 	e.renderData()
 	return rowsFetched < i, e.nextQuery.Err()
@@ -1863,12 +2106,12 @@ func (e *Editor) prevRows(i int) (bool, error) {
 	if e.prevQuery == nil {
 		// Stop refresh timer when starting a new query
 		e.stopRefreshTimer()
-		if len(e.records) == 0 || e.records[e.pointer] == nil {
+		if len(e.records) == 0 || e.records[e.pointer].data == nil {
 			return false, nil // Can't query from nil or empty records
 		}
 		params := make([]any, len(e.relation.key))
 		for i := range e.relation.key {
-			params[i] = e.records[e.pointer][i]
+			params[i] = e.records[e.pointer].data[i]
 		}
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {
@@ -1907,7 +2150,7 @@ func (e *Editor) prevRows(i int) (bool, error) {
 			return false, err
 		}
 		e.pointer = e.lastRowIdx() // Move pointer backwards in the circular buffer
-		e.records[e.pointer] = row
+		e.records[e.pointer] = Row{state: RowStateNormal, data: row}
 	}
 
 	e.renderData()
@@ -2019,7 +2262,7 @@ func (e *Editor) startRefreshTimer() {
 					app.QueueUpdateDraw(func() {
 						// Update table rowsHeight before loading rows from database
 						e.table.UpdateRowsHeightFromRect(dataHeight)
-						id := e.records[e.pointer][:len(e.relation.key)]
+						id := e.records[e.pointer].data[:len(e.relation.key)]
 						e.loadFromRowId(id, true, e.table.selectedCol)
 					})
 				}
@@ -2066,7 +2309,7 @@ func (e *Editor) moveColumn(col, direction int) {
 	e.columns[col], e.columns[newIdx] = e.columns[newIdx], e.columns[col]
 
 	for i := range e.records {
-		e.records[i][col], e.records[i][newIdx] = e.records[i][newIdx], e.records[i][col]
+		e.records[i].data[col], e.records[i].data[newIdx] = e.records[i].data[newIdx], e.records[i].data[col]
 	}
 
 	// Update table headers to reflect column reordering
@@ -2204,8 +2447,8 @@ func (e *Editor) updateStatusWithCellContent() {
 
 	// Get the cell value
 	var cellValue any
-	if col < len(e.records[row]) {
-		cellValue = e.records[row][col]
+	if col < len(e.records[row].data) {
+		cellValue = e.records[row].data[col]
 	}
 
 	// Format the cell value
@@ -2348,12 +2591,17 @@ func (e *Editor) executeCommand(command string) {
 // Goto execution
 // enterDeleteMode enters delete mode for the current row
 func (e *Editor) enterDeleteMode(row, col int) {
-	if row < 0 || row >= len(e.records) || e.records[row] == nil {
+	if row < 0 || row >= len(e.records) || e.records[row].data == nil {
 		return
 	}
 
 	// Build DELETE preview
-	preview := e.relation.BuildDeletePreview(e.records, row)
+	// Convert records to [][]any for BuildDeletePreview
+	recordsData := make([][]any, len(e.records))
+	for i := range e.records {
+		recordsData[i] = e.records[i].data
+	}
+	preview := e.relation.BuildDeletePreview(recordsData, row)
 	if preview == "" {
 		e.SetStatusError("Cannot delete row without key values")
 		return
@@ -2372,13 +2620,18 @@ func (e *Editor) enterDeleteMode(row, col int) {
 // executeDelete executes the DELETE statement for the current row
 func (e *Editor) executeDelete() error {
 	row, col := e.table.GetSelection()
-	if row < 0 || row >= len(e.records) || e.records[row] == nil {
+	if row < 0 || row >= len(e.records) || e.records[row].data == nil {
 		e.SetStatusError("Invalid row for deletion")
 		return fmt.Errorf("invalid row")
 	}
 
 	// Execute the delete
-	err := e.relation.DeleteDBRecord(e.records, row)
+	// Convert records to [][]any for DeleteDBRecord
+	recordsData := make([][]any, len(e.records))
+	for i := range e.records {
+		recordsData[i] = e.records[i].data
+	}
+	err := e.relation.DeleteDBRecord(recordsData, row)
 	if err != nil {
 		e.SetStatusErrorWithSentry(err)
 		return err
@@ -2386,7 +2639,7 @@ func (e *Editor) executeDelete() error {
 
 	// Refresh data after deletion
 	e.SetStatusMessage("Record deleted successfully")
-	e.loadFromRowId(nil, e.records[e.lastRowIdx()] != nil, col)
+	e.loadFromRowId(nil, e.records[e.lastRowIdx()].data != nil, col)
 	return nil
 }
 
@@ -2397,7 +2650,7 @@ func (e *Editor) executeGoto(gotoValue string) {
 	}
 
 	row, col := e.table.GetSelection()
-	if row < 0 || row >= len(e.records) || e.records[row] == nil {
+	if row < 0 || row >= len(e.records) || e.records[row].data == nil {
 		e.SetStatusError("Invalid current row")
 		return
 	}
@@ -2405,7 +2658,7 @@ func (e *Editor) executeGoto(gotoValue string) {
 	// Get current row's key values
 	currentKeys := make([]any, len(e.relation.key))
 	for i := range e.relation.key {
-		currentKeys[i] = e.records[row][i]
+		currentKeys[i] = e.records[row].data[i]
 	}
 
 	// Find the column index in relation.attributeOrder
@@ -2439,13 +2692,13 @@ func (e *Editor) executeGoto(gotoValue string) {
 	var foundRow int
 
 	for i := 0; i < len(e.records); i++ {
-		if e.records[i] == nil {
+		if e.records[i].data == nil {
 			break
 		}
 		// Compare key values
 		match := true
 		for j := range e.relation.key {
-			if e.records[i][j] != foundKeys[j] {
+			if e.records[i].data[j] != foundKeys[j] {
 				match = false
 				break
 			}
@@ -2526,7 +2779,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	// Reload data from the beginning
 	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")
 	e.pointer = 0
-	e.records = make([][]any, e.table.rowsHeight)
+	e.records = make([]Row, e.table.rowsHeight)
 	e.loadFromRowId(nil, true, 0)
 	e.renderData()
 	e.table.Select(0, 0)

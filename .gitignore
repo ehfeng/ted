@@ -1,5 +1,5 @@
 ted
 .ted.yml
-test.db
+test.db*
 .cache
 .DS_Store
