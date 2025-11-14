@@ -39,6 +39,10 @@ type Editor struct {
 	relation *Relation
 	config   *Config
 
+	// Database connection (stored separately to support table switching when relation is nil)
+	db     *sql.DB
+	dbType DatabaseType
+
 	// references to key components
 	tablePicker    *FuzzySelector // Table picker at the top
 	statusBar      *tview.TextView
@@ -137,21 +141,31 @@ func runEditor(config *Config, dbname, tablename string) error {
 	terminalHeight := getTerminalHeight()
 	tableDataHeight := terminalHeight - 3 // 3 lines for picker bar, status bar, command palette
 
-	relation, err := NewRelation(db, dbType, tablename)
-	if err != nil {
-		CaptureError(err)
-		return err
-	}
+	var relation *Relation
+	var columns []Column
 
-	// force key to be first column(s)
-	columns := make([]Column, 0, len(relation.attributeOrder))
-	for _, name := range relation.key {
-		columns = append(columns, Column{Name: name, Width: 4})
-	}
-	for _, name := range relation.attributeOrder {
-		if !slices.Contains(relation.key, name) {
-			columns = append(columns, Column{Name: name, Width: DefaultColumnWidth})
+	// Only load table if tablename is provided
+	if tablename != "" {
+		var err error
+		relation, err = NewRelation(db, dbType, tablename)
+		if err != nil {
+			CaptureError(err)
+			return err
 		}
+
+		// force key to be first column(s)
+		columns = make([]Column, 0, len(relation.attributeOrder))
+		for _, name := range relation.key {
+			columns = append(columns, Column{Name: name, Width: 4})
+		}
+		for _, name := range relation.attributeOrder {
+			if !slices.Contains(relation.key, name) {
+				columns = append(columns, Column{Name: name, Width: DefaultColumnWidth})
+			}
+		}
+	} else {
+		// No table specified - create empty state
+		columns = []Column{}
 	}
 
 	// Get available tables for the picker
@@ -171,6 +185,8 @@ func runEditor(config *Config, dbname, tablename string) error {
 		columns:     columns,
 		relation:    relation,
 		config:      config,
+		db:          db,
+		dbType:      dbType,
 		tablePicker: nil, // Will be initialized after editor is created
 		paletteMode: PaletteModeDefault,
 		pointer:     0,
@@ -195,9 +211,14 @@ func runEditor(config *Config, dbname, tablename string) error {
 		}
 	}
 
+	keyColumnCount := 0
+	if editor.relation != nil {
+		keyColumnCount = len(editor.relation.key)
+	}
+
 	editor.table = NewTableView(tableDataHeight, &TableViewConfig{
 		Headers:        headers,
-		KeyColumnCount: len(editor.relation.key),
+		KeyColumnCount: keyColumnCount,
 		DoubleClickFunc: func(row, col int) {
 			editor.enterEditMode(row, col)
 		},
@@ -260,7 +281,10 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 	editor.table.SetTableName(tablename)
 
-	editor.loadFromRowId(nil, true, 0)
+	// Only load data if we have a table
+	if tablename != "" {
+		editor.loadFromRowId(nil, true, 0)
+	}
 	editor.setupKeyBindings()
 	editor.setupStatusBar()
 	editor.setupCommandPalette()
@@ -330,6 +354,15 @@ func runEditor(config *Config, dbname, tablename string) error {
 		AddItem(editor.tablePicker, 8, 0, true). // Selector with height for dropdown
 		AddItem(nil, 0, 1, false)                // Spacer takes rest of screen
 	editor.pages.AddPage(pagePicker, pickerOverlay, true, false)
+
+	// If no table was specified, show the picker immediately
+	if tablename == "" {
+		editor.pages.ShowPage(pagePicker)
+		editor.app.SetFocus(editor.tablePicker)
+		editor.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+			screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
+		})
+	}
 
 	if err := editor.app.SetRoot(editor.pages, true).Run(); err != nil {
 		CaptureError(err)
@@ -522,7 +555,7 @@ func (e *Editor) setupKeyBindings() {
 
 		// Alt+0: set cell to null for nullable columns in insert mode
 		if rune == '0' && mod&tcell.ModAlt != 0 {
-			if len(e.table.insertRow) > 0 && !e.editing {
+			if len(e.table.insertRow) > 0 && !e.editing && e.relation != nil {
 				// Check if the selected column is nullable
 				colName := e.columns[col].Name
 				if attr, ok := e.relation.attributes[colName]; ok && attr.Nullable {
@@ -2161,8 +2194,10 @@ func (e *Editor) updateStatusWithCellContent() {
 	// Get column name and type info
 	colName := e.columns[col].Name
 	var colType string
-	if attr, ok := e.relation.attributes[colName]; ok {
-		colType = attr.Type
+	if e.relation != nil {
+		if attr, ok := e.relation.attributes[colName]; ok {
+			colType = attr.Type
+		}
 	}
 
 	// Build the status message with explicit colors
@@ -2434,8 +2469,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	fmt.Fprintf(os.Stderr, "[DEBUG] Picker closed\n")
 
 	// Reload the table data using the current database connection
-	fmt.Fprintf(os.Stderr, "[DEBUG] Creating new relation for table: %s\n", tableName)
-	relation, err := NewRelation(e.relation.DB, e.relation.DBType, tableName)
+	relation, err := NewRelation(e.db, e.dbType, tableName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating relation: %v\n", err)
 		e.SetStatusErrorWithSentry(err)
@@ -2481,4 +2515,8 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	// Update title
 	fmt.Fprintf(os.Stderr, "[DEBUG] Updating title\n")
 	e.app.SetTitle(fmt.Sprintf("ted %s/%s %s", e.config.Database, tableName, databaseIcons[e.relation.DBType]))
+
+	// Set focus back to table
+	fmt.Fprintf(os.Stderr, "[DEBUG] Setting focus to table\n")
+	e.app.SetFocus(e.table)
 }
