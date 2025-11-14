@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -118,8 +120,9 @@ type TableView struct {
 	*tview.Box
 
 	// Table data
-	headers []HeaderColumn
-	data    [][]any
+	headers   []HeaderColumn
+	data      [][]any
+	tableName string // Name of the current table to display in header
 
 	// Display configuration
 	cellPadding    int
@@ -140,6 +143,7 @@ type TableView struct {
 	doubleClickFunc     func(row, col int)
 	singleClickFunc     func(row, col int)
 	selectionChangeFunc func(row, col int)
+	mouseScrollFunc     func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse)
 
 	// Double-click tracking
 	lastClickRow int
@@ -157,8 +161,17 @@ type TableView struct {
 	rowsHeight int
 }
 
-// NewTableView creates a new table view component
-func NewTableView(height int) *TableView {
+// TableViewConfig holds configuration for creating a TableView
+type TableViewConfig struct {
+	Headers         []HeaderColumn
+	KeyColumnCount  int
+	DoubleClickFunc func(row, col int)
+	SingleClickFunc func(row, col int)
+	MouseScrollFunc func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse)
+}
+
+// NewTableView creates a new table view component with the given configuration
+func NewTableView(height int, config *TableViewConfig) *TableView {
 	tv := &TableView{
 		Box:            tview.NewBox(),
 		cellPadding:    1,
@@ -177,6 +190,26 @@ func NewTableView(height int) *TableView {
 	}
 
 	tv.SetBorder(false) // We'll draw our own borders
+
+	// Apply configuration if provided
+	if config != nil {
+		if len(config.Headers) > 0 {
+			tv.SetHeaders(config.Headers)
+		}
+		if config.KeyColumnCount > 0 {
+			tv.SetKeyColumnCount(config.KeyColumnCount)
+		}
+		if config.DoubleClickFunc != nil {
+			tv.SetDoubleClickFunc(config.DoubleClickFunc)
+		}
+		if config.SingleClickFunc != nil {
+			tv.SetSingleClickFunc(config.SingleClickFunc)
+		}
+		if config.MouseScrollFunc != nil {
+			tv.SetMouseScrollFunc(config.MouseScrollFunc)
+		}
+	}
+
 	return tv
 }
 
@@ -190,6 +223,12 @@ func (tv *TableView) SetHeaders(headers []HeaderColumn) *TableView {
 // SetKeyColumnCount sets the number of key columns (for special separator rendering)
 func (tv *TableView) SetKeyColumnCount(count int) *TableView {
 	tv.keyColumnCount = count
+	return tv
+}
+
+// SetTableName sets the table name to display in the header row
+func (tv *TableView) SetTableName(name string) *TableView {
+	tv.tableName = name
 	return tv
 }
 
@@ -266,6 +305,12 @@ func (tv *TableView) SetSelectionChangeFunc(handler func(row, col int)) *TableVi
 	return tv
 }
 
+// SetMouseScrollFunc sets the function to handle mouse scroll events
+func (tv *TableView) SetMouseScrollFunc(handler func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse)) *TableView {
+	tv.mouseScrollFunc = handler
+	return tv
+}
+
 // GetCell returns the value at the specified data coordinates
 func (tv *TableView) GetCell(row, col int) any {
 	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
@@ -331,9 +376,15 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 	// Set viewport dimensions for scroll limiting
 	tv.viewport.SetDimensions(tableWidth, width)
 
+	currentY := y
+
+	// Draw table name header if table name is set
+	tv.drawTableNameHeader(x, currentY, tableWidth)
+	currentY++
+
 	// Draw top border
-	tv.drawTopBorder(x, y, tableWidth)
-	currentY := y + 1
+	tv.drawTopBorder(x, currentY, tableWidth)
+	currentY++
 
 	// Draw header row
 	if currentY < y+height {
@@ -359,8 +410,15 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 	// Draw data rows
 	dataRowsDrawn := 0
 	maxDataRows := height - 3 // Reserve space for top border and header
+	if tv.tableName != "" {
+		maxDataRows = height - 4 // Reserve space for table name header
+	}
 	if drawBottomBorder {
-		maxDataRows = height - 4 // Reserve additional space for bottom border
+		if tv.tableName != "" {
+			maxDataRows = height - 5 // Reserve space for table name + bottom border
+		} else {
+			maxDataRows = height - 4 // Reserve additional space for bottom border
+		}
 	}
 
 	// When in insert mode, we need to reserve one more row for the insert mode row
@@ -407,6 +465,30 @@ func (tv *TableView) calculateTableWidth() int {
 }
 
 // drawTopBorder draws the top border of the table
+// drawTableNameHeader draws the table name header at the top of the table
+func (tv *TableView) drawTableNameHeader(x, y, tableWidth int) {
+	if tv.tableName == "" {
+		return
+	}
+
+	// Format: " TableName ▾"
+	headerText := fmt.Sprintf(" %s ▾", tv.tableName)
+	style := tcell.StyleDefault.Foreground(tcell.ColorWhite)
+
+	// Draw the header text left-aligned
+	pos := x
+	for _, ch := range headerText {
+		tv.viewport.SetContent(pos, y, ch, nil, style)
+		pos++
+	}
+
+	// Fill the rest of the line with spaces up to the table width
+	for pos < x+tableWidth {
+		tv.viewport.SetContent(pos, y, ' ', nil, style)
+		pos++
+	}
+}
+
 func (tv *TableView) drawTopBorder(x, y, tableWidth int) {
 	// Left corner
 	tv.viewport.SetContent(x, y, '┌', nil, tcell.StyleDefault.Foreground(tv.borderColor))
@@ -735,6 +817,14 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 					// reset double click tracking
 					tv.lastClickRow = -1
 					tv.lastClickCol = -1
+					consumed = true
+				}
+			}
+		default:
+			// Delegate scroll and other events to mouseScrollFunc if set
+			if tv.mouseScrollFunc != nil {
+				action, event = tv.mouseScrollFunc(action, event)
+				if action == tview.MouseConsumed {
 					consumed = true
 				}
 			}

@@ -200,3 +200,50 @@ func (c *Config) connect() (*sql.DB, DatabaseType, error) {
 
 	return db, dbType, nil
 }
+
+// GetTables retrieves a list of table names from the database.
+func (c *Config) GetTables() ([]string, error) {
+	db, dbType, err := c.connect()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	var query string
+	switch dbType {
+	case PostgreSQL:
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+	case MySQL:
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = ?"
+	case SQLite:
+		query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+	default:
+		return nil, fmt.Errorf("unsupported database type for GetTables")
+	}
+
+	var rows *sql.Rows
+	if dbType == MySQL {
+		rows, err = db.Query(query, c.Database)
+	} else {
+		rows, err = db.Query(query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			return nil, err
+		}
+		tables = append(tables, tableName)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return tables, nil
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,8 +15,10 @@ import (
 
 const (
 	DefaultColumnWidth   = 8
-	RowsTimerInterval    = 300 * time.Millisecond
+	RowsTimerInterval    = 300 * time.Millisecond // IMPORTANT: set back to 300ms before committing
 	RefreshTimerInterval = RowsTimerInterval
+	pagePicker           = "picker"
+	pageTable            = "table"
 )
 
 // this is a config concept
@@ -32,26 +35,22 @@ type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
 	table    *TableView
-	columns  []Column
+	columns  []Column // TODO move this into Config
 	relation *Relation
 	config   *Config
 
-	statusBar               *tview.TextView
-	commandPalette          *tview.InputField
-	layout                  *tview.Flex
-	paletteMode             PaletteMode
-	preEditMode             PaletteMode
-	placeholderStyleDefault tcell.Style
-	placeholderStyleItalic  tcell.Style
-	kittySequenceActive     bool
-	kittySequenceBuffer     string
+	// references to key components
+	tablePicker    *FuzzySelector // Table picker at the top
+	statusBar      *tview.TextView
+	commandPalette *tview.InputField
+	layout         *tview.Flex
+
+	paletteMode         PaletteMode
+	kittySequenceActive bool
+	kittySequenceBuffer string
 
 	// selection
-	currentRow   int
-	currentCol   int
-	editMode     bool
-	selectedRows map[int]bool
-	selectedCols map[int]bool
+	editing bool
 
 	// data, records is a circular buffer
 	nextQuery *sql.Rows // nextRows
@@ -136,7 +135,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 	// Get terminal height for optimal data loading
 	terminalHeight := getTerminalHeight()
-	tableDataHeight := terminalHeight - 5 // 5 lines for header, status bar, command palette
+	tableDataHeight := terminalHeight - 3 // 3 lines for picker bar, status bar, command palette
 
 	relation, err := NewRelation(db, dbType, tablename)
 	if err != nil {
@@ -155,115 +154,181 @@ func runEditor(config *Config, dbname, tablename string) error {
 		}
 	}
 
-	editor := &Editor{
-		app: tview.NewApplication().SetTitle(fmt.Sprintf("ted %s/%s %s",
-			dbname, tablename, databaseIcons[dbType])).EnableMouse(true),
-		pages:        tview.NewPages(),
-		table:        NewTableView(tableDataHeight),
-		columns:      columns,
-		relation:     relation,
-		config:       config,
-		selectedRows: make(map[int]bool),
-		selectedCols: make(map[int]bool),
-		paletteMode:  PaletteModeDefault,
-		preEditMode:  PaletteModeDefault,
-		pointer:      0,
-		records:      make([][]any, tableDataHeight),
-	}
-
-	editor.loadFromRowId(nil, true, 0)
-	editor.setupTable()
-	editor.setupKeyBindings()
-	editor.setupStatusBar()
-	editor.setupCommandPalette()
-	editor.setupLayout()
-	editor.setupResizeHandler()
-	editor.table.SetSelectionChangeFunc(func(row, col int) {
-		editor.updateStatusWithCellContent()
-		// Auto-scroll viewport to show the selected column
-		editor.ensureColumnVisible(col)
-		// Request immediate redraw to avoid lag
-		go editor.app.Draw()
-	})
-	editor.table.Select(0, 0)
-	editor.pages.AddPage("table", editor.layout, true, true)
-
-	if err := editor.app.SetRoot(editor.pages, true).Run(); err != nil {
+	// Get available tables for the picker
+	tables, err := config.GetTables()
+	if err != nil {
 		CaptureError(err)
 		return err
 	}
-	return nil
-}
 
-func (e *Editor) setupTable() {
-	// Create headers for TableView
-	headers := make([]HeaderColumn, len(e.columns))
-	for i, col := range e.columns {
+	app := tview.NewApplication().SetTitle(fmt.Sprintf("ted %s %s",
+		dbname, databaseIcons[dbType])).EnableMouse(true)
+
+	editor := &Editor{
+		app:         app,
+		pages:       tview.NewPages(),
+		table:       nil, // Will be initialized after we have access to all editor fields
+		columns:     columns,
+		relation:    relation,
+		config:      config,
+		tablePicker: nil, // Will be initialized after editor is created
+		paletteMode: PaletteModeDefault,
+		pointer:     0,
+		records:     make([][]any, tableDataHeight),
+	}
+
+	// Create selector with callback now that editor exists
+	editor.tablePicker = NewFuzzySelector(tables, tablename, editor.selectTableFromPicker, func() {
+		// Close callback: hide picker and return focus to table
+		editor.pages.HidePage(pagePicker)
+		editor.app.SetFocus(editor.table)
+		editor.app.SetAfterDrawFunc(nil) // Clear cursor style function
+		editor.setCursorStyle(0)         // Reset to default cursor style
+	})
+
+	// Initialize table with configuration
+	headers := make([]HeaderColumn, len(editor.columns))
+	for i, col := range editor.columns {
 		headers[i] = HeaderColumn{
 			Name:  col.Name,
 			Width: col.Width,
 		}
 	}
 
-	// Configure the table
-	e.table.SetHeaders(headers).
-		SetKeyColumnCount(len(e.relation.key)).
-		SetSelectable(true).
-		SetDoubleClickFunc(func(row, col int) {
-			// Double-click on a cell opens edit mode
-			e.enterEditMode(row, col)
-		}).
-		SetSingleClickFunc(func(row, col int) {
-			// Single-click exits edit mode without saving
-			if e.editMode {
-				e.exitEditMode()
+	editor.table = NewTableView(tableDataHeight, &TableViewConfig{
+		Headers:        headers,
+		KeyColumnCount: len(editor.relation.key),
+		DoubleClickFunc: func(row, col int) {
+			editor.enterEditMode(row, col)
+		},
+		SingleClickFunc: func(row, col int) {
+			if editor.editing {
+				editor.exitEditMode()
 			}
-		})
+		},
+		MouseScrollFunc: func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+			// Record mouse event in breadcrumbs
+			if breadcrumbs != nil && event != nil {
+				actionStr := mouseActionString(action)
+				breadcrumbs.RecordMouse(actionStr)
+			}
 
-	// Set up mouse scroll handling
-	e.table.SetMouseCapture(func(action tview.MouseAction,
-		event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-		// Record mouse event in breadcrumbs
-		if breadcrumbs != nil && event != nil {
-			actionStr := mouseActionString(action)
-			breadcrumbs.RecordMouse(actionStr)
-		}
-
-		switch action {
-		case tview.MouseScrollUp:
-			reachedEnd, err := e.prevRows(1)
-			if err != nil {
-				return action, nil
+			switch action {
+			case tview.MouseScrollUp:
+				go func() {
+					reachedEnd, err := editor.prevRows(1)
+					if err != nil {
+						return
+					}
+					editor.app.QueueUpdateDraw(func() {
+						if !reachedEnd {
+							editor.table.Select(editor.table.selectedRow+1, editor.table.selectedCol)
+						}
+					})
+				}()
+				return tview.MouseConsumed, nil
+			case tview.MouseScrollDown:
+				go func() {
+					reachedEnd, err := editor.nextRows(1)
+					if err != nil {
+						return
+					}
+					editor.app.QueueUpdateDraw(func() {
+						if !reachedEnd {
+							editor.table.Select(editor.table.selectedRow-1, editor.table.selectedCol)
+						}
+					})
+				}()
+				return tview.MouseConsumed, nil
+			case tview.MouseScrollLeft:
+				editor.table.viewport.ScrollLeft()
+				return tview.MouseConsumed, nil
+			case tview.MouseScrollRight:
+				editor.table.viewport.ScrollRight()
+				return tview.MouseConsumed, nil
 			}
-			if !reachedEnd {
-				e.table.Select(e.table.selectedRow+1, e.table.selectedCol)
-			}
-			go e.app.Draw()
-			return action, nil
-		case tview.MouseScrollDown:
-			reachedEnd, err := e.nextRows(1)
-			if err != nil {
-				return action, nil
-			}
-			if !reachedEnd {
-				e.table.Select(e.table.selectedRow-1, e.table.selectedCol)
-			}
-			go e.app.Draw()
-			return action, nil
-		case tview.MouseScrollLeft:
-			// Scroll table left
-			e.table.viewport.ScrollLeft()
-			go e.app.Draw()
-			return action, nil
-		case tview.MouseScrollRight:
-			// Scroll table right
-			e.table.viewport.ScrollRight()
-			go e.app.Draw()
-			return action, nil
-		}
-		// Pass through other mouse events
-		return action, event
+			return action, event
+		},
 	})
+
+	editor.table.SetTableName(tablename)
+
+	editor.loadFromRowId(nil, true, 0)
+	editor.setupKeyBindings()
+	editor.setupStatusBar()
+	editor.setupCommandPalette()
+
+	// Setup layout without the selector (it will be overlaid when visible)
+	editor.layout = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(editor.table, 0, 1, true).
+		AddItem(editor.statusBar, 1, 0, false).
+		AddItem(editor.commandPalette, 1, 0, false)
+
+	// Setup resize handler
+	editor.pages.SetChangedFunc(func() {
+		// Don't handle resize when in edit mode to avoid deadlock
+		if editor.editing {
+			return
+		}
+
+		// Get the new terminal height
+		newHeight := getTerminalHeight()
+		newDataHeight := newHeight - 3 // 3 lines for picker bar, status bar, command palette
+
+		// Only resize if the height has changed significantly
+		if newDataHeight != editor.table.rowsHeight && newDataHeight > 0 {
+			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1] == nil {
+				// the table is smaller than the new data height, no need to fetch more rows
+				return
+			}
+			// Create new records buffer with the new size
+			newRecords := make([][]any, newDataHeight)
+
+			// Copy existing data to the new buffer
+			copyCount := min(len(editor.records), newDataHeight)
+			for i := 0; i < copyCount; i++ {
+				ptr := (i + editor.pointer) % len(editor.records)
+				newRecords[i] = editor.records[ptr]
+			}
+
+			// If the new buffer is larger, fetch more rows to fill it
+			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1] != nil {
+				// We need to fetch more rows
+				oldLen := len(editor.records)
+				editor.records = newRecords
+				editor.pointer = 0
+				// Fetch additional rows
+				editor.nextRows(newDataHeight - oldLen)
+			} else {
+				editor.records = newRecords
+				editor.pointer = 0
+			}
+
+			editor.renderData()
+			go editor.app.Draw()
+		}
+	})
+
+	editor.table.SetSelectionChangeFunc(func(row, col int) {
+		editor.updateStatusWithCellContent()
+		// Auto-scroll viewport to show the selected column
+		editor.ensureColumnVisible(col)
+	})
+
+	// Add main table page
+	editor.pages.AddPage(pageTable, editor.layout, true, true)
+
+	// Create picker overlay page (centered flex with selector at top)
+	pickerOverlay := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(editor.tablePicker, 8, 0, true). // Selector with height for dropdown
+		AddItem(nil, 0, 1, false)                // Spacer takes rest of screen
+	editor.pages.AddPage(pagePicker, pickerOverlay, true, false)
+
+	if err := editor.app.SetRoot(editor.pages, true).Run(); err != nil {
+		CaptureError(err)
+		return err
+	}
+	return nil
 }
 
 func (e *Editor) setupStatusBar() {
@@ -285,8 +350,6 @@ func (e *Editor) setupCommandPalette() {
 		SetFieldTextColor(tcell.ColorWhite)
 
 	e.commandPalette.SetBackgroundColor(tcell.ColorBlack)
-	e.placeholderStyleDefault = e.commandPalette.GetPlaceholderStyle()
-	e.placeholderStyleItalic = e.placeholderStyleDefault.Italic(true)
 
 	// Default palette mode shows keybinding help
 	e.setPaletteMode(PaletteModeDefault, false)
@@ -351,7 +414,7 @@ func (e *Editor) setupCommandPalette() {
 			e.app.SetFocus(e.table)
 			return nil
 		case tcell.KeyEscape:
-			if e.paletteMode == PaletteModeInsert && e.editMode {
+			if e.paletteMode == PaletteModeInsert && e.editing {
 				return event
 			}
 			if e.paletteMode == PaletteModeDelete {
@@ -367,59 +430,6 @@ func (e *Editor) setupCommandPalette() {
 	})
 }
 
-func (e *Editor) setupLayout() {
-	e.layout = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(e.table, 0, 1, true).
-		AddItem(e.statusBar, 1, 0, false).
-		AddItem(e.commandPalette, 1, 0, false)
-}
-
-func (e *Editor) setupResizeHandler() {
-	e.pages.SetChangedFunc(func() {
-		// Don't handle resize when in edit mode to avoid deadlock
-		if e.editMode {
-			return
-		}
-
-		// Get the new terminal height
-		newHeight := getTerminalHeight()
-		newDataHeight := newHeight - 5 // 5 lines for header, status bar, command palette
-
-		// Only resize if the height has changed significantly
-		if newDataHeight != e.table.rowsHeight && newDataHeight > 0 {
-			if newDataHeight > len(e.records) && e.records[len(e.records)-1] == nil {
-				// the table is smaller than the new data height, no need to fetch more rows
-				return
-			}
-			// Create new records buffer with the new size
-			newRecords := make([][]any, newDataHeight)
-
-			// Copy existing data to the new buffer
-			copyCount := min(len(e.records), newDataHeight)
-			for i := 0; i < copyCount; i++ {
-				ptr := (i + e.pointer) % len(e.records)
-				newRecords[i] = e.records[ptr]
-			}
-
-			// If the new buffer is larger, fetch more rows to fill it
-			if newDataHeight > len(e.records) && e.records[len(e.records)-1] != nil {
-				// We need to fetch more rows
-				oldLen := len(e.records)
-				e.records = newRecords
-				e.pointer = 0
-				// Fetch additional rows
-				e.nextRows(newDataHeight - oldLen)
-			} else {
-				e.records = newRecords
-				e.pointer = 0
-			}
-
-			e.renderData()
-			e.app.Draw()
-		}
-	})
-}
-
 func (e *Editor) setupKeyBindings() {
 	e.table.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		key := event.Key()
@@ -428,8 +438,27 @@ func (e *Editor) setupKeyBindings() {
 
 		row, col := e.table.GetSelection()
 
+		// Disable all selection navigation when in delete mode (except Enter to confirm and Escape to cancel)
+		if e.paletteMode == PaletteModeDelete {
+			switch key {
+			case tcell.KeyEnter, tcell.KeyEscape:
+				// Allow these to fall through for delete mode handling
+			case tcell.KeyUp, tcell.KeyDown, tcell.KeyLeft, tcell.KeyRight,
+				tcell.KeyHome, tcell.KeyEnd, tcell.KeyPgUp, tcell.KeyPgDn,
+				tcell.KeyTab, tcell.KeyBacktab, tcell.KeyBackspace, tcell.KeyBackspace2,
+				tcell.KeyDelete:
+				// Block all navigation and editing keys
+				return nil
+			default:
+				// Block any other keys except control keys
+				if key == tcell.KeyRune {
+					return nil
+				}
+			}
+		}
+
 		// Record keyboard event in breadcrumbs (but not during edit mode or command input)
-		if breadcrumbs != nil && !e.editMode {
+		if breadcrumbs != nil && !e.editing {
 			keyStr := fmt.Sprintf("%v", key)
 			if key == tcell.KeyRune {
 				keyStr = string(rune)
@@ -466,15 +495,27 @@ func (e *Editor) setupKeyBindings() {
 
 		// Ctrl+S: execute INSERT in insert mode (save and insert)
 		if (rune == 's' || rune == 19) && mod&tcell.ModCtrl != 0 {
-			if len(e.table.insertRow) > 0 && !e.editMode {
+			if len(e.table.insertRow) > 0 && !e.editing {
 				e.executeInsert()
 				return nil
 			}
 		}
 
+		// Ctrl+O: open/close table picker
+		if (rune == 'o' || rune == 15) && mod&tcell.ModCtrl != 0 {
+			e.pages.ShowPage(pagePicker)
+			// Set focus on the selector, which will forward focus to the input field
+			e.app.SetFocus(e.tablePicker)
+			// Set cursor style to blinking bar
+			e.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+				screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
+			})
+			return nil
+		}
+
 		// Alt+0: set cell to null for nullable columns in insert mode
 		if rune == '0' && mod&tcell.ModAlt != 0 {
-			if len(e.table.insertRow) > 0 && !e.editMode {
+			if len(e.table.insertRow) > 0 && !e.editing {
 				// Check if the selected column is nullable
 				colName := e.columns[col].Name
 				if attr, ok := e.relation.attributes[colName]; ok && attr.Nullable {
@@ -488,7 +529,7 @@ func (e *Editor) setupKeyBindings() {
 		switch {
 		// Alt+Enter: execute INSERT in insert mode
 		case key == tcell.KeyEnter:
-			if len(e.table.insertRow) > 0 && !e.editMode && mod&tcell.ModAlt != 0 {
+			if len(e.table.insertRow) > 0 && !e.editing && mod&tcell.ModAlt != 0 {
 				e.executeInsert()
 				return nil
 			}
@@ -615,12 +656,6 @@ func (e *Editor) setupKeyBindings() {
 			pageSize := max(1, e.table.rowsHeight-1)
 			// Keep selection at same position, just fetch next rows
 			e.nextRows(pageSize)
-			return nil
-		case rune == ' ' && mod&tcell.ModShift != 0:
-			e.toggleRowSelection(row)
-			return nil
-		case rune == ' ' && mod&tcell.ModCtrl != 0:
-			e.toggleColSelection(col)
 			return nil
 		// Ctrl+G sends BEL (7) or 'g' depending on terminal
 		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
@@ -844,15 +879,11 @@ func (e *Editor) enterEditMode(row, col int) {
 
 func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string) {
 	// must be set before any calls to app.Draw()
-	e.editMode = true
+	e.editing = true
 	// In insert mode, allow editing the virtual insert mode row
 	// The virtual row index equals the length of the data array
 	// (which is shorter than records in insert mode)
 	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
-
-	// TODO no need to remember palette mode, it should just return to default mode after editing
-	// Remember the palette mode so we can restore it after editing
-	e.preEditMode = e.getPaletteMode()
 
 	// Create textarea for editing with proper styling
 	textArea := tview.NewTextArea().
@@ -864,8 +895,8 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 
 	// Store references for dynamic resizing
 	var modal tview.Primitive
-	e.currentRow = row
-	e.currentCol = col
+	// Set the table selection to track which cell is being edited
+	e.table.Select(row, col)
 
 	// Function to resize textarea based on current content
 	resizeTextarea := func() {
@@ -945,39 +976,8 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 	})
 	// Set up native cursor positioning using terminal escapes
 	e.app.SetAfterDrawFunc(func(screen tcell.Screen) {
-		if !e.editMode {
-			return
-		}
-
-		// Hide the default tcell cursor first
-		screen.HideCursor()
 		screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
-
-		// Get cursor position from textarea
-		_, _, toRow, toCol := textArea.GetCursor()
-		offsetRow, offsetColumn := textArea.GetOffset()
-
-		// Calculate screen position based on original cell position
-		// Use the same calculation as createCellEditOverlay
-		tableRow := row + 3 // Convert data row to table display row
-		leftOffset := 1     // Left table border "│"
-		for i := 0; i < col; i++ {
-			leftOffset += e.table.GetColumnWidth(i) + 2 + 1 // width + " │ " padding + separator
-		}
-		leftOffset += 1 // Cell padding (space after "│ ")
-
-		// Account for viewport horizontal scrolling
-		leftOffset -= e.table.viewport.GetScrollX()
-
-		// Calculate cursor position relative to the cell content area
-		cursorX := leftOffset + toCol - offsetColumn
-		cursorY := tableRow + toRow - offsetRow
-
-		screen.ShowCursor(cursorX, cursorY)
 	})
-
-	// Set cursor to bar style (style 5 = blinking bar)
-	e.setCursorStyle(5)
 	e.app.SetFocus(textArea)
 
 	// Set palette mode based on whether we're in insert mode or update mode
@@ -1002,8 +1002,10 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int,
 	}
 
 	// Calculate the position where the cell content appears on screen
+	// Layout structure: picker bar (row 0) + table at row 1
 	// TableView structure: top border (row 0) + header (row 1) + separator (row 2) + data rows (3+)
-	tableRow := row + 3 // Convert data row to table display row
+	tableRow := row + 3       // Convert data row to table display row
+	screenRow := tableRow + 1 // Offset by 1 for picker bar
 
 	// Calculate horizontal position: left border + previous columns + cell padding
 	leftOffset := 1 // Left table border "│"
@@ -1016,8 +1018,8 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int,
 	// Account for viewport horizontal scrolling
 	leftOffset -= e.table.viewport.GetScrollX()
 
-	// Calculate vertical position relative to table
-	topOffset := tableRow
+	// Calculate vertical position relative to screen (accounting for picker bar offset)
+	topOffset := screenRow
 
 	// Calculate minimum textarea size based on column width
 	cellWidth := e.table.GetColumnWidth(col)
@@ -1072,12 +1074,12 @@ func (e *Editor) setCursorStyle(style int) {
 }
 
 func (e *Editor) exitEditMode() {
-	if e.editMode {
+	if e.editing {
 		e.pages.RemovePage("editor")
 		e.app.SetAfterDrawFunc(nil) // Clear the cursor function
 		e.setCursorStyle(0)         // Reset to default cursor style
 		e.app.SetFocus(e.table)
-		e.editMode = false
+		e.editing = false
 		// Return palette to default mode after editing
 		if e.table.insertRow == nil {
 			e.setPaletteMode(PaletteModeDefault, false)
@@ -1160,7 +1162,7 @@ func (e *Editor) updateStatusForEditMode(col int) {
 }
 
 // updateForeignKeyPreview updates the status bar with a preview of the referenced row
-func (e *Editor) updateForeignKeyPreview(col int, newText string) {
+func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 	if e.relation == nil || col < 0 || col >= len(e.columns) {
 		return
 	}
@@ -1212,7 +1214,7 @@ func (e *Editor) updateForeignKeyPreview(col int, newText string) {
 			if attrIdx == col {
 				foreignKeys[foreignCol] = newText
 			} else {
-				foreignKeys[foreignCol] = e.records[e.currentRow][attrIdx]
+				foreignKeys[foreignCol] = e.records[row][attrIdx]
 			}
 		}
 		// TODO pass config columns if available
@@ -1422,12 +1424,12 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	e.commandPalette.SetLabel(mode.Glyph())
 	// Clear input when switching modes
 	e.commandPalette.SetText("")
-	style := e.placeholderStyleItalic
+	style := e.commandPalette.GetPlaceholderStyle().Italic(true)
 	e.commandPalette.SetPlaceholderStyle(style)
 	if e.table.insertRow != nil {
 		e.commandPalette.SetPlaceholder("INSERT preview… (Esc to exit)")
 	}
-	if e.editMode {
+	if e.editing {
 		// Editing contexts manage their own placeholder text
 		switch e.paletteMode {
 		case PaletteModeUpdate:
@@ -1467,33 +1469,34 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 
 // Update the command palette to show a SQL UPDATE/INSERT preview while editing
 func (e *Editor) updateEditPreview(newText string) {
-	if e.relation == nil || !e.editMode {
+	if e.relation == nil || !e.editing {
 		return
 	}
 
+	row, col := e.table.GetSelection()
 	// Check if we're in insert mode
-	isNewRecordRow := len(e.table.insertRow) > 0 && e.currentRow == e.table.GetDataLength()
+	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
 
 	var preview string
-	colName := e.columns[e.currentCol].Name
+	colName := e.columns[col].Name
 	if isNewRecordRow {
 		// Show INSERT preview and set palette mode to Insert
 		e.setPaletteMode(PaletteModeInsert, false)
 		newRecordRow := make([]any, len(e.table.insertRow))
 		copy(newRecordRow, e.table.insertRow)
-		newRecordRow[e.currentCol] = newText
+		newRecordRow[col] = newText
 		preview = e.relation.BuildInsertPreview(newRecordRow, e.columns)
 	} else {
 		// Show UPDATE preview and set palette mode to Update
 		e.setPaletteMode(PaletteModeUpdate, false)
-		preview = e.relation.BuildUpdatePreview(e.records, e.currentRow, colName, newText)
+		preview = e.relation.BuildUpdatePreview(e.records, row, colName, newText)
 	}
-	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
+	e.commandPalette.SetPlaceholderStyle(e.commandPalette.GetPlaceholderStyle())
 	e.commandPalette.SetPlaceholder(preview)
 
 	// Update status bar with foreign key preview if this column has a reference (only for UPDATE)
 	if !isNewRecordRow {
-		e.updateForeignKeyPreview(e.currentCol, newText)
+		e.updateForeignKeyPreview(row, col, newText)
 	}
 }
 
@@ -1606,50 +1609,6 @@ func (e *Editor) executeInsert() error {
 		e.table.Select(len(e.records)-1, e.table.selectedCol)
 	}
 	return nil
-}
-
-func (e *Editor) toggleRowSelection(row int) {
-	if row == 0 {
-		return
-	}
-
-	if e.selectedRows[row] {
-		delete(e.selectedRows, row)
-		e.unhighlightRow(row)
-	} else {
-		e.selectedRows[row] = true
-		e.highlightRow(row)
-	}
-}
-
-func (e *Editor) toggleColSelection(col int) {
-	if e.selectedCols[col] {
-		delete(e.selectedCols, col)
-		e.unhighlightColumn(col)
-	} else {
-		e.selectedCols[col] = true
-		e.highlightColumn(col)
-	}
-}
-
-func (e *Editor) highlightRow(row int) {
-	// TableView handles selection highlighting internally
-	// This is a placeholder for future row highlighting implementation
-}
-
-func (e *Editor) unhighlightRow(row int) {
-	// TableView handles selection highlighting internally
-	// This is a placeholder for future row highlighting implementation
-}
-
-func (e *Editor) highlightColumn(col int) {
-	// TableView handles selection highlighting internally
-	// This is a placeholder for future column highlighting implementation
-}
-
-func (e *Editor) unhighlightColumn(col int) {
-	// TableView handles selection highlighting internally
-	// This is a placeholder for future column highlighting implementation
 }
 
 // id can be nil, in which case load from the top or bottom
@@ -1996,7 +1955,7 @@ func (e *Editor) startRefreshTimer() {
 				if app != nil && e.relation != nil && e.relation.DB != nil {
 					// Calculate data height before queueing the update
 					terminalHeight := getTerminalHeight()
-					dataHeight := terminalHeight - 5 // 5 lines for header, status bar, command palette
+					dataHeight := terminalHeight - 3 // 3 lines for picker bar, status bar, command palette
 					app.QueueUpdateDraw(func() {
 						// Update table rowsHeight before loading rows from database
 						e.table.UpdateRowsHeightFromRect(dataHeight)
@@ -2050,8 +2009,18 @@ func (e *Editor) moveColumn(col, direction int) {
 		e.records[i][col], e.records[i][newIdx] = e.records[i][newIdx], e.records[i][col]
 	}
 
-	e.setupTable()
-	e.table.Select(e.currentRow, col+direction)
+	// Update table headers to reflect column reordering
+	headers := make([]HeaderColumn, len(e.columns))
+	for i, col := range e.columns {
+		headers[i] = HeaderColumn{
+			Name:  col.Name,
+			Width: col.Width,
+		}
+	}
+	e.table.SetHeaders(headers)
+
+	row, _ := e.table.GetSelection()
+	e.table.Select(row, col+direction)
 }
 
 func (e *Editor) adjustColumnWidth(col, delta int) {
@@ -2162,7 +2131,7 @@ func (e *Editor) SetStatusLog(message string) {
 // This is only called when not in edit mode
 func (e *Editor) updateStatusWithCellContent() {
 	// Don't update status when in edit mode, insert mode, or delete mode
-	if e.editMode || len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+	if e.editing || len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 		return
 	}
 
@@ -2331,23 +2300,23 @@ func (e *Editor) enterDeleteMode(row, col int) {
 	// Set mode to Delete and show preview
 	e.setPaletteMode(PaletteModeDelete, false)
 	e.commandPalette.SetPlaceholder(preview)
-	e.commandPalette.SetPlaceholderStyle(e.placeholderStyleDefault)
+	e.commandPalette.SetPlaceholderStyle(e.commandPalette.GetPlaceholderStyle())
 	e.SetStatusMessage("Enter to confirm deletion · Esc to cancel")
 
-	// Store the row being deleted
-	e.currentRow = row
-	e.currentCol = col
+	// Store the row being deleted in table selection
+	e.table.Select(row, col)
 }
 
 // executeDelete executes the DELETE statement for the current row
 func (e *Editor) executeDelete() error {
-	if e.currentRow < 0 || e.currentRow >= len(e.records) || e.records[e.currentRow] == nil {
+	row, col := e.table.GetSelection()
+	if row < 0 || row >= len(e.records) || e.records[row] == nil {
 		e.SetStatusError("Invalid row for deletion")
 		return fmt.Errorf("invalid row")
 	}
 
 	// Execute the delete
-	err := e.relation.DeleteDBRecord(e.records, e.currentRow)
+	err := e.relation.DeleteDBRecord(e.records, row)
 	if err != nil {
 		e.SetStatusErrorWithSentry(err)
 		return err
@@ -2355,7 +2324,7 @@ func (e *Editor) executeDelete() error {
 
 	// Refresh data after deletion
 	e.SetStatusMessage("Record deleted successfully")
-	e.loadFromRowId(nil, e.records[e.lastRowIdx()] != nil, e.currentCol)
+	e.loadFromRowId(nil, e.records[e.lastRowIdx()] != nil, col)
 	return nil
 }
 
@@ -2447,4 +2416,62 @@ func (e *Editor) executeGoto(gotoValue string) {
 		}
 		e.SetStatusMessage("Match found")
 	}
+}
+
+// selectTableFromPicker handles selecting a table from the picker
+func (e *Editor) selectTableFromPicker(tableName string) {
+	fmt.Fprintf(os.Stderr, "[DEBUG] selectTableFromPicker: %s\n", tableName)
+	e.pages.HidePage(pagePicker)
+	e.app.SetAfterDrawFunc(nil) // Clear cursor style function
+	e.setCursorStyle(0)         // Reset to default cursor style
+	fmt.Fprintf(os.Stderr, "[DEBUG] Picker closed\n")
+
+	// Reload the table data using the current database connection
+	fmt.Fprintf(os.Stderr, "[DEBUG] Creating new relation for table: %s\n", tableName)
+	relation, err := NewRelation(e.relation.DB, e.relation.DBType, tableName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating relation: %v\n", err)
+		e.SetStatusErrorWithSentry(err)
+		return
+	}
+
+	// Update the relation
+	fmt.Fprintf(os.Stderr, "[DEBUG] Relation created successfully\n")
+	e.relation = relation
+
+	// Reset columns
+	fmt.Fprintf(os.Stderr, "[DEBUG] Resetting columns\n")
+	e.columns = make([]Column, 0, len(e.relation.attributeOrder))
+	for _, name := range e.relation.key {
+		e.columns = append(e.columns, Column{Name: name, Width: 4})
+	}
+	for _, name := range e.relation.attributeOrder {
+		if !slices.Contains(e.relation.key, name) {
+			e.columns = append(e.columns, Column{Name: name, Width: 8})
+		}
+	}
+
+	// Update table headers
+	fmt.Fprintf(os.Stderr, "[DEBUG] Updating table headers\n")
+	headers := make([]HeaderColumn, len(e.columns))
+	for i, col := range e.columns {
+		headers[i] = HeaderColumn{
+			Name:  col.Name,
+			Width: col.Width,
+		}
+	}
+	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.key)).SetTableName(tableName)
+
+	// Reload data from the beginning
+	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")
+	e.pointer = 0
+	e.records = make([][]any, e.table.rowsHeight)
+	e.loadFromRowId(nil, true, 0)
+	e.renderData()
+	e.table.Select(0, 0)
+	fmt.Fprintf(os.Stderr, "[DEBUG] Data loaded and rendered\n")
+
+	// Update title
+	fmt.Fprintf(os.Stderr, "[DEBUG] Updating title\n")
+	e.app.SetTitle(fmt.Sprintf("ted %s/%s %s", e.config.Database, tableName, databaseIcons[e.relation.DBType]))
 }

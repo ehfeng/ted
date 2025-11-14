@@ -35,23 +35,17 @@ var rootCmd = &cobra.Command{
 	Long: `ted is a spreadsheet-like editor for database tables, allowing for easy viewing and editing of table data.
 
 Examples:
-  ted test users
   ted mydb.sqlite users
-  ted -h localhost -p 5432 -U myuser mydb users`,
+  ted --pg mydb users`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		// Allow 0 args if using --crash-reporting or --completion flags
 		if crashReporting != "" || completion != "" {
 			return nil
 		}
-		// Otherwise require at least 2 args
-		if len(args) < 2 {
-			if len(args) == 0 {
-				return fmt.Errorf("missing database name\n\nTip: \x1b[3mted <TAB>\x1b[0m for available databases\n")
-			}
-			if len(args) == 1 {
-				return fmt.Errorf("missing table name\n\nTip: \x1b[3mted dbname <TAB>\x1b[0m for available tables\n")
-			}
-			return fmt.Errorf("requires at least 2 arg(s), only received %d", len(args))
+		// Require at least 1 arg (database name)
+		// Table name is now optional - if missing, we'll show a picker
+		if len(args) < 1 {
+			return fmt.Errorf("missing database name\n\nTip: \x1b[3mted <TAB>\x1b[0m for available databases\n")
 		}
 		return nil
 	},
@@ -111,7 +105,10 @@ Examples:
 		}
 
 		dbname := args[0]
-		tablename := args[1]
+		tablename := ""
+		if len(args) > 1 {
+			tablename = args[1]
+		}
 
 		var dbTypeOverride *DatabaseType
 		// Validate mutually exclusive flags
@@ -141,6 +138,7 @@ Examples:
 			DBTypeOverride: dbTypeOverride,
 		}
 
+		// Table name is now optional - the table picker will be shown in the editor if not provided
 		if err := runEditor(config, dbname, tablename); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
