@@ -174,6 +174,61 @@ func (fs *FuzzySelector) InputHandler() func(event *tcell.EventKey, setFocus fun
 	})
 }
 
+// MouseHandler returns the handler for mouse events.
+// This enables hover highlighting and click selection in the dropdown list.
+func (fs *FuzzySelector) MouseHandler() func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (bool, tview.Primitive) {
+	return fs.WrapMouseHandler(func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (bool, tview.Primitive) {
+		// Get mouse position
+		mouseX, mouseY := event.Position()
+
+		// Check if mouse is over the dropdown list
+		if fs.dropdownList != nil {
+			listX, listY, listWidth, listHeight := fs.dropdownList.GetRect()
+
+			// Check if mouse is within dropdown bounds
+			if mouseX >= listX && mouseX < listX+listWidth &&
+			   mouseY >= listY && mouseY < listY+listHeight {
+
+				filtered, _ := fs.calculateFiltered(fs.searchText)
+				if len(filtered) == 0 {
+					return false, nil
+				}
+
+				// Calculate which item the mouse is over
+				itemIndex := mouseY - listY
+				if itemIndex >= 0 && itemIndex < len(filtered) {
+					switch action {
+					case tview.MouseMove:
+						// Hover: highlight the item
+						fs.dropdownList.SetCurrentItem(itemIndex)
+						fs.selectedIndex = itemIndex
+						return true, nil
+
+					case tview.MouseLeftClick:
+						// Click: select the item
+						if fs.onSelect != nil {
+							fs.onSelect(filtered[itemIndex])
+						}
+						return true, nil
+					}
+				}
+			}
+		}
+
+		// Forward other mouse events to inner components
+		if fs.innerFlex != nil {
+			if handler := fs.innerFlex.MouseHandler(); handler != nil {
+				consumed, primitive := handler(action, event, setFocus)
+				if consumed {
+					return true, primitive
+				}
+			}
+		}
+
+		return false, nil
+	})
+}
+
 // Focus is called when this primitive receives focus.
 func (fs *FuzzySelector) Focus(delegate func(p tview.Primitive)) {
 	// Forward focus to the input field
