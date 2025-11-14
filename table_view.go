@@ -474,7 +474,6 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 	if len(tv.insertRow) > 0 {
 		maxRegularDataRows = maxDataRows - 1
 	}
-	tv.rowsHeight = maxDataRows
 
 	// Draw regular data rows
 	for i := 0; i < len(tv.data) && dataRowsDrawn < maxRegularDataRows && currentY < y+height; i++ {
