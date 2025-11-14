@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -345,29 +346,47 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			}
 			return results, cobra.ShellCompDirectiveNoFileComp
 		} else {
-			// get sqlite files in current directory
-			files, err := os.ReadDir(".")
+			// get sqlite files and directories for navigation
+			// Parse the directory from toComplete
+			dir := filepath.Dir(toComplete)
+			if dir == "." && toComplete == "" {
+				dir = "."
+			}
+
+			// Read the directory
+			files, err := os.ReadDir(dir)
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
+
 			results := []string{}
 			for _, file := range files {
+				var fullPath string
+				if dir == "." {
+					fullPath = file.Name()
+				} else {
+					fullPath = filepath.Join(dir, file.Name())
+				}
+
 				if file.IsDir() {
-					continue
-				}
-				// sqlite has `SQLite format 3\000` in the first 16 bytes
-				buf := make([]byte, 16)
-				fi, err := os.Open(file.Name())
-				if err != nil {
-					continue
-				}
-				defer fi.Close()
-				fi.Read(buf)
-				if string(buf) == "SQLite format 3\000" {
-					results = append(results, file.Name())
+					// Add directories with trailing slash for navigation
+					results = append(results, fullPath+string(filepath.Separator))
+				} else {
+					// Check if it's a SQLite file
+					// sqlite has `SQLite format 3\000` in the first 16 bytes
+					buf := make([]byte, 16)
+					fi, err := os.Open(fullPath)
+					if err != nil {
+						continue
+					}
+					n, err := fi.Read(buf)
+					fi.Close()
+					if err == nil && n == 16 && string(buf) == "SQLite format 3\000" {
+						results = append(results, fullPath)
+					}
 				}
 			}
-			return results, cobra.ShellCompDirectiveNoFileComp
+			return results, cobra.ShellCompDirectiveNoSpace
 		}
 	} else if len(args) == 1 {
 		if postgres {
