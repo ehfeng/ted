@@ -1460,12 +1460,32 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 		breadcrumbs.RecordNavigation(modeStr, "Palette mode changed")
 	}
 
+	// Handle delete mode state changes
+	wasDeleteMode := e.paletteMode == PaletteModeDelete
+	isDeleteMode := mode == PaletteModeDelete
+
 	e.paletteMode = mode
 	e.commandPalette.SetLabel(mode.Glyph())
 	// Clear input when switching modes
 	e.commandPalette.SetText("")
 	style := e.commandPalette.GetPlaceholderStyle().Italic(true)
 	e.commandPalette.SetPlaceholderStyle(style)
+
+	// Update table view delete mode state
+	if e.table != nil {
+		e.table.SetDeleteMode(isDeleteMode)
+	}
+
+	// Update status bar background color
+	if e.statusBar != nil {
+		if isDeleteMode && !wasDeleteMode {
+			// Entering delete mode: set status bar to red
+			e.statusBar.SetBackgroundColor(tcell.ColorRed)
+		} else if !isDeleteMode && wasDeleteMode {
+			// Exiting delete mode: restore status bar to light gray
+			e.statusBar.SetBackgroundColor(tcell.ColorLightGray)
+		}
+	}
 	if e.table.insertRow != nil {
 		e.commandPalette.SetPlaceholder("INSERT preview… (Esc to exit)")
 	}

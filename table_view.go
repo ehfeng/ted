@@ -138,6 +138,7 @@ type TableView struct {
 	selectedRow int
 	selectedCol int
 	selectable  bool
+	deleteMode  bool // When true, selected row has red background
 
 	// Callbacks
 	doubleClickFunc     func(row, col int)
@@ -289,6 +290,12 @@ func (tv *TableView) Select(row, col int) *TableView {
 // SetSelectable sets whether the table is selectable
 func (tv *TableView) SetSelectable(selectable bool) *TableView {
 	tv.selectable = selectable
+	return tv
+}
+
+// SetDeleteMode sets whether the table is in delete mode (selected row will have red background)
+func (tv *TableView) SetDeleteMode(deleteMode bool) *TableView {
+	tv.deleteMode = deleteMode
 	return tv
 }
 
@@ -610,8 +617,11 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 
 	// Left border
 	borderStyle := tcell.StyleDefault.Foreground(tv.borderColor)
+	isSelectedRowInDeleteMode := tv.selectable && tv.deleteMode && rowIdx == tv.selectedRow
 	if isNewRecordRow {
 		borderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
+	} else if isSelectedRowInDeleteMode {
+		borderStyle = tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite)
 	}
 	tv.viewport.SetContent(x, y, '│', nil, borderStyle)
 	pos := x + 1
@@ -626,8 +636,14 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 
 		// Apply selection highlight on top of base style
 		cellStyle := baseCellStyle
-		if tv.selectable && rowIdx == tv.selectedRow && i == tv.selectedCol {
-			cellStyle = cellStyle.Background(tcell.ColorBlue).Foreground(tcell.ColorWhite)
+		if tv.selectable && rowIdx == tv.selectedRow {
+			if tv.deleteMode {
+				// In delete mode, make the entire selected row red
+				cellStyle = cellStyle.Background(tcell.ColorRed).Foreground(tcell.ColorWhite)
+			} else if i == tv.selectedCol {
+				// In normal mode, only highlight the selected cell
+				cellStyle = cellStyle.Background(tcell.ColorBlue).Foreground(tcell.ColorWhite)
+			}
 		}
 
 		// Padding before content
@@ -677,6 +693,8 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 			sepStyle := tcell.StyleDefault.Foreground(tv.borderColor)
 			if isNewRecordRow {
 				sepStyle = baseCellStyle
+			} else if isSelectedRowInDeleteMode {
+				sepStyle = cellStyle
 			}
 			// Use thicker separator after last key column
 			separator := '│'
@@ -692,6 +710,8 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 	rightBorderStyle := tcell.StyleDefault.Foreground(tv.borderColor)
 	if isNewRecordRow {
 		rightBorderStyle = tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
+	} else if isSelectedRowInDeleteMode {
+		rightBorderStyle = tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite)
 	}
 	tv.viewport.SetContent(pos, y, '│', nil, rightBorderStyle)
 }
