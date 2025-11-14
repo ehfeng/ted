@@ -10,4 +10,4 @@ Use `tview.MouseConsumed` to indicate mouse event is handled
 
 ## Debug
 
-Check /tmp/ted.log for debug statements
+If debugging a problem and a debug log statement is referenced, check /tmp/ted.log
