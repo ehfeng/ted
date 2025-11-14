@@ -144,6 +144,7 @@ type TableView struct {
 	singleClickFunc     func(row, col int)
 	selectionChangeFunc func(row, col int)
 	mouseScrollFunc     func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse)
+	tableNameClickFunc  func()
 
 	// Double-click tracking
 	lastClickRow int
@@ -163,11 +164,12 @@ type TableView struct {
 
 // TableViewConfig holds configuration for creating a TableView
 type TableViewConfig struct {
-	Headers         []HeaderColumn
-	KeyColumnCount  int
-	DoubleClickFunc func(row, col int)
-	SingleClickFunc func(row, col int)
-	MouseScrollFunc func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse)
+	Headers            []HeaderColumn
+	KeyColumnCount     int
+	DoubleClickFunc    func(row, col int)
+	SingleClickFunc    func(row, col int)
+	MouseScrollFunc    func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse)
+	TableNameClickFunc func()
 }
 
 // NewTableView creates a new table view component with the given configuration
@@ -207,6 +209,9 @@ func NewTableView(height int, config *TableViewConfig) *TableView {
 		}
 		if config.MouseScrollFunc != nil {
 			tv.SetMouseScrollFunc(config.MouseScrollFunc)
+		}
+		if config.TableNameClickFunc != nil {
+			tv.SetTableNameClickFunc(config.TableNameClickFunc)
 		}
 	}
 
@@ -311,6 +316,12 @@ func (tv *TableView) SetMouseScrollFunc(handler func(action tview.MouseAction, e
 	return tv
 }
 
+// SetTableNameClickFunc sets the function to call when the table name is clicked
+func (tv *TableView) SetTableNameClickFunc(handler func()) *TableView {
+	tv.tableNameClickFunc = handler
+	return tv
+}
+
 // GetCell returns the value at the specified data coordinates
 func (tv *TableView) GetCell(row, col int) any {
 	if row >= 0 && row < len(tv.data) && col >= 0 && col < len(tv.data[row]) {
@@ -336,6 +347,11 @@ func (tv *TableView) UpdateRowsHeightFromRect(height int) {
 	// Reserve space for top border, header row, and header separator
 	maxDataRows := height - 3
 
+	// Reserve space for table name header if set
+	if tv.tableName != "" {
+		maxDataRows--
+	}
+
 	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
 	drawBottomBorder := tv.bottom
 	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1]) == 0 {
@@ -347,7 +363,7 @@ func (tv *TableView) UpdateRowsHeightFromRect(height int) {
 
 	// Reserve additional space for bottom border if needed
 	if drawBottomBorder {
-		maxDataRows = height - 4
+		maxDataRows--
 	}
 
 	// Update the rowsHeight field
@@ -379,8 +395,10 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 	currentY := y
 
 	// Draw table name header if table name is set
-	tv.drawTableNameHeader(x, currentY, tableWidth)
-	currentY++
+	if tv.tableName != "" {
+		tv.drawTableNameHeader(x, currentY, tableWidth)
+		currentY++
+	}
 
 	// Draw top border
 	tv.drawTopBorder(x, currentY, tableWidth)
@@ -800,6 +818,17 @@ func (tv *TableView) MouseHandler() func(action tview.MouseAction, event *tcell.
 				return true, nil // Release capture
 			}
 		case tview.MouseLeftClick:
+			// Check if click is on table name header
+			_, innerY, _, _ := tv.GetInnerRect()
+			relativeY := y - innerY
+
+			// Table name is at relativeY == 0 (if tableName is set)
+			if relativeY == 0 && tv.tableName != "" && tv.tableNameClickFunc != nil {
+				tv.tableNameClickFunc()
+				consumed = true
+				return consumed, nil
+			}
+
 			row, col := tv.GetCellAtPosition(x, y)
 			if tv.singleClickFunc != nil && row >= 0 && col >= 0 {
 				tv.singleClickFunc(row, col)
@@ -894,16 +923,27 @@ func (tv *TableView) GetCellAtPosition(screenX, screenY int) (row, col int) {
 	}
 
 	// Calculate which row was clicked
-	// Row 0: top border
-	// Row 1: header
-	// Row 2: header separator
-	// Row 3+: data rows
+	// When tableName is set:
+	//   Row 0: table name header
+	//   Row 1: top border
+	//   Row 2: header
+	//   Row 3: header separator
+	//   Row 4+: data rows
+	// When tableName is empty:
+	//   Row 0: top border
+	//   Row 1: header
+	//   Row 2: header separator
+	//   Row 3+: data rows
 	relativeY := screenY - y
-	if relativeY < 3 {
+	headerOffset := 3
+	if tv.tableName != "" {
+		headerOffset = 4
+	}
+	if relativeY < headerOffset {
 		return -1, -1 // Clicked on border/header, not a data cell
 	}
 
-	dataRow := relativeY - 3
+	dataRow := relativeY - headerOffset
 	if dataRow < 0 || dataRow >= len(tv.data) || tv.data[dataRow] == nil {
 		return -1, -1 // Beyond available data
 	}
@@ -949,9 +989,17 @@ func (tv *TableView) GetColumnSeparatorAtPosition(screenX, screenY int) int {
 		return -1
 	}
 
-	// Allow clicking on header row (row 1) or any data row (rows 3+)
+	// Allow clicking on header row or any data row
+	// When tableName is set, header is at row 2, data starts at row 4
+	// When tableName is empty, header is at row 1, data starts at row 3
 	relativeY := screenY - y
-	if relativeY != 1 && relativeY < 3 {
+	headerRow := 1
+	dataStartRow := 3
+	if tv.tableName != "" {
+		headerRow = 2
+		dataStartRow = 4
+	}
+	if relativeY != headerRow && relativeY < dataStartRow {
 		return -1 // Not on header or data area
 	}
 

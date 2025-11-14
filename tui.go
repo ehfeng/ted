@@ -206,6 +206,13 @@ func runEditor(config *Config, dbname, tablename string) error {
 				editor.exitEditMode()
 			}
 		},
+		TableNameClickFunc: func() {
+			editor.pages.ShowPage(pagePicker)
+			editor.app.SetFocus(editor.tablePicker)
+			editor.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+				screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
+			})
+		},
 		MouseScrollFunc: func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
 			// Record mouse event in breadcrumbs
 			if breadcrumbs != nil && event != nil {
