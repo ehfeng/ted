@@ -28,6 +28,7 @@ var (
 	useMySQL       bool
 	crashReporting string
 	completion     string
+	vimMode        bool
 )
 
 var rootCmd = &cobra.Command{
@@ -129,6 +130,18 @@ Examples:
 			dbTypeOverride = &t
 		}
 
+		// Load settings to check vim mode preference
+		settings, err := LoadSettings()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Could not load settings: %v\n", err)
+		}
+
+		// Determine vim mode: flag takes precedence, otherwise use settings
+		useVimMode := vimMode
+		if !useVimMode && settings != nil {
+			useVimMode = settings.VimMode
+		}
+
 		config := &Config{
 			Database:       getValue(database, dbname),
 			Host:           host,
@@ -137,6 +150,7 @@ Examples:
 			Password:       password,
 			Command:        command,
 			DBTypeOverride: dbTypeOverride,
+			VimMode:        useVimMode,
 		}
 
 		// Table name is now optional - the table picker will be shown in the editor if not provided
@@ -168,6 +182,7 @@ func init() {
 		legacy.Hidden = true
 	}
 	rootCmd.Flags().StringVar(&completion, "completion", "", "Generate shell completions (bash, zsh, fish, powershell)")
+	rootCmd.Flags().BoolVar(&vimMode, "vim", false, "Enable vim mode for table navigation")
 
 	if err := rootCmd.RegisterFlagCompletionFunc("pg", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return []string{"hi", "pg"}, cobra.ShellCompDirectiveNoFileComp

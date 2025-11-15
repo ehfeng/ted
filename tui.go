@@ -53,6 +53,7 @@ type Editor struct {
 	columns  []Column // TODO move this into Config
 	relation *Relation
 	config   *Config
+	vimMode  bool
 
 	// Database connection (stored separately to support table switching when relation is nil)
 	db     *sql.DB
@@ -67,6 +68,7 @@ type Editor struct {
 	paletteMode         PaletteMode
 	kittySequenceActive bool
 	kittySequenceBuffer string
+	lastGPress          time.Time // For detecting 'gg' in vim mode
 
 	// selection
 	editing bool
@@ -200,6 +202,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 		columns:     columns,
 		relation:    relation,
 		config:      config,
+		vimMode:     config.VimMode,
 		db:          db,
 		dbType:      dbType,
 		tablePicker: nil, // Will be initialized after editor is created
@@ -294,7 +297,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 		},
 	})
 
-	editor.table.SetTableName(tablename)
+	editor.table.SetTableName(tablename).SetVimMode(editor.vimMode)
 
 	// Only load data if we have a table
 	if tablename != "" {
@@ -819,12 +822,136 @@ func (e *Editor) setupKeyBindings() {
 			// Ctrl+D: enter delete mode
 			e.enterDeleteMode(row, col)
 			return nil
+		// Vim mode keybindings
+		case e.vimMode && key == tcell.KeyRune && rune == 'h' && mod == 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// h: move left
+			if col > 0 {
+				e.table.Select(row, col-1)
+			}
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == 'l' && mod == 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// l: move right
+			if col < len(e.columns)-1 {
+				e.table.Select(row, col+1)
+			}
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == 'j' && mod == 0:
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
+			}
+			// j: move down
+			if row == len(e.records)-1 {
+				e.nextRows(1)
+			} else {
+				if len(e.records[row+1].data) == 0 {
+					e.table.Select(row+2, col)
+				} else {
+					e.table.Select(row+1, col)
+				}
+			}
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == 'k' && mod == 0:
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
+			}
+			// k: move up
+			if row == 0 {
+				e.prevRows(1)
+			} else {
+				e.table.Select(row-1, col)
+			}
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == 'g' && mod == 0:
+			// Disable in insert/delete mode
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// Check if this is a double 'g' press (gg)
+			if time.Since(e.lastGPress) < 500*time.Millisecond {
+				// gg: jump to first row
+				e.loadFromRowId(nil, true, col, false)
+				e.table.Select(0, col)
+				e.lastGPress = time.Time{} // Reset
+			} else {
+				// Single g also jumps to first row (per spec)
+				e.loadFromRowId(nil, true, col, false)
+				e.table.Select(0, col)
+				e.lastGPress = time.Now() // Track for potential gg
+			}
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == 'G':
+			// Disable in insert/delete mode
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// G: jump to last row
+			e.loadFromRowId(nil, false, col, false)
+			e.table.Select(e.lastRowIdx()-1, col)
+			return nil
+		case e.vimMode && key == tcell.KeyRune && (rune == '0' || rune == '^') && mod == 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// 0 or ^: jump to first column
+			e.table.Select(row, 0)
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == '$' && mod&tcell.ModShift != 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// $: jump to last column
+			e.table.Select(row, len(e.columns)-1)
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == 'i' && mod == 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// i: enter edit mode with all text selected
+			e.enterEditModeWithSelection(row, col, true)
+			return nil
+		case e.vimMode && key == tcell.KeyRune && rune == 'a' && mod == 0:
+			// Disable in delete mode
+			if e.paletteMode == PaletteModeDelete {
+				return nil
+			}
+			// a: enter edit mode with cursor at end
+			e.enterEditModeWithSelection(row, col, false)
+			return nil
+		case e.vimMode && (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0:
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
+			}
+			// Ctrl+F: page down (already handled by KeyPgDn, but vim users might use Ctrl+F)
+			pageSize := max(1, e.table.rowsHeight-1)
+			e.nextRows(pageSize)
+			return nil
+		case e.vimMode && (rune == 'b' || rune == 2) && mod&tcell.ModCtrl != 0:
+			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+				return nil // Disable vertical navigation in insert mode or delete mode
+			}
+			// Ctrl+B: page up (already handled by KeyPgUp, but vim users might use Ctrl+B)
+			pageSize := max(1, e.table.rowsHeight-1)
+			e.prevRows(pageSize)
+			return nil
 		default:
 			// Disable in delete mode
 			if e.paletteMode == PaletteModeDelete {
 				return event
 			}
-			if key == tcell.KeyRune && rune != 0 &&
+			// In vim mode, don't auto-enter edit mode on typing
+			// (use 'i' or 'a' instead)
+			if !e.vimMode && key == tcell.KeyRune && rune != 0 &&
 				mod&(tcell.ModAlt|tcell.ModCtrl|tcell.ModMeta) == 0 {
 				e.enterEditModeWithInitialValue(row, col, string(rune))
 				return nil
@@ -1032,6 +1159,142 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 	if isNewRecordRow {
 		e.setPaletteMode(PaletteModeInsert, false)
 		e.updateEditPreview(initialText)
+		e.updateStatusForEditMode(col)
+	} else {
+		e.setPaletteMode(PaletteModeUpdate, false)
+		e.updateStatusForEditMode(col)
+	}
+}
+
+// enterEditModeWithSelection enters edit mode with optional text selection
+// selectAll=true: select all text (for vim 'i' mode)
+// selectAll=false: cursor at end (for vim 'a' mode)
+func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
+	var currentValue any
+	if len(e.table.insertRow) > 0 {
+		currentValue = e.table.insertRow[col]
+	} else {
+		currentValue = e.table.GetCell(row, col)
+	}
+	currentText := ""
+	if currentValue != nil {
+		currentText, _ = formatCellValue(currentValue, tcell.StyleDefault)
+	}
+
+	// must be set before any calls to app.Draw()
+	e.editing = true
+	// In insert mode, allow editing the virtual insert mode row
+	// The virtual row index equals the length of the data array
+	// (which is shorter than records in insert mode)
+	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
+
+	// Create textarea for editing with proper styling
+	// Set cursor position: true for end, false for beginning
+	textArea := tview.NewTextArea().
+		SetText(currentText, !selectAll). // If selectAll, start at beginning; otherwise at end
+		SetWrap(true).
+		SetOffset(0, 0)
+
+	textArea.SetBorder(false)
+
+	// Store references for dynamic resizing
+	var modal tview.Primitive
+	// Set the table selection to track which cell is being edited
+	e.table.Select(row, col)
+
+	// Function to resize textarea based on current content
+	resizeTextarea := func() {
+		e.pages.RemovePage("editor")
+		modal = e.createCellEditOverlay(textArea, row, col, textArea.GetText())
+		e.pages.AddPage("editor", modal, true, true)
+		textArea.SetOffset(0, 0)
+	}
+
+	// Handle textarea input capture for save/cancel
+	textArea.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		key := event.Key()
+		rune := event.Rune()
+		mod := event.Modifiers()
+
+		// Ctrl+S: execute INSERT in insert mode (save and insert)
+		if (rune == 's' || rune == 19) && mod&tcell.ModCtrl != 0 {
+			if len(e.table.insertRow) > 0 {
+				// Save current cell first
+				newText := textArea.GetText()
+				e.table.insertRow[col] = newText
+				e.exitEditMode()
+				e.executeInsert()
+				return nil
+			}
+		}
+
+		switch key {
+		case tcell.KeyEnter:
+			// Check if Alt/Option is pressed with Enter
+			if event.Modifiers()&tcell.ModAlt != 0 {
+				// Alt+Enter: only allow newlines for text-compatible column types
+				if e.isMultilineColumnType(col) {
+					// Manually insert newline instead of relying on default handler
+					currentText := textArea.GetText()
+					// Simply append newline at the end for now
+					newText := currentText + "\n"
+					textArea.SetText(newText, true)
+					resizeTextarea()
+					return nil
+				}
+				// For other types, treat as regular Enter (save and exit)
+				newText := textArea.GetText()
+				e.updateCell(row, col, newText)
+				return nil
+			}
+			// Plain Enter: save and exit
+			newText := textArea.GetText()
+			e.updateCell(row, col, newText)
+			return nil
+		case tcell.KeyTab:
+			// Tab: save and move to next cell
+			newText := textArea.GetText()
+			e.updateCell(row, col, newText)
+			// Move selection right
+			if col < len(e.columns)-1 {
+				e.table.Select(row, col+1)
+			} else if row < len(e.records)-1 {
+				e.table.Select(row+1, 0)
+			}
+			return nil
+		case tcell.KeyEscape:
+			e.exitEditMode()
+			return nil
+		}
+		return event
+	})
+	// Position the textarea to align with the cell
+	modal = e.createCellEditOverlay(textArea, row, col, currentText)
+	// Set editMode early to prevent resize handler from running during AddPage
+	e.pages.AddPage("editor", modal, true, true)
+
+	// Set up dynamic resizing on text changes and update SQL preview AFTER initial page add
+	textArea.SetChangedFunc(func() {
+		resizeTextarea()
+		e.updateEditPreview(textArea.GetText())
+	})
+	// Set up native cursor positioning and select all text if needed
+	// Use a closure variable to ensure Select only runs once after the first draw
+	selectTextOnce := selectAll && len(currentText) > 0
+	textLen := len(currentText) // Capture length in closure
+	e.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
+		if selectTextOnce {
+			selectTextOnce = false // Disable future selections
+			textArea.Select(0, textLen)
+		}
+	})
+	e.app.SetFocus(textArea)
+
+	// Set palette mode based on whether we're in insert mode or update mode
+	if isNewRecordRow {
+		e.setPaletteMode(PaletteModeInsert, false)
+		e.updateEditPreview(currentText)
 		e.updateStatusForEditMode(col)
 	} else {
 		e.setPaletteMode(PaletteModeUpdate, false)
@@ -2804,7 +3067,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 			Width: col.Width,
 		}
 	}
-	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.key)).SetTableName(tableName)
+	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.key)).SetTableName(tableName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
 	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")

@@ -11,6 +11,7 @@ import (
 type Settings struct {
 	CrashReportingEnabled bool `json:"crash_reporting_enabled"`
 	FirstRunComplete      bool `json:"first_run_complete"`
+	VimMode               bool `json:"vim_mode"`
 }
 
 // UnmarshalJSON ensures backward compatibility with legacy telemetry settings.
@@ -96,6 +97,7 @@ func LoadSettings() (*Settings, error) {
 		return &Settings{
 			CrashReportingEnabled: false,
 			FirstRunComplete:      false,
+			VimMode:               false,
 		}, nil
 	}
 

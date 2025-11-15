@@ -23,6 +23,7 @@ type Config struct {
 	OrderBy  string
 	// DBTypeOverride allows explicitly selecting the database type via flags
 	DBTypeOverride *DatabaseType
+	VimMode        bool
 }
 
 type DatabaseType int

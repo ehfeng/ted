@@ -139,6 +139,7 @@ type TableView struct {
 	selectedCol int
 	selectable  bool
 	deleteMode  bool // When true, selected row has red background
+	vimMode     bool // When true, display "vim mode" indicator
 
 	// Callbacks
 	doubleClickFunc     func(row, col int)
@@ -235,6 +236,12 @@ func (tv *TableView) SetKeyColumnCount(count int) *TableView {
 // SetTableName sets the table name to display in the header row
 func (tv *TableView) SetTableName(name string) *TableView {
 	tv.tableName = name
+	return tv
+}
+
+// SetVimMode enables or disables vim mode indicator
+func (tv *TableView) SetVimMode(enabled bool) *TableView {
+	tv.vimMode = enabled
 	return tv
 }
 
@@ -522,6 +529,12 @@ func (tv *TableView) drawTableNameHeader(x, y, tableWidth int) {
 	headerText := fmt.Sprintf(" %s ▾", tv.tableName)
 	style := tcell.StyleDefault.Foreground(tcell.ColorWhite)
 
+	// Vim mode indicator to display on the right
+	vimModeText := ""
+	if tv.vimMode {
+		vimModeText = "vim mode "
+	}
+
 	// Draw the header text left-aligned
 	pos := x
 	for _, ch := range headerText {
@@ -529,10 +542,25 @@ func (tv *TableView) drawTableNameHeader(x, y, tableWidth int) {
 		pos++
 	}
 
-	// Fill the rest of the line with spaces up to the table width
-	for pos < x+tableWidth {
+	// Calculate where vim mode text should start (right-aligned)
+	vimModeStartPos := x + tableWidth - len(vimModeText)
+
+	// Fill the middle with spaces, stopping before vim mode text
+	endPos := x + tableWidth
+	if tv.vimMode {
+		endPos = vimModeStartPos
+	}
+	for pos < endPos {
 		tv.viewport.SetContent(pos, y, ' ', nil, style)
 		pos++
+	}
+
+	// Draw vim mode text right-aligned
+	if tv.vimMode {
+		for _, ch := range vimModeText {
+			tv.viewport.SetContent(pos, y, ch, nil, style)
+			pos++
+		}
 	}
 }
 
