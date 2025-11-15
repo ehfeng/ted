@@ -75,22 +75,6 @@ brew install ted
 1. i: edit mode
 1. a: append mode
 
-### Ctrl shortcuts
-
-1. b: (vim) screen up
-1. c: exit
-1. d: delete row
-1. f: (vim) screen down
-1. g: goto
-1. o: open
-1. p: command
-1. r: insert row
-1. ``` ` ```: sql mode
-1. .: increase width
-1. ,: decrease width
-1. home: first row
-1. end: last row
-
 ## Mouse
 
 You can select cells, resize columns, and scroll with the mouse.
