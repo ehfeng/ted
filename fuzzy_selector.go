@@ -206,6 +206,7 @@ func (fs *FuzzySelector) MouseHandler() func(action tview.MouseAction, event *tc
 					case tview.MouseLeftClick:
 						// Click: select the item
 						if fs.onSelect != nil {
+							fs.clearSearchText()
 							fs.onSelect(filtered[itemIndex])
 						}
 						return true, nil
@@ -344,6 +345,7 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 			if tp.dropdownList != nil && len(filtered) > 0 {
 				if idx := tp.dropdownList.GetCurrentItem(); idx >= 0 && idx < len(filtered) {
 					if tp.onSelect != nil {
+						tp.clearSearchText()
 						tp.onSelect(filtered[idx])
 					}
 				}
@@ -360,6 +362,15 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 // This is used by the Editor to set focus when the picker is opened.
 func (tp *FuzzySelector) GetInputField() *tview.InputField {
 	return tp.inputField
+}
+
+// clearSearchText clears the search text and updates the input field.
+func (tp *FuzzySelector) clearSearchText() {
+	tp.searchText = ""
+	if tp.inputField != nil {
+		tp.inputField.SetText("")
+	}
+	tp.selectedIndex = 0
 }
 
 // createDropdownListWithData creates and populates the dropdown list with pre-calculated filtered results.
@@ -381,6 +392,7 @@ func (tp *FuzzySelector) createDropdownListWithData(filtered []string, matchPosi
 			name := tableName
 			tp.dropdownList.AddItem(displayText, "", rune(0), func() {
 				if tp.onSelect != nil {
+					tp.clearSearchText()
 					tp.onSelect(name)
 				}
 			})
@@ -414,6 +426,7 @@ func (tp *FuzzySelector) createDropdownListWithData(filtered []string, matchPosi
 			// Select the current item
 			if currentItem >= 0 && currentItem < len(filtered) {
 				if tp.onSelect != nil {
+					tp.clearSearchText()
 					tp.onSelect(filtered[currentItem])
 				}
 			}

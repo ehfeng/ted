@@ -384,11 +384,6 @@ func (tv *TableView) UpdateRowsHeightFromRect(height int) {
 	// Reserve space for top border, header row, and header separator
 	maxDataRows := height - 3
 
-	// Reserve space for table name header if set
-	if tv.tableName != "" {
-		maxDataRows--
-	}
-
 	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
 	drawBottomBorder := tv.bottom
 	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1].data) == 0 {
@@ -465,15 +460,8 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 	// Draw data rows
 	dataRowsDrawn := 0
 	maxDataRows := height - 3 // Reserve space for top border and header
-	if tv.tableName != "" {
-		maxDataRows = height - 4 // Reserve space for table name header
-	}
 	if drawBottomBorder {
-		if tv.tableName != "" {
-			maxDataRows = height - 5 // Reserve space for table name + bottom border
-		} else {
-			maxDataRows = height - 4 // Reserve additional space for bottom border
-		}
+		maxDataRows = maxDataRows - 1
 	}
 
 	// When in insert mode, we need to reserve one more row for the insert mode row
