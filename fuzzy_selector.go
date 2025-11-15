@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -136,7 +135,7 @@ func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]i
 // Draw implements tview.Primitive and renders the fuzzy selector.
 // It calculates filtered results and match positions on each frame.
 func (fs *FuzzySelector) Draw(screen tcell.Screen) {
-	fmt.Fprintf(os.Stderr, "[DEBUG] Drawing fuzzy selector\n")
+	debugLog("Drawing fuzzy selector\n")
 	fs.Box.DrawForSubclass(screen, fs)
 
 	// Calculate filtered results and match positions on each draw
@@ -187,7 +186,7 @@ func (fs *FuzzySelector) MouseHandler() func(action tview.MouseAction, event *tc
 
 			// Check if mouse is within dropdown bounds
 			if mouseX >= listX && mouseX < listX+listWidth &&
-			   mouseY >= listY && mouseY < listY+listHeight {
+				mouseY >= listY && mouseY < listY+listHeight {
 
 				filtered, _ := fs.calculateFiltered(fs.searchText)
 				if len(filtered) == 0 {
@@ -314,7 +313,7 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 
 	// Handle keyboard navigation and selection
 	inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Input field capture: %v\n", event.Key())
+		debugLog("Input field capture: %v\n", event.Key())
 		filtered, _ := tp.calculateFiltered(tp.searchText)
 
 		switch event.Key() {

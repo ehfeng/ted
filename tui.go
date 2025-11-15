@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -3028,26 +3027,26 @@ func (e *Editor) executeGoto(gotoValue string) {
 
 // selectTableFromPicker handles selecting a table from the picker
 func (e *Editor) selectTableFromPicker(tableName string) {
-	fmt.Fprintf(os.Stderr, "[DEBUG] selectTableFromPicker: %s\n", tableName)
+	debugLog("selectTableFromPicker: %s\n", tableName)
 	e.pages.HidePage(pagePicker)
 	e.app.SetAfterDrawFunc(nil) // Clear cursor style function
 	e.setCursorStyle(0)         // Reset to default cursor style
-	fmt.Fprintf(os.Stderr, "[DEBUG] Picker closed\n")
+	debugLog("Picker closed\n")
 
 	// Reload the table data using the current database connection
 	relation, err := NewRelation(e.db, e.dbType, tableName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating relation: %v\n", err)
+		debugLog("Error creating relation: %v\n", err)
 		e.SetStatusErrorWithSentry(err)
 		return
 	}
 
 	// Update the relation
-	fmt.Fprintf(os.Stderr, "[DEBUG] Relation created successfully\n")
+	debugLog("Relation created successfully\n")
 	e.relation = relation
 
 	// Reset columns
-	fmt.Fprintf(os.Stderr, "[DEBUG] Resetting columns\n")
+	debugLog("Resetting columns\n")
 	e.columns = make([]Column, 0, len(e.relation.attributeOrder))
 	for _, name := range e.relation.key {
 		e.columns = append(e.columns, Column{Name: name, Width: 4})
@@ -3059,7 +3058,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	}
 
 	// Update table headers
-	fmt.Fprintf(os.Stderr, "[DEBUG] Updating table headers\n")
+	debugLog("Updating table headers\n")
 	headers := make([]HeaderColumn, len(e.columns))
 	for i, col := range e.columns {
 		headers[i] = HeaderColumn{
@@ -3070,19 +3069,19 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.key)).SetTableName(tableName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
-	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")
+	debugLog("Loading data from beginning\n")
 	e.pointer = 0
 	e.records = make([]Row, e.table.rowsHeight)
 	e.loadFromRowId(nil, true, 0, false)
 	e.renderData()
 	e.table.Select(0, 0)
-	fmt.Fprintf(os.Stderr, "[DEBUG] Data loaded and rendered\n")
+	debugLog("Data loaded and rendered\n")
 
 	// Update title
-	fmt.Fprintf(os.Stderr, "[DEBUG] Updating title\n")
+	debugLog("Updating title\n")
 	e.app.SetTitle(fmt.Sprintf("ted %s/%s %s", e.config.Database, tableName, databaseIcons[e.relation.DBType]))
 
 	// Set focus back to table
-	fmt.Fprintf(os.Stderr, "[DEBUG] Setting focus to table\n")
+	debugLog("Setting focus to table\n")
 	e.app.SetFocus(e.table)
 }
