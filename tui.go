@@ -2123,8 +2123,13 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			}
 
 			// Append any remaining new rows
+			// If there are no more old records to compare against, assume new rows are normal
 			for newRowIdx < len(newRows) {
-				finalRecords = append(finalRecords, newRows[newRowIdx])
+				row := newRows[newRowIdx]
+				if row.state == RowStateNew {
+					row.state = RowStateNormal
+				}
+				finalRecords = append(finalRecords, row)
 				newRowIdx++
 			}
 		} else {
@@ -2263,8 +2268,13 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			}
 
 			// Append any remaining new rows
+			// If there are no more old records to compare against, assume new rows are normal
 			for newRowIdx < len(newRows) {
-				finalRecords = append(finalRecords, newRows[newRowIdx])
+				row := newRows[newRowIdx]
+				if row.state == RowStateNew {
+					row.state = RowStateNormal
+				}
+				finalRecords = append(finalRecords, row)
 				newRowIdx++
 			}
 
