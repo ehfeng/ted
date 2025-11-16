@@ -1,0 +1,487 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+)
+
+const (
+	DefaultColumnWidth   = 8
+	RowsTimerInterval    = 100 * time.Millisecond
+	RefreshTimerInterval = 300 * time.Millisecond
+	pagePicker           = "picker"
+	pageTable            = "table"
+	chromeHeight         = 6
+)
+
+// this is a config concept
+// width = 0 means Column is hidden but selected
+type Column struct {
+	Name  string
+	Width int
+}
+
+type RowState int
+
+const (
+	RowStateNormal RowState = iota
+	RowStateNew
+	RowStateDeleted
+)
+
+type Row struct {
+	state    RowState
+	data     []any
+	modified []int // indices of columns that were modified in the last refresh
+}
+
+// columns are display, relation.attributes stores the database attributes
+// lookup key is unique: it's always selected
+// if a multicolumn reference is selected, all columns in the reference are selected
+type Editor struct {
+	app      *tview.Application
+	pages    *tview.Pages
+	table    *TableView
+	columns  []Column // TODO move this into Config
+	relation *Relation
+	config   *Config
+	vimMode  bool
+
+	// Database connection (stored separately to support table switching when relation is nil)
+	db     *sql.DB
+	dbType DatabaseType
+
+	// references to key components
+	tablePicker    *FuzzySelector // Table picker at the top
+	statusBar      *tview.TextView
+	commandPalette *tview.InputField
+	layout         *tview.Flex
+
+	paletteMode         PaletteMode
+	kittySequenceActive bool
+	kittySequenceBuffer string
+	lastGPress          time.Time // For detecting 'gg' in vim mode
+
+	// selection
+	editing bool
+
+	// data, records is a circular buffer
+	nextQuery *sql.Rows // nextRows
+	prevQuery *sql.Rows // prevRows
+	pointer   int       // pointer to the current record
+	records   []Row     // columns are keyed off e.columns
+
+	// timer for auto-closing rows
+	rowsTimer      *time.Timer
+	rowsTimerReset chan struct{}
+
+	// timer for auto-refreshing data
+	refreshTimer     *time.Timer
+	refreshTimerStop chan struct{}
+}
+
+// PaletteMode represents the current mode of the command palette
+type PaletteMode int
+
+const (
+	PaletteModeDefault PaletteMode = iota
+	PaletteModeCommand
+	PaletteModeSQL
+	PaletteModeGoto
+	PaletteModeUpdate
+	PaletteModeInsert
+	PaletteModeDelete
+)
+
+func (m PaletteMode) Glyph() string {
+	switch m {
+	case PaletteModeDefault:
+		return "⌃ "
+	case PaletteModeCommand:
+		return "> "
+	case PaletteModeSQL:
+		return "` "
+	case PaletteModeGoto:
+		return "↪ "
+	case PaletteModeUpdate:
+		return "` "
+	case PaletteModeInsert:
+		return "` "
+	case PaletteModeDelete:
+		return "✗ "
+	default:
+		return "> "
+	}
+}
+
+// mouseActionString converts tview.MouseAction to a human-readable string
+func mouseActionString(action tview.MouseAction) string {
+	switch action {
+	case tview.MouseScrollUp:
+		return "ScrollUp"
+	case tview.MouseScrollDown:
+		return "ScrollDown"
+	case tview.MouseLeftClick:
+		return "LeftClick"
+	case tview.MouseRightClick:
+		return "RightClick"
+	case tview.MouseMiddleClick:
+		return "MiddleClick"
+	case tview.MouseMove:
+		return "Move"
+	case tview.MouseLeftDoubleClick:
+		return "LeftDoubleClick"
+	default:
+		return fmt.Sprintf("Unknown(%d)", action)
+	}
+}
+
+func runEditor(config *Config, dbname, tablename string) error {
+	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
+
+	db, dbType, err := config.connect()
+	if err != nil {
+		CaptureError(err)
+		return err
+	}
+	defer db.Close()
+
+	// Get terminal height for optimal data loading
+	terminalHeight := getTerminalHeight()
+	tableDataHeight := terminalHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
+
+	var relation *Relation
+	var columns []Column
+
+	// Only load table if tablename is provided
+	if tablename != "" {
+		var err error
+		relation, err = NewRelation(db, dbType, tablename)
+		if err != nil {
+			CaptureError(err)
+			return err
+		}
+
+		// force key to be first column(s)
+		columns = make([]Column, 0, len(relation.attributeOrder))
+		for _, name := range relation.key {
+			columns = append(columns, Column{Name: name, Width: 4})
+		}
+		for _, name := range relation.attributeOrder {
+			if !slices.Contains(relation.key, name) {
+				columns = append(columns, Column{Name: name, Width: DefaultColumnWidth})
+			}
+		}
+	} else {
+		// No table specified - create empty state
+		columns = []Column{}
+	}
+
+	// Get available tables for the picker
+	tables, err := config.GetTables()
+	if err != nil {
+		CaptureError(err)
+		return err
+	}
+
+	app := tview.NewApplication().SetTitle(fmt.Sprintf("ted %s %s",
+		dbname, databaseIcons[dbType])).EnableMouse(true)
+
+	editor := &Editor{
+		app:         app,
+		pages:       tview.NewPages(),
+		table:       nil, // Will be initialized after we have access to all editor fields
+		columns:     columns,
+		relation:    relation,
+		config:      config,
+		vimMode:     config.VimMode,
+		db:          db,
+		dbType:      dbType,
+		tablePicker: nil, // Will be initialized after editor is created
+		paletteMode: PaletteModeDefault,
+		pointer:     0,
+		records:     make([]Row, tableDataHeight),
+	}
+
+	// Create selector with callback now that editor exists
+	editor.tablePicker = NewFuzzySelector(tables, tablename, editor.selectTableFromPicker, func() {
+		// Close callback: hide picker and return focus to table
+		editor.pages.HidePage(pagePicker)
+		editor.app.SetFocus(editor.table)
+		editor.app.SetAfterDrawFunc(nil) // Clear cursor style function
+		editor.setCursorStyle(0)         // Reset to default cursor style
+	})
+
+	// Initialize table with configuration
+	headers := make([]HeaderColumn, len(editor.columns))
+	for i, col := range editor.columns {
+		headers[i] = HeaderColumn{
+			Name:  col.Name,
+			Width: col.Width,
+		}
+	}
+
+	keyColumnCount := 0
+	if editor.relation != nil {
+		keyColumnCount = len(editor.relation.key)
+	}
+
+	editor.table = NewTableView(tableDataHeight+1, &TableViewConfig{
+		Headers:        headers,
+		KeyColumnCount: keyColumnCount,
+		DoubleClickFunc: func(row, col int) {
+			editor.enterEditMode(row, col)
+		},
+		SingleClickFunc: func(row, col int) {
+			if editor.editing {
+				editor.exitEditMode()
+			}
+		},
+		TableNameClickFunc: func() {
+			editor.pages.ShowPage(pagePicker)
+			editor.app.SetFocus(editor.tablePicker)
+			editor.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+				screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
+			})
+		},
+		MouseScrollFunc: func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+			// Record mouse event in breadcrumbs
+			if breadcrumbs != nil && event != nil {
+				actionStr := mouseActionString(action)
+				breadcrumbs.RecordMouse(actionStr)
+			}
+
+			switch action {
+			case tview.MouseScrollUp:
+				go func() {
+					reachedEnd, err := editor.prevRows(1)
+					if err != nil {
+						return
+					}
+					editor.app.QueueUpdateDraw(func() {
+						if !reachedEnd {
+							editor.table.Select(editor.table.selectedRow+1, editor.table.selectedCol)
+						}
+					})
+				}()
+				return tview.MouseConsumed, nil
+			case tview.MouseScrollDown:
+				go func() {
+					reachedEnd, err := editor.nextRows(1)
+					if err != nil {
+						return
+					}
+					editor.app.QueueUpdateDraw(func() {
+						if !reachedEnd {
+							editor.table.Select(editor.table.selectedRow-1, editor.table.selectedCol)
+						}
+					})
+				}()
+				return tview.MouseConsumed, nil
+			case tview.MouseScrollLeft:
+				editor.table.viewport.ScrollLeft()
+				return tview.MouseConsumed, nil
+			case tview.MouseScrollRight:
+				editor.table.viewport.ScrollRight()
+				return tview.MouseConsumed, nil
+			}
+			return action, event
+		},
+	})
+
+	editor.table.SetTableName(tablename).SetVimMode(editor.vimMode)
+
+	// Only load data if we have a table
+	if tablename != "" {
+		editor.loadFromRowId(nil, true, 0, false)
+	}
+	editor.setupKeyBindings()
+	editor.setupStatusBar()
+	editor.setupCommandPalette()
+
+	// Setup layout without the selector (it will be overlaid when visible)
+	editor.layout = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(editor.table, 0, 1, true).
+		AddItem(editor.statusBar, 1, 0, false).
+		AddItem(editor.commandPalette, 1, 0, false)
+
+	// Setup resize handler
+	editor.pages.SetChangedFunc(func() {
+		// Don't handle resize when in edit mode to avoid deadlock
+		if editor.editing {
+			return
+		}
+
+		// Get the new terminal height
+		newHeight := getTerminalHeight()
+		newDataHeight := newHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
+
+		// Only resize if the height has changed significantly
+		if newDataHeight != editor.table.rowsHeight && newDataHeight > 0 {
+			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1].data == nil {
+				// the table is smaller than the new data height, no need to fetch more rows
+				return
+			}
+			// Create new records buffer with the new size
+			newRecords := make([]Row, newDataHeight)
+
+			// Copy existing data to the new buffer
+			copyCount := min(len(editor.records), newDataHeight)
+			for i := 0; i < copyCount; i++ {
+				ptr := (i + editor.pointer) % len(editor.records)
+				newRecords[i] = editor.records[ptr]
+			}
+
+			// If the new buffer is larger, fetch more rows to fill it
+			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1].data != nil {
+				// We need to fetch more rows
+				oldLen := len(editor.records)
+				editor.records = newRecords
+				editor.pointer = 0
+				// Fetch additional rows
+				editor.nextRows(newDataHeight - oldLen)
+			} else {
+				editor.records = newRecords
+				editor.pointer = 0
+			}
+
+			editor.renderData()
+			go editor.app.Draw()
+		}
+	})
+
+	editor.table.SetSelectionChangeFunc(func(row, col int) {
+		editor.updateStatusWithCellContent()
+		// Auto-scroll viewport to show the selected column
+		editor.ensureColumnVisible(col)
+	})
+
+	// Add main table page
+	editor.pages.AddPage(pageTable, editor.layout, true, true)
+
+	// Create picker overlay page (centered flex with selector at top)
+	pickerOverlay := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(editor.tablePicker, 8, 0, true). // Selector with height for dropdown
+		AddItem(nil, 0, 1, false)                // Spacer takes rest of screen
+	editor.pages.AddPage(pagePicker, pickerOverlay, true, false)
+
+	// If no table was specified, show the picker immediately
+	if tablename == "" {
+		editor.pages.ShowPage(pagePicker)
+		editor.app.SetFocus(editor.tablePicker)
+		editor.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+			screen.SetCursorStyle(tcell.CursorStyleBlinkingBar)
+		})
+	}
+
+	if err := editor.app.SetRoot(editor.pages, true).Run(); err != nil {
+		CaptureError(err)
+		return err
+	}
+	return nil
+}
+
+func (e *Editor) setupStatusBar() {
+	e.statusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(true).
+		SetWrap(false)
+
+	e.statusBar.SetBackgroundColor(tcell.ColorLightGray)
+	e.statusBar.SetTextColor(tcell.ColorBlack)
+	e.statusBar.SetText("Ready")
+}
+
+func (e *Editor) setupCommandPalette() {
+	inputField := tview.NewInputField()
+	e.commandPalette = inputField.
+		SetLabel("").
+		SetFieldBackgroundColor(tcell.ColorBlack).
+		SetFieldTextColor(tcell.ColorWhite)
+
+	e.commandPalette.SetBackgroundColor(tcell.ColorBlack)
+
+	// Default palette mode shows keybinding help
+	e.setPaletteMode(PaletteModeDefault, false)
+
+	e.commandPalette.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		key := event.Key()
+		rune := event.Rune()
+		mod := event.Modifiers()
+
+		if e.consumeKittyCSI(key, rune, mod) {
+			return nil
+		}
+		if !e.kittySequenceActive {
+			if key == tcell.KeyRune && mod&tcell.ModCtrl != 0 && rune == '`' {
+				e.kittySequenceBuffer = "ctrl+`"
+			} else {
+				e.kittySequenceBuffer = ""
+			}
+		}
+		if !e.kittySequenceActive && e.kittySequenceBuffer == "ctrl+`" {
+			e.kittySequenceBuffer = ""
+			e.setPaletteMode(PaletteModeSQL, true)
+			return nil
+		}
+
+		switch {
+		// Ctrl+G sends BEL (7) or 'g' depending on terminal
+		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeGoto, true)
+			return nil
+		// case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
+		// 	e.setPaletteMode(PaletteModeCommand, true)
+		// 	return nil
+		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeSQL, true)
+			return nil
+		}
+
+		switch event.Key() {
+		case tcell.KeyEnter:
+			command := e.commandPalette.GetText()
+			mode := e.getPaletteMode()
+			switch mode {
+			case PaletteModeCommand:
+				e.executeCommand(command)
+			case PaletteModeSQL:
+				if strings.TrimSpace(command) != "" {
+					e.executeSQL(command)
+				}
+			case PaletteModeGoto:
+				e.executeGoto(command)
+			case PaletteModeDelete:
+				e.executeDelete()
+			}
+
+			// For Goto mode, keep the palette open with text selected
+			if mode == PaletteModeGoto {
+				return nil
+			}
+
+			e.setPaletteMode(PaletteModeDefault, false)
+			e.app.SetFocus(e.table)
+			return nil
+		case tcell.KeyEscape:
+			if e.paletteMode == PaletteModeInsert && e.editing {
+				return event
+			}
+			if e.paletteMode == PaletteModeDelete {
+				e.setPaletteMode(PaletteModeDefault, false)
+				e.app.SetFocus(e.table)
+				return nil
+			}
+			e.setPaletteMode(PaletteModeDefault, false)
+			e.app.SetFocus(e.table)
+			return nil
+		}
+		return event
+	})
+}
