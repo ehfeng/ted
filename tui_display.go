@@ -20,8 +20,8 @@ func (e *Editor) moveColumn(col, direction int) {
 
 	e.columns[col], e.columns[newIdx] = e.columns[newIdx], e.columns[col]
 
-	for i := range e.records {
-		e.records[i].data[col], e.records[i].data[newIdx] = e.records[i].data[newIdx], e.records[i].data[col]
+	for i := range e.buffer {
+		e.buffer[i].data[col], e.buffer[i].data[newIdx] = e.buffer[i].data[newIdx], e.buffer[i].data[col]
 	}
 
 	// Update table headers to reflect column reordering

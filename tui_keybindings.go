@@ -154,8 +154,8 @@ func (e *Editor) setupKeyBindings() {
 				e.table.ClearInsertRow()
 
 				// Find the last non-nil record
-				lastIdx := len(e.records) - 1
-				for lastIdx >= 0 && e.records[lastIdx].data == nil {
+				lastIdx := len(e.buffer) - 1
+				for lastIdx >= 0 && e.buffer[lastIdx].data == nil {
 					lastIdx--
 				}
 
@@ -313,17 +313,17 @@ func (e *Editor) setupKeyBindings() {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			if mod&tcell.ModMeta != 0 {
-				if len(e.records[len(e.records)-1].data) == 0 {
-					e.table.Select(len(e.records)-2, col)
+				if len(e.buffer[len(e.buffer)-1].data) == 0 {
+					e.table.Select(len(e.buffer)-2, col)
 				} else {
-					e.table.Select(len(e.records)-1, col)
+					e.table.Select(len(e.buffer)-1, col)
 				}
 				return nil
 			} else {
-				if row == len(e.records)-1 {
+				if row == len(e.buffer)-1 {
 					e.nextRows(1)
 				} else {
-					if len(e.records[row+1].data) == 0 {
+					if len(e.buffer[row+1].data) == 0 {
 						e.table.Select(row+2, col)
 					} else {
 						e.table.Select(row+1, col)
@@ -369,10 +369,10 @@ func (e *Editor) setupKeyBindings() {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// j: move down
-			if row == len(e.records)-1 {
+			if row == len(e.buffer)-1 {
 				e.nextRows(1)
 			} else {
-				if len(e.records[row+1].data) == 0 {
+				if len(e.buffer[row+1].data) == 0 {
 					e.table.Select(row+2, col)
 				} else {
 					e.table.Select(row+1, col)
@@ -553,7 +553,7 @@ func (e *Editor) navigateTab(reverse bool) {
 	} else {
 		if col < len(e.columns)-1 {
 			e.table.Select(row, col+1)
-		} else if row < len(e.records)-1 {
+		} else if row < len(e.buffer)-1 {
 			e.table.Select(row+1, 0)
 		}
 	}

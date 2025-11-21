@@ -11,11 +11,11 @@ import (
 func (e *Editor) renderData() {
 	// When in insert mode, we need to reserve one slot for the insert mode row
 	// that will be rendered by TableView
-	dataCount := len(e.records)
+	dataCount := len(e.buffer)
 	if len(e.table.insertRow) > 0 {
 		// Find the last non-nil record
-		lastIdx := len(e.records) - 1
-		for lastIdx >= 0 && e.records[lastIdx].data == nil {
+		lastIdx := len(e.buffer) - 1
+		for lastIdx >= 0 && e.buffer[lastIdx].data == nil {
 			lastIdx--
 		}
 		dataCount = lastIdx + 1 // Only pass real data, TableView will add insert mode row
@@ -23,13 +23,13 @@ func (e *Editor) renderData() {
 
 	normalizedRows := make([]Row, dataCount)
 	for i := 0; i < dataCount; i++ {
-		ptr := (i + e.pointer) % len(e.records)
+		ptr := (i + e.pointer) % len(e.buffer)
 		// insert mode row needs "space" at the top to still be able to render
 		// the last db row
 		if len(e.table.insertRow) > 0 && i == 0 {
 			ptr++
 		}
-		normalizedRows[i] = e.records[ptr] // Reference to Row, not a copy
+		normalizedRows[i] = e.buffer[ptr] // Reference to Row, not a copy
 	}
 	if len(e.table.insertRow) > 0 {
 		normalizedRows = slices.Delete(normalizedRows, 0, 1)
@@ -123,23 +123,23 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			// Also store old row data for diffing
 			oldKeyMap = make(map[string]int)    // key string -> index
 			oldKeyData = make(map[string][]any) // key string -> row data
-			oldKeyStrings = make([]string, len(e.records))
-			for i := 0; i < len(e.records); i++ {
-				if e.records[i].data == nil {
+			oldKeyStrings = make([]string, len(e.buffer))
+			for i := 0; i < len(e.buffer); i++ {
+				if e.buffer[i].data == nil {
 					break
 				}
 				// Clear modified state from previous refresh
-				e.records[i].modified = nil
+				e.buffer[i].modified = nil
 				// Skip already deleted rows
-				if e.records[i].state == RowStateDeleted {
+				if e.buffer[i].state == RowStateDeleted {
 					continue
 				}
-				oldKeys := e.extractKeys(e.records[i].data)
+				oldKeys := e.extractKeys(e.buffer[i].data)
 				if oldKeys != nil {
 					keyStr := fmt.Sprintf("%v", oldKeys)
 					oldKeyStrings[i] = keyStr
 					oldKeyMap[keyStr] = i
-					oldKeyData[keyStr] = e.records[i].data
+					oldKeyData[keyStr] = e.buffer[i].data
 				}
 			}
 			// Track which old keys are still present in new data
@@ -183,24 +183,24 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 		// Build final buffer: merge new rows with deleted old rows (or just use new rows if not refreshing)
 		var finalRecords []Row
 		if refreshing {
-			finalRecords = make([]Row, 0, len(e.records))
+			finalRecords = make([]Row, 0, len(e.buffer))
 			newRowIdx := 0
 
-			for i := 0; i < len(e.records) && i < len(oldKeyStrings); i++ {
-				if e.records[i].data == nil {
+			for i := 0; i < len(e.buffer) && i < len(oldKeyStrings); i++ {
+				if e.buffer[i].data == nil {
 					break
 				}
 
 				oldKeyStr := oldKeyStrings[i]
-				if oldKeyStr == "" || e.records[i].state == RowStateDeleted {
+				if oldKeyStr == "" || e.buffer[i].state == RowStateDeleted {
 					// Skip empty or already deleted rows
 					continue
 				}
 
 				if !matchedOldKeys[oldKeyStr] {
 					// This old row doesn't exist in new data - mark as deleted
-					e.records[i].state = RowStateDeleted
-					finalRecords = append(finalRecords, e.records[i])
+					e.buffer[i].state = RowStateDeleted
+					finalRecords = append(finalRecords, e.buffer[i])
 				} else if newRowIdx < len(newRows) {
 					// Insert corresponding new row
 					finalRecords = append(finalRecords, newRows[newRowIdx])
@@ -219,20 +219,20 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 		}
 
 		// Copy final records back to e.records
-		for i := 0; i < len(finalRecords) && i < len(e.records); i++ {
-			e.records[i] = finalRecords[i]
+		for i := 0; i < len(finalRecords) && i < len(e.buffer); i++ {
+			e.buffer[i] = finalRecords[i]
 			rowsLoaded++
 		}
 
 		// If we have more final records than buffer size, truncate
-		if len(finalRecords) > len(e.records) {
-			rowsLoaded = len(e.records)
+		if len(finalRecords) > len(e.buffer) {
+			rowsLoaded = len(e.buffer)
 		}
 
 		// Mark end with nil if we didn't fill the buffer
-		if rowsLoaded < len(e.records) {
-			e.records[rowsLoaded] = Row{}
-			e.records = e.records[:rowsLoaded+1]
+		if rowsLoaded < len(e.buffer) {
+			e.buffer[rowsLoaded] = Row{}
+			e.buffer = e.buffer[:rowsLoaded+1]
 		}
 	} else {
 		// Load from bottom: use QueryRows with inclusive true, scrollDown false
@@ -260,23 +260,23 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			// Also store old row data for diffing
 			oldKeyMap = make(map[string]int)    // key string -> index
 			oldKeyData = make(map[string][]any) // key string -> row data
-			oldKeyStrings = make([]string, len(e.records))
-			for i := 0; i < len(e.records); i++ {
-				if e.records[i].data == nil {
+			oldKeyStrings = make([]string, len(e.buffer))
+			for i := 0; i < len(e.buffer); i++ {
+				if e.buffer[i].data == nil {
 					break
 				}
 				// Clear modified state from previous refresh
-				e.records[i].modified = nil
+				e.buffer[i].modified = nil
 				// Skip already deleted rows
-				if e.records[i].state == RowStateDeleted {
+				if e.buffer[i].state == RowStateDeleted {
 					continue
 				}
-				oldKeys := e.extractKeys(e.records[i].data)
+				oldKeys := e.extractKeys(e.buffer[i].data)
 				if oldKeys != nil {
 					keyStr := fmt.Sprintf("%v", oldKeys)
 					oldKeyStrings[i] = keyStr
 					oldKeyMap[keyStr] = i
-					oldKeyData[keyStr] = e.records[i].data
+					oldKeyData[keyStr] = e.buffer[i].data
 				}
 			}
 			// Track which old keys are still present in new data
@@ -315,7 +315,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			}
 
 			newRows = append(newRows, Row{state: newState, data: row, modified: modified})
-			if len(newRows) >= len(e.records)-1 {
+			if len(newRows) >= len(e.buffer)-1 {
 				break
 			}
 		}
@@ -323,24 +323,24 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 		// Build final buffer: merge new rows with deleted old rows (or just use new rows if not refreshing)
 		var finalRecords []Row
 		if refreshing {
-			finalRecords = make([]Row, 0, len(e.records))
+			finalRecords = make([]Row, 0, len(e.buffer))
 			newRowIdx := 0
 
-			for i := 0; i < len(e.records) && i < len(oldKeyStrings); i++ {
-				if e.records[i].data == nil {
+			for i := 0; i < len(e.buffer) && i < len(oldKeyStrings); i++ {
+				if e.buffer[i].data == nil {
 					break
 				}
 
 				oldKeyStr := oldKeyStrings[i]
-				if oldKeyStr == "" || e.records[i].state == RowStateDeleted {
+				if oldKeyStr == "" || e.buffer[i].state == RowStateDeleted {
 					// Skip empty or already deleted rows
 					continue
 				}
 
 				if !matchedOldKeys[oldKeyStr] {
 					// This old row doesn't exist in new data - mark as deleted
-					e.records[i].state = RowStateDeleted
-					finalRecords = append(finalRecords, e.records[i])
+					e.buffer[i].state = RowStateDeleted
+					finalRecords = append(finalRecords, e.buffer[i])
 				} else if newRowIdx < len(newRows) {
 					// Insert corresponding new row
 					finalRecords = append(finalRecords, newRows[newRowIdx])
@@ -369,23 +369,23 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 		}
 
 		// Copy final records back to e.records
-		for i := 0; i < len(finalRecords) && i < len(e.records); i++ {
-			e.records[i] = finalRecords[i]
+		for i := 0; i < len(finalRecords) && i < len(e.buffer); i++ {
+			e.buffer[i] = finalRecords[i]
 			rowsLoaded++
 		}
 
 		// If we have more final records than buffer size, truncate
-		if len(finalRecords) > len(e.records) {
-			rowsLoaded = len(e.records)
+		if len(finalRecords) > len(e.buffer) {
+			rowsLoaded = len(e.buffer)
 		}
 
-		e.records[len(e.records)-1] = Row{}
+		e.buffer[len(e.buffer)-1] = Row{}
 
 		// Mark end with nil if we didn't fill the buffer
-		if rowsLoaded < len(e.records) {
-			e.records[rowsLoaded] = Row{}
+		if rowsLoaded < len(e.buffer) {
+			e.buffer[rowsLoaded] = Row{}
 		}
-		e.records[len(e.records)-1] = Row{}
+		e.buffer[len(e.buffer)-1] = Row{}
 		e.pointer = 0
 	}
 	e.renderData()
@@ -394,7 +394,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 	if fromTop {
 		e.table.Select(e.table.selectedRow, focusColumn)
 	} else {
-		e.table.Select(len(e.records)-1, focusColumn)
+		e.table.Select(len(e.buffer)-1, focusColumn)
 	}
 
 	return nil
@@ -405,7 +405,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 // returns bool, err. bool if the edge of table is reached
 func (e *Editor) nextRows(i int) (bool, error) {
 	// Check if we're already at the end (last record is nil)
-	if len(e.records) == 0 || e.records[e.lastRowIdx()].data == nil {
+	if len(e.buffer) == 0 || e.buffer[e.lastRowIdx()].data == nil {
 		return false, nil // No-op, already at end of data
 	}
 
@@ -414,12 +414,12 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		e.stopRefreshTimer()
 
 		params := make([]any, len(e.relation.key))
-		lastRecordIdx := (e.pointer - 1 + len(e.records)) % len(e.records)
-		if e.records[lastRecordIdx].data == nil {
+		lastRecordIdx := (e.pointer - 1 + len(e.buffer)) % len(e.buffer)
+		if e.buffer[lastRecordIdx].data == nil {
 			return false, nil // Can't query from nil record
 		}
 		for i := range e.relation.key {
-			params[i] = e.records[lastRecordIdx].data[i]
+			params[i] = e.buffer[lastRecordIdx].data[i]
 		}
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {
@@ -457,25 +457,25 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if err := e.nextQuery.Scan(scanTargets...); err != nil {
 			return false, err
 		}
-		e.records[(e.pointer+rowsFetched)%len(e.records)] = Row{state: RowStateNormal, data: row}
+		e.buffer[(e.pointer+rowsFetched)%len(e.buffer)] = Row{state: RowStateNormal, data: row}
 	}
 	// new pointer position
 	e.incrPtr(rowsFetched)
 	// If we fetched fewer rows than requested, we've reached the end
 	if rowsFetched < i {
 		e.incrPtr(1)
-		e.records[e.lastRowIdx()] = Row{} // Mark end of data
+		e.buffer[e.lastRowIdx()] = Row{} // Mark end of data
 	}
 	e.renderData()
 	return rowsFetched < i, e.nextQuery.Err()
 }
 
 func (e *Editor) lastRowIdx() int {
-	return (e.pointer + len(e.records) - 1) % len(e.records)
+	return (e.pointer + len(e.buffer) - 1) % len(e.buffer)
 }
 
 func (e *Editor) incrPtr(n int) {
-	e.pointer = (e.pointer + n) % len(e.records)
+	e.pointer = (e.pointer + n) % len(e.buffer)
 }
 
 // prevRows fetches the previous i rows (scrolling backwards in the circular buffer)
@@ -484,12 +484,12 @@ func (e *Editor) prevRows(i int) (bool, error) {
 	if e.prevQuery == nil {
 		// Stop refresh timer when starting a new query
 		e.stopRefreshTimer()
-		if len(e.records) == 0 || e.records[e.pointer].data == nil {
+		if len(e.buffer) == 0 || e.buffer[e.pointer].data == nil {
 			return false, nil // Can't query from nil or empty records
 		}
 		params := make([]any, len(e.relation.key))
 		for i := range e.relation.key {
-			params[i] = e.records[e.pointer].data[i]
+			params[i] = e.buffer[e.pointer].data[i]
 		}
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {
@@ -528,7 +528,7 @@ func (e *Editor) prevRows(i int) (bool, error) {
 			return false, err
 		}
 		e.pointer = e.lastRowIdx() // Move pointer backwards in the circular buffer
-		e.records[e.pointer] = Row{state: RowStateNormal, data: row}
+		e.buffer[e.pointer] = Row{state: RowStateNormal, data: row}
 	}
 
 	e.renderData()
@@ -640,7 +640,7 @@ func (e *Editor) startRefreshTimer() {
 					app.QueueUpdateDraw(func() {
 						// Update table rowsHeight before loading rows from database
 						e.table.UpdateRowsHeightFromRect(dataHeight)
-						id := e.records[e.pointer].data[:len(e.relation.key)]
+						id := e.buffer[e.pointer].data[:len(e.relation.key)]
 						e.loadFromRowId(id, true, e.table.selectedCol, true)
 					})
 				}

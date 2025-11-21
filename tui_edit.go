@@ -99,7 +99,7 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 			// Move selection right
 			if col < len(e.columns)-1 {
 				e.table.Select(row, col+1)
-			} else if row < len(e.records)-1 {
+			} else if row < len(e.buffer)-1 {
 				e.table.Select(row+1, 0)
 			}
 			return nil
@@ -228,7 +228,7 @@ func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
 			// Move selection right
 			if col < len(e.columns)-1 {
 				e.table.Select(row, col+1)
-			} else if row < len(e.records)-1 {
+			} else if row < len(e.buffer)-1 {
 				e.table.Select(row+1, 0)
 			}
 			return nil
@@ -404,9 +404,9 @@ func (e *Editor) updateEditPreview(newText string) {
 		// Show UPDATE preview and set palette mode to Update
 		e.setPaletteMode(PaletteModeUpdate, false)
 		// Convert records to [][]any for BuildUpdatePreview
-		recordsData := make([][]any, len(e.records))
-		for i := range e.records {
-			recordsData[i] = e.records[i].data
+		recordsData := make([][]any, len(e.buffer))
+		for i := range e.buffer {
+			recordsData[i] = e.buffer[i].data
 		}
 		preview = e.relation.BuildUpdatePreview(recordsData, row, colName, newText)
 	}
@@ -435,16 +435,16 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 	}
 
 	// Basic bounds check against current data
-	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.records[row].data) {
+	if row < 0 || row >= len(e.buffer) || col < 0 || col >= len(e.buffer[row].data) {
 		e.exitEditMode()
 		return
 	}
 
 	// Delegate DB work to database.go
 	// Convert records to [][]any for UpdateDBValue
-	recordsData := make([][]any, len(e.records))
-	for i := range e.records {
-		recordsData[i] = e.records[i].data
+	recordsData := make([][]any, len(e.buffer))
+	for i := range e.buffer {
+		recordsData[i] = e.buffer[i].data
 	}
 	updated, err := e.relation.UpdateDBValue(recordsData, row, e.columns[col].Name, newValue)
 	if err != nil {
@@ -452,8 +452,8 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 		return
 	}
 	// Update in-memory data and refresh table
-	ptr := (row + e.pointer) % len(e.records)
-	e.records[ptr] = Row{state: RowStateNormal, data: updated}
+	ptr := (row + e.pointer) % len(e.buffer)
+	e.buffer[ptr] = Row{state: RowStateNormal, data: updated}
 
 	e.renderData()
 	e.exitEditMode()
@@ -484,7 +484,7 @@ func (e *Editor) executeInsert() error {
 		if !ok || insertedRow == nil {
 			// Fallback: load from bottom without specific row
 			e.loadFromRowId(nil, false, 0, false)
-			e.table.Select(len(e.records)-2, 0)
+			e.table.Select(len(e.buffer)-2, 0)
 			return nil
 		}
 		keyVals[i] = insertedRow[keyIdx]
@@ -497,10 +497,10 @@ func (e *Editor) executeInsert() error {
 	}
 
 	// Select the first row (which should be the newly inserted one)
-	if e.records[e.lastRowIdx()].data == nil {
-		e.table.Select(len(e.records)-2, e.table.selectedCol)
+	if e.buffer[e.lastRowIdx()].data == nil {
+		e.table.Select(len(e.buffer)-2, e.table.selectedCol)
 	} else {
-		e.table.Select(len(e.records)-1, e.table.selectedCol)
+		e.table.Select(len(e.buffer)-1, e.table.selectedCol)
 	}
 	return nil
 }

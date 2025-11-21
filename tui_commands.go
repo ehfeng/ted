@@ -91,15 +91,15 @@ func (e *Editor) executeCommand(command string) {
 
 // enterDeleteMode enters delete mode for the current row
 func (e *Editor) enterDeleteMode(row, col int) {
-	if row < 0 || row >= len(e.records) || e.records[row].data == nil {
+	if row < 0 || row >= len(e.buffer) || e.buffer[row].data == nil {
 		return
 	}
 
 	// Build DELETE preview
 	// Convert records to [][]any for BuildDeletePreview
-	recordsData := make([][]any, len(e.records))
-	for i := range e.records {
-		recordsData[i] = e.records[i].data
+	recordsData := make([][]any, len(e.buffer))
+	for i := range e.buffer {
+		recordsData[i] = e.buffer[i].data
 	}
 	preview := e.relation.BuildDeletePreview(recordsData, row)
 	if preview == "" {
@@ -120,16 +120,16 @@ func (e *Editor) enterDeleteMode(row, col int) {
 // executeDelete executes the DELETE statement for the current row
 func (e *Editor) executeDelete() error {
 	row, col := e.table.GetSelection()
-	if row < 0 || row >= len(e.records) || e.records[row].data == nil {
+	if row < 0 || row >= len(e.buffer) || e.buffer[row].data == nil {
 		e.SetStatusError("Invalid row for deletion")
 		return fmt.Errorf("invalid row")
 	}
 
 	// Execute the delete
 	// Convert records to [][]any for DeleteDBRecord
-	recordsData := make([][]any, len(e.records))
-	for i := range e.records {
-		recordsData[i] = e.records[i].data
+	recordsData := make([][]any, len(e.buffer))
+	for i := range e.buffer {
+		recordsData[i] = e.buffer[i].data
 	}
 	err := e.relation.DeleteDBRecord(recordsData, row)
 	if err != nil {
@@ -139,7 +139,7 @@ func (e *Editor) executeDelete() error {
 
 	// Refresh data after deletion
 	e.SetStatusMessage("Record deleted successfully")
-	e.loadFromRowId(nil, e.records[e.lastRowIdx()].data != nil, col, false)
+	e.loadFromRowId(nil, e.buffer[e.lastRowIdx()].data != nil, col, false)
 	return nil
 }
 
@@ -150,7 +150,7 @@ func (e *Editor) executeGoto(gotoValue string) {
 	}
 
 	row, col := e.table.GetSelection()
-	if row < 0 || row >= len(e.records) || e.records[row].data == nil {
+	if row < 0 || row >= len(e.buffer) || e.buffer[row].data == nil {
 		e.SetStatusError("Invalid current row")
 		return
 	}
@@ -158,7 +158,7 @@ func (e *Editor) executeGoto(gotoValue string) {
 	// Get current row's key values
 	currentKeys := make([]any, len(e.relation.key))
 	for i := range e.relation.key {
-		currentKeys[i] = e.records[row].data[i]
+		currentKeys[i] = e.buffer[row].data[i]
 	}
 
 	// Find the column index in relation.attributeOrder
@@ -191,14 +191,14 @@ func (e *Editor) executeGoto(gotoValue string) {
 	foundInWindow := false
 	var foundRow int
 
-	for i := 0; i < len(e.records); i++ {
-		if e.records[i].data == nil {
+	for i := 0; i < len(e.buffer); i++ {
+		if e.buffer[i].data == nil {
 			break
 		}
 		// Compare key values
 		match := true
 		for j := range e.relation.key {
-			if e.records[i].data[j] != foundKeys[j] {
+			if e.buffer[i].data[j] != foundKeys[j] {
 				match = false
 				break
 			}
@@ -279,7 +279,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	// Reload data from the beginning
 	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")
 	e.pointer = 0
-	e.records = make([]Row, e.table.rowsHeight)
+	e.buffer = make([]Row, e.table.rowsHeight)
 	e.loadFromRowId(nil, true, 0, false)
 	e.renderData()
 	e.table.Select(0, 0)

@@ -75,7 +75,7 @@ type Editor struct {
 	nextQuery *sql.Rows // nextRows
 	prevQuery *sql.Rows // prevRows
 	pointer   int       // pointer to the current record
-	records   []Row     // columns are keyed off e.columns
+	buffer    []Row     // columns are keyed off e.columns
 
 	// timer for auto-closing rows
 	rowsTimer      *time.Timer
@@ -206,7 +206,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 		tablePicker: nil, // Will be initialized after editor is created
 		paletteMode: PaletteModeDefault,
 		pointer:     0,
-		records:     make([]Row, tableDataHeight),
+		buffer:      make([]Row, tableDataHeight),
 	}
 
 	// Create selector with callback now that editor exists
@@ -324,7 +324,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 		// Only resize if the height has changed significantly
 		if newDataHeight != editor.table.rowsHeight && newDataHeight > 0 {
-			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1].data == nil {
+			if newDataHeight > len(editor.buffer) && editor.buffer[len(editor.buffer)-1].data == nil {
 				// the table is smaller than the new data height, no need to fetch more rows
 				return
 			}
@@ -332,22 +332,22 @@ func runEditor(config *Config, dbname, tablename string) error {
 			newRecords := make([]Row, newDataHeight)
 
 			// Copy existing data to the new buffer
-			copyCount := min(len(editor.records), newDataHeight)
+			copyCount := min(len(editor.buffer), newDataHeight)
 			for i := 0; i < copyCount; i++ {
-				ptr := (i + editor.pointer) % len(editor.records)
-				newRecords[i] = editor.records[ptr]
+				ptr := (i + editor.pointer) % len(editor.buffer)
+				newRecords[i] = editor.buffer[ptr]
 			}
 
 			// If the new buffer is larger, fetch more rows to fill it
-			if newDataHeight > len(editor.records) && editor.records[len(editor.records)-1].data != nil {
+			if newDataHeight > len(editor.buffer) && editor.buffer[len(editor.buffer)-1].data != nil {
 				// We need to fetch more rows
-				oldLen := len(editor.records)
-				editor.records = newRecords
+				oldLen := len(editor.buffer)
+				editor.buffer = newRecords
 				editor.pointer = 0
 				// Fetch additional rows
 				editor.nextRows(newDataHeight - oldLen)
 			} else {
-				editor.records = newRecords
+				editor.buffer = newRecords
 				editor.pointer = 0
 			}
 

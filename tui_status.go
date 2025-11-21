@@ -121,7 +121,7 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 			if attrIdx == col {
 				foreignKeys[foreignCol] = newText
 			} else {
-				foreignKeys[foreignCol] = e.records[row].data[attrIdx]
+				foreignKeys[foreignCol] = e.buffer[row].data[attrIdx]
 			}
 		}
 		// TODO pass config columns if available
@@ -435,14 +435,14 @@ func (e *Editor) updateStatusWithCellContent() {
 	row, col := e.table.GetSelection()
 
 	// Validate bounds
-	if row < 0 || row >= len(e.records) || col < 0 || col >= len(e.columns) {
+	if row < 0 || row >= len(e.buffer) || col < 0 || col >= len(e.columns) {
 		return
 	}
 
 	// Get the cell value
 	var cellValue any
-	if col < len(e.records[row].data) {
-		cellValue = e.records[row].data[col]
+	if col < len(e.buffer[row].data) {
+		cellValue = e.buffer[row].data[col]
 	}
 
 	// Format the cell value
