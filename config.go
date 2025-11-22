@@ -7,6 +7,8 @@ import (
 	"os/user"
 	"strings"
 
+	"ted/internal/dblib"
+
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
@@ -22,100 +24,46 @@ type Config struct {
 	Where    string
 	OrderBy  string
 	// DBTypeOverride allows explicitly selecting the database type via flags
-	DBTypeOverride *DatabaseType
+	DBTypeOverride *dblib.DatabaseType
 	VimMode        bool
 }
 
-type DatabaseType int
-
-const (
-	SQLite DatabaseType = iota
-	PostgreSQL
-	MySQL
-	DuckDB
-	Clickhouse
-	Snowflake
-	Cockroach
-	BigQuery
-	Redshift
-)
-
-type databaseFeature struct {
-	systemId              string
-	embedded              bool
-	returning             bool
-	positionalPlaceholder bool
+var databaseIcons = map[dblib.DatabaseType]string{
+	dblib.SQLite:     "🪶",
+	dblib.PostgreSQL: "🐘",
+	dblib.MySQL:      "🐬",
+	dblib.DuckDB:     "🦆",
+	dblib.Clickhouse: "⬛",
+	dblib.Snowflake:  "❄️",
+	dblib.Cockroach:  "🪳",
+	dblib.BigQuery:   "🔍",
+	dblib.Redshift:   "🟥",
 }
 
-var databaseFeatures = map[DatabaseType]databaseFeature{
-	SQLite: {
-		systemId:              "rowid",
-		embedded:              true,
-		returning:             true,
-		positionalPlaceholder: false,
-	},
-	PostgreSQL: {
-		systemId:              "ctid",
-		embedded:              false,
-		returning:             true,
-		positionalPlaceholder: true,
-	},
-	MySQL: {
-		systemId:              "",
-		embedded:              false,
-		returning:             false,
-		positionalPlaceholder: false,
-	},
-	DuckDB: {
-		systemId:              "rowid",
-		embedded:              true,
-		returning:             true,
-		positionalPlaceholder: false,
-	},
-	Clickhouse: {
-		systemId:              "",
-		embedded:              false,
-		returning:             false,
-		positionalPlaceholder: false,
-	},
-}
-
-var databaseIcons = map[DatabaseType]string{
-	SQLite:     "🪶",
-	PostgreSQL: "🐘",
-	MySQL:      "🐬",
-	DuckDB:     "🦆",
-	Clickhouse: "⬛",
-	Snowflake:  "❄️",
-	Cockroach:  "🪳",
-	BigQuery:   "🔍",
-	Redshift:   "🟥",
-}
-
-func (c *Config) detectDatabaseType() DatabaseType {
+func (c *Config) detectDatabaseType() dblib.DatabaseType {
 	if c.DBTypeOverride != nil {
 		return *c.DBTypeOverride
 	}
 	if strings.HasSuffix(c.Database, ".sqlite") || strings.HasSuffix(c.Database, ".db") {
-		return SQLite
+		return dblib.SQLite
 	}
 	if strings.HasSuffix(c.Database, ".duckdb") {
-		return DuckDB
+		return dblib.DuckDB
 	}
-	return PostgreSQL
+	return dblib.PostgreSQL
 }
 
-func (c *Config) buildConnectionString() (string, DatabaseType, error) {
+func (c *Config) buildConnectionString() (string, dblib.DatabaseType, error) {
 	dbType := c.detectDatabaseType()
 
 	switch dbType {
-	case SQLite:
+	case dblib.SQLite:
 		if _, err := os.Stat(c.Database); os.IsNotExist(err) {
 			return "", dbType, fmt.Errorf("sqlite file does not exist: %s", c.Database)
 		}
 		return c.Database, dbType, nil
 
-	case PostgreSQL:
+	case dblib.PostgreSQL:
 		connStr := fmt.Sprintf("dbname=%s", c.Database)
 
 		if c.Host != "" {
@@ -138,7 +86,7 @@ func (c *Config) buildConnectionString() (string, DatabaseType, error) {
 
 		return connStr, dbType, nil
 
-	case MySQL:
+	case dblib.MySQL:
 		connStr := ""
 		if c.Username != "" {
 			connStr = c.Username
@@ -171,7 +119,7 @@ func (c *Config) buildConnectionString() (string, DatabaseType, error) {
 	}
 }
 
-func (c *Config) connect() (*sql.DB, DatabaseType, error) {
+func (c *Config) connect() (*sql.DB, dblib.DatabaseType, error) {
 	connStr, dbType, err := c.buildConnectionString()
 	if err != nil {
 		return nil, dbType, err
@@ -179,11 +127,11 @@ func (c *Config) connect() (*sql.DB, DatabaseType, error) {
 
 	var driverName string
 	switch dbType {
-	case SQLite:
+	case dblib.SQLite:
 		driverName = "sqlite3"
-	case PostgreSQL:
+	case dblib.PostgreSQL:
 		driverName = "postgres"
-	case MySQL:
+	case dblib.MySQL:
 		driverName = "mysql"
 	default:
 		return nil, dbType, fmt.Errorf("unsupported database type")
@@ -212,18 +160,18 @@ func (c *Config) GetTables() ([]string, error) {
 
 	var query string
 	switch dbType {
-	case PostgreSQL:
+	case dblib.PostgreSQL:
 		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
-	case MySQL:
+	case dblib.MySQL:
 		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = ?"
-	case SQLite:
+	case dblib.SQLite:
 		query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
 	default:
 		return nil, fmt.Errorf("unsupported database type for GetTables")
 	}
 
 	var rows *sql.Rows
-	if dbType == MySQL {
+	if dbType == dblib.MySQL {
 		rows, err = db.Query(query, c.Database)
 	} else {
 		rows, err = db.Query(query)

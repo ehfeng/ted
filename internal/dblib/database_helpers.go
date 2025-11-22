@@ -1,4 +1,4 @@
-package main
+package dblib
 
 import (
 	"database/sql"
@@ -165,12 +165,12 @@ var commonReservedIdents = map[string]struct{}{
 	"as": {}, "on": {},
 }
 
-func getForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]any, error) {
+func GetForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]any, error) {
 	if len(columns) == 0 {
 		// choose non-key columns
-		columns = make([]string, 0, len(table.attributeOrder))
-		for _, col := range table.attributeOrder {
-			if !slices.Contains(table.key, col) {
+		columns = make([]string, 0, len(table.AttributeOrder))
+		for _, col := range table.AttributeOrder {
+			if !slices.Contains(table.Key, col) {
 				columns = append(columns, col)
 			}
 		}
@@ -187,7 +187,7 @@ func getForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []st
 	for i, col := range columns {
 		quotedColumns[i] = quoteIdent(table.DBType, col)
 	}
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", strings.Join(quotedColumns, ", "), quoteQualified(table.DBType, table.name), strings.Join(whereParts, " AND "))
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", strings.Join(quotedColumns, ", "), quoteQualified(table.DBType, table.Name), strings.Join(whereParts, " AND "))
 	row := db.QueryRow(query, args...)
 	values := make([]any, len(columns))
 	// scan into pointers

@@ -10,7 +10,10 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/rivo/tview v0.42.0
 	github.com/spf13/cobra v1.10.1
+	ted/internal/dblib v0.0.0
 )
+
+replace ted/internal/dblib => ./internal/dblib
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect

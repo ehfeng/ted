@@ -111,7 +111,7 @@ func (e *Editor) setupKeyBindings() {
 			if len(e.table.insertRow) > 0 && !e.editing && e.relation != nil {
 				// Check if the selected column is nullable
 				colName := e.columns[col].Name
-				if attr, ok := e.relation.attributes[colName]; ok && attr.Nullable {
+				if attr, ok := e.relation.Attributes[colName]; ok && attr.Nullable {
 					e.table.insertRow[col] = nil
 					e.renderData()
 				}

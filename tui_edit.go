@@ -6,6 +6,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"ted/internal/dblib"
 )
 
 func (e *Editor) enterEditMode(row, col int) {
@@ -276,7 +278,7 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int,
 	currentText string) tview.Primitive {
 	// Get the current text to calculate minimum size
 	currentText, _ = formatCellValue(currentText, tcell.StyleDefault)
-	if currentText == NullGlyph {
+	if currentText == dblib.NullGlyph {
 		textArea.SetTextStyle(textArea.GetTextStyle().Italic(true))
 	} else {
 		textArea.SetTextStyle(textArea.GetTextStyle().Italic(false))
@@ -425,7 +427,7 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 
 	if isNewRecordRow {
 		// Update the insert mode row with the new value
-		if newValue == NullGlyph {
+		if newValue == dblib.NullGlyph {
 			e.table.insertRow[col] = nil
 		} else {
 			e.table.insertRow[col] = newValue
@@ -478,9 +480,9 @@ func (e *Editor) executeInsert() error {
 	e.SetStatusMessage("Record inserted successfully")
 
 	// Extract the key values from the inserted row
-	keyVals := make([]any, len(e.relation.key))
-	for i, keyCol := range e.relation.key {
-		keyIdx, ok := e.relation.attributeIndex[keyCol]
+	keyVals := make([]any, len(e.relation.Key))
+	for i, keyCol := range e.relation.Key {
+		keyIdx, ok := e.relation.AttributeIndex[keyCol]
 		if !ok || insertedRow == nil {
 			// Fallback: load from bottom without specific row
 			e.loadFromRowId(nil, false, 0, false)
@@ -512,7 +514,7 @@ func (e *Editor) isMultilineColumnType(col int) bool {
 
 	column := e.columns[col]
 	attrType := ""
-	if attr, ok := e.relation.attributes[column.Name]; ok {
+	if attr, ok := e.relation.Attributes[column.Name]; ok {
 		attrType = attr.Type
 	}
 

@@ -40,11 +40,11 @@ func (e *Editor) renderData() {
 
 // extractKeys returns a copy of the key values from a row
 func (e *Editor) extractKeys(row []any) []any {
-	if row == nil || len(row) < len(e.relation.key) {
+	if row == nil || len(row) < len(e.relation.Key) {
 		return nil
 	}
-	keys := make([]any, len(e.relation.key))
-	copy(keys, row[0:len(e.relation.key)])
+	keys := make([]any, len(e.relation.Key))
+	copy(keys, row[0:len(e.relation.Key)])
 	return keys
 }
 
@@ -131,7 +131,7 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 	}
 
 	// Build the IN clause query
-	keyColCount := len(e.relation.key)
+	keyColCount := len(e.relation.Key)
 	if keyColCount == 0 {
 		return nil, fmt.Errorf("no primary key defined for relation")
 	}
@@ -144,7 +144,7 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 	if keyColCount == 1 {
 		// Simple case: single column key
 		query = fmt.Sprintf("SELECT %s FROM %s WHERE %s IN (",
-			e.relation.key[0], e.relation.name, e.relation.key[0])
+			e.relation.Key[0], e.relation.Name, e.relation.Key[0])
 		placeholders := make([]string, len(keys))
 		for i, key := range keys {
 			placeholders[i] = "?"
@@ -154,12 +154,12 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 	} else {
 		// Complex case: multi-column key
 		query = fmt.Sprintf("SELECT %s FROM %s WHERE ",
-			strings.Join(e.relation.key, ", "), e.relation.name)
+			strings.Join(e.relation.Key, ", "), e.relation.Name)
 		conditions := make([]string, len(keys))
 		for i, key := range keys {
 			keyConditions := make([]string, keyColCount)
 			for j := 0; j < keyColCount; j++ {
-				keyConditions[j] = fmt.Sprintf("%s = ?", e.relation.key[j])
+				keyConditions[j] = fmt.Sprintf("%s = ?", e.relation.Key[j])
 				args = append(args, key[j])
 			}
 			conditions[i] = fmt.Sprintf("(%s)", strings.Join(keyConditions, " AND "))
@@ -360,7 +360,7 @@ func (e *Editor) refresh() error {
 	if len(e.buffer) == 0 || e.buffer[e.pointer].data == nil {
 		return nil // Nothing to refresh
 	}
-	id := e.buffer[e.pointer].data[:len(e.relation.key)]
+	id := e.buffer[e.pointer].data[:len(e.relation.Key)]
 
 	// Close existing query before refresh
 	e.queryMu.Lock()
@@ -616,12 +616,12 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		// Stop refresh timer when starting a new query
 		e.stopRefreshTimer()
 
-		params := make([]any, len(e.relation.key))
+		params := make([]any, len(e.relation.Key))
 		lastRecordIdx := (e.pointer - 1 + len(e.buffer)) % len(e.buffer)
 		if e.buffer[lastRecordIdx].data == nil {
 			return false, nil // Can't query from nil record
 		}
-		for i := range e.relation.key {
+		for i := range e.relation.Key {
 			params[i] = e.buffer[lastRecordIdx].data[i]
 		}
 		selectCols := make([]string, len(e.columns))
@@ -723,8 +723,8 @@ func (e *Editor) prevRows(i int) (bool, error) {
 		if len(e.buffer) == 0 || e.buffer[e.pointer].data == nil {
 			return false, nil // Can't query from nil or empty records
 		}
-		params := make([]any, len(e.relation.key))
-		for i := range e.relation.key {
+		params := make([]any, len(e.relation.Key))
+		for i := range e.relation.Key {
 			params[i] = e.buffer[e.pointer].data[i]
 		}
 		selectCols := make([]string, len(e.columns))

@@ -1,4 +1,4 @@
-package main
+package dblib
 
 import (
 	"database/sql"
@@ -39,10 +39,10 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	relation := &Relation{
 		DB:             db,
 		DBType:         dbType,
-		name:           tableName,
-		attributes:     make(map[string]Attribute),
-		attributeIndex: make(map[string]int),
-		references:     []Reference{},
+		Name:           tableName,
+		Attributes:     make(map[string]Attribute),
+		AttributeIndex: make(map[string]int),
+		References:     []Reference{},
 	}
 
 	var (
@@ -74,12 +74,12 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		return wrapErr(fmt.Errorf("unsupported database type: %v", dbType))
 	}
 
-	relation.attributes = attributes
-	relation.attributeOrder = attributeOrder
-	relation.attributeIndex = attributeIndex
+	relation.Attributes = attributes
+	relation.AttributeOrder = attributeOrder
+	relation.AttributeIndex = attributeIndex
 
 	// Consolidated lookup key selection: choose shortest lookup key
-	lookupCols, err := getShortestLookupKey(db, dbType, relation.name)
+	lookupCols, err := getShortestLookupKey(db, dbType, relation.Name)
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -94,8 +94,8 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	if len(lookupCols) == 0 {
 		return wrapErr(fmt.Errorf("no primary key found"))
 	}
-	relation.key = make([]string, len(lookupCols))
-	copy(relation.key, lookupCols)
+	relation.Key = make([]string, len(lookupCols))
+	copy(relation.Key, lookupCols)
 
 	// Fetch enum values and custom type information
 	if err := relation.loadEnumAndCustomTypes(); err != nil {
@@ -108,15 +108,15 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	var updatedAttrs map[string]Attribute
 	switch dbType {
 	case SQLite:
-		references, updatedAttrs, err = loadForeignKeysSQLite(db, dbType, tableName, relation.attributeIndex, relation.attributes)
+		references, updatedAttrs, err = loadForeignKeysSQLite(db, dbType, tableName, relation.AttributeIndex, relation.Attributes)
 	case PostgreSQL:
-		references, updatedAttrs, err = loadForeignKeysPostgreSQL(db, dbType, tableName, relation.attributeIndex, relation.attributes)
+		references, updatedAttrs, err = loadForeignKeysPostgreSQL(db, dbType, tableName, relation.AttributeIndex, relation.Attributes)
 	case MySQL:
-		references, updatedAttrs, err = loadForeignKeysMySQL(db, dbType, tableName, relation.attributeIndex, relation.attributes)
+		references, updatedAttrs, err = loadForeignKeysMySQL(db, dbType, tableName, relation.AttributeIndex, relation.Attributes)
 	}
 	if err == nil {
-		relation.references = references
-		relation.attributes = updatedAttrs
+		relation.References = references
+		relation.Attributes = updatedAttrs
 	}
 
 	return relation, nil
@@ -129,11 +129,11 @@ func (rel *Relation) loadEnumAndCustomTypes() error {
 
 	switch rel.DBType {
 	case MySQL:
-		updatedAttrs, err = loadEnumAndCustomTypesMySQL(rel.DB, rel.name, rel.attributes)
+		updatedAttrs, err = loadEnumAndCustomTypesMySQL(rel.DB, rel.Name, rel.Attributes)
 	case PostgreSQL:
-		updatedAttrs, err = loadEnumAndCustomTypesPostgreSQL(rel.DB, rel.name, rel.attributes)
+		updatedAttrs, err = loadEnumAndCustomTypesPostgreSQL(rel.DB, rel.Name, rel.Attributes)
 	case SQLite:
-		updatedAttrs, err = loadEnumAndCustomTypesSQLite(rel.DB, rel.name, rel.attributes)
+		updatedAttrs, err = loadEnumAndCustomTypesSQLite(rel.DB, rel.Name, rel.Attributes)
 	default:
 		return nil
 	}
@@ -142,7 +142,7 @@ func (rel *Relation) loadEnumAndCustomTypes() error {
 		return err
 	}
 
-	rel.attributes = updatedAttrs
+	rel.Attributes = updatedAttrs
 	return nil
 }
 
@@ -213,7 +213,7 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) st
 	var cols []string
 	var vals []string
 	for i, column := range columns {
-		attr := rel.attributes[column.Name]
+		attr := rel.Attributes[column.Name]
 		// nil means no update
 		if newRecordRow[i] != EmptyCellValue {
 			cols = append(cols, quoteIdent(rel.DBType, column.Name))
@@ -225,11 +225,11 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) st
 		return ""
 	}
 
-	quotedTable := quoteQualified(rel.DBType, rel.name)
+	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	useReturning := databaseFeatures[rel.DBType].returning
 
-	returningCols := make([]string, len(rel.attributeOrder))
-	for i, name := range rel.attributeOrder {
+	returningCols := make([]string, len(rel.AttributeOrder))
+	for i, name := range rel.AttributeOrder {
 		returningCols[i] = quoteIdent(rel.DBType, name)
 	}
 	returning := strings.Join(returningCols, ", ")
@@ -246,14 +246,14 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) st
 // values inlined for preview purposes. It mirrors UpdateDBValue but does not
 // execute any SQL. Intended only for UI preview.
 func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName string, newValue string) string {
-	if rowIdx < 0 || rowIdx >= len(records) || len(rel.key) == 0 {
+	if rowIdx < 0 || rowIdx >= len(records) || len(rel.Key) == 0 {
 		return ""
 	}
 
 	// Convert raw text to DB-typed value (mirrors UpdateDBValue's toDBValue)
 	toDBValue := func(colName, raw string) any {
 		attrType := ""
-		if attr, ok := rel.attributes[colName]; ok {
+		if attr, ok := rel.Attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
 		}
 		if raw == NullGlyph {
@@ -286,10 +286,10 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 	}
 
 	// Where clause with literal values
-	whereParts := make([]string, 0, len(rel.key))
-	for _, lookupKeyCol := range rel.key {
+	whereParts := make([]string, 0, len(rel.Key))
+	for _, lookupKeyCol := range rel.Key {
 		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
-		idx, ok := rel.attributeIndex[lookupKeyCol]
+		idx, ok := rel.AttributeIndex[lookupKeyCol]
 		if !ok || rowIdx >= len(records) {
 			return ""
 		}
@@ -297,7 +297,7 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 		if idx < 0 || idx >= len(row) {
 			return ""
 		}
-		attr, ok := rel.attributes[lookupKeyCol]
+		attr, ok := rel.Attributes[lookupKeyCol]
 		if !ok {
 			return ""
 		}
@@ -306,28 +306,28 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 
 	// SET clause literal
 	targetAttrType := ""
-	if attr, ok := rel.attributes[colName]; ok {
+	if attr, ok := rel.Attributes[colName]; ok {
 		targetAttrType = attr.Type
 	}
 	valueArg := toDBValue(colName, newValue)
 	quotedTarget := quoteIdent(rel.DBType, colName)
 	setClause := fmt.Sprintf("%s = %s", quotedTarget, rel.formatLiteral(valueArg, targetAttrType))
 
-	returningCols := make([]string, len(rel.attributeOrder))
-	for i, name := range rel.attributeOrder {
+	returningCols := make([]string, len(rel.AttributeOrder))
+	for i, name := range rel.AttributeOrder {
 		returningCols[i] = quoteIdent(rel.DBType, name)
 	}
-	if len(rel.key) == 1 {
-		if rel.key[0] == "rowid" {
+	if len(rel.Key) == 1 {
+		if rel.Key[0] == "rowid" {
 			returningCols = append(returningCols, "rowid")
 		}
-		if rel.key[0] == "ctid" {
+		if rel.Key[0] == "ctid" {
 			returningCols = append(returningCols, "ctid")
 		}
 	}
 	returning := strings.Join(returningCols, ", ")
 
-	quotedTable := quoteQualified(rel.DBType, rel.name)
+	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	useReturning := databaseFeatures[rel.DBType].returning
 	if useReturning {
 		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
@@ -338,15 +338,15 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 // BuildDeletePreview constructs a SQL DELETE statement as a string with literal
 // values inlined for preview purposes. Intended only for UI preview.
 func (rel *Relation) BuildDeletePreview(records [][]any, rowIdx int) string {
-	if rowIdx < 0 || rowIdx >= len(records) || len(rel.key) == 0 {
+	if rowIdx < 0 || rowIdx >= len(records) || len(rel.Key) == 0 {
 		return ""
 	}
 
 	// Where clause with literal values
-	whereParts := make([]string, 0, len(rel.key))
-	for _, lookupKeyCol := range rel.key {
+	whereParts := make([]string, 0, len(rel.Key))
+	for _, lookupKeyCol := range rel.Key {
 		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
-		idx, ok := rel.attributeIndex[lookupKeyCol]
+		idx, ok := rel.AttributeIndex[lookupKeyCol]
 		if !ok || rowIdx >= len(records) {
 			return ""
 		}
@@ -354,100 +354,72 @@ func (rel *Relation) BuildDeletePreview(records [][]any, rowIdx int) string {
 		if idx < 0 || idx >= len(row) {
 			return ""
 		}
-		attr, ok := rel.attributes[lookupKeyCol]
+		attr, ok := rel.Attributes[lookupKeyCol]
 		if !ok {
 			return ""
 		}
 		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, rel.formatLiteral(row[idx], attr.Type)))
 	}
 
-	quotedTable := quoteQualified(rel.DBType, rel.name)
+	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	return fmt.Sprintf("DELETE FROM %s WHERE %s", quotedTable, strings.Join(whereParts, " AND "))
 }
 
 // DeleteDBRecord deletes a record from the database based on its key values.
 func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
-	if rowIdx < 0 || rowIdx >= len(records) || len(rel.key) == 0 {
+	if rowIdx < 0 || rowIdx >= len(records) || len(rel.Key) == 0 {
 		return fmt.Errorf("invalid row index or no key columns")
 	}
 
-	// Record database operation in breadcrumbs
-	if breadcrumbs != nil {
-		breadcrumbs.RecordDatabase("DELETE")
-	}
-
 	// Build WHERE clause using key columns
-	whereParts := make([]string, 0, len(rel.key))
-	whereParams := make([]any, 0, len(rel.key))
-	for _, lookupKeyCol := range rel.key {
+	whereParts := make([]string, 0, len(rel.Key))
+	whereParams := make([]any, 0, len(rel.Key))
+	for _, lookupKeyCol := range rel.Key {
 		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
-		idx, ok := rel.attributeIndex[lookupKeyCol]
+		idx, ok := rel.AttributeIndex[lookupKeyCol]
 		if !ok {
-			err := fmt.Errorf("key column %s not found in attribute index", lookupKeyCol)
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
-			return err
+			return fmt.Errorf("key column %s not found in attribute index", lookupKeyCol)
 		}
 		row := records[rowIdx]
 		if idx < 0 || idx >= len(row) {
-			err := fmt.Errorf("key column %s index out of range", lookupKeyCol)
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
-			return err
+			return fmt.Errorf("key column %s index out of range", lookupKeyCol)
 		}
 		whereParts = append(whereParts, fmt.Sprintf("%s = ?", qKeyName))
 		whereParams = append(whereParams, row[idx])
 	}
 
-	quotedTable := quoteQualified(rel.DBType, rel.name)
+	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s", quotedTable, strings.Join(whereParts, " AND "))
 
 	// Execute the DELETE
 	result, err := rel.DB.Exec(deleteSQL, whereParams...)
 	if err != nil {
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return err
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return err
 	}
 	if rowsAffected == 0 {
-		err := fmt.Errorf("no rows were deleted")
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
-		return err
+		return fmt.Errorf("no rows were deleted")
 	}
 
 	return nil
 }
 
 // InsertDBRecord inserts a new record into the database. It returns the inserted
-// row values ordered by relation.attributeOrder. The newRecordRow should contain
+// row values ordered by relation.AttributeOrder. The newRecordRow should contain
 // values for all columns (or nil/NullGlyph for NULL values).
 func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
-	if len(newRecordRow) != len(rel.attributeOrder) {
-		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.attributeOrder), len(newRecordRow))
-	}
-
-	// Record database operation in breadcrumbs
-	if breadcrumbs != nil {
-		breadcrumbs.RecordDatabase("INSERT")
+	if len(newRecordRow) != len(rel.AttributeOrder) {
+		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.AttributeOrder), len(newRecordRow))
 	}
 
 	// Convert string values to appropriate DB values
 	toDBValue := func(colName, raw string) any {
 		attrType := ""
-		if attr, ok := rel.attributes[colName]; ok {
+		if attr, ok := rel.Attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
 		}
 		if raw == NullGlyph || raw == "" {
@@ -495,8 +467,8 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 	var args []any
 	paramPos := 1
 
-	for i, attrName := range rel.attributeOrder {
-		attr, ok := rel.attributes[attrName]
+	for i, attrName := range rel.AttributeOrder {
+		attr, ok := rel.Attributes[attrName]
 		if !ok {
 			continue
 		}
@@ -528,14 +500,14 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 	}
 
 	// Build RETURNING clause
-	returningCols := make([]string, len(rel.attributeOrder))
-	for i, name := range rel.attributeOrder {
+	returningCols := make([]string, len(rel.AttributeOrder))
+	for i, name := range rel.AttributeOrder {
 		returningCols[i] = quoteIdent(rel.DBType, name)
 	}
 	returning := strings.Join(returningCols, ", ")
 
 	// Build query
-	quotedTable := quoteQualified(rel.DBType, rel.name)
+	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	useReturning := databaseFeatures[rel.DBType].returning
 
 	// If no columns to insert, use DEFAULT VALUES syntax
@@ -552,9 +524,6 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 			}
 
 			if err := rel.DB.QueryRow(query).Scan(scanArgs...); err != nil {
-				if breadcrumbs != nil {
-					breadcrumbs.Flush()
-				}
 				return nil, fmt.Errorf("insert failed: %w", err)
 			}
 			return rowVals, nil
@@ -565,27 +534,21 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 		tx, err := rel.DB.Begin()
 		if err != nil {
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, fmt.Errorf("begin tx failed: %w", err)
 		}
 
 		result, err := tx.Exec(query)
 		if err != nil {
 			_ = tx.Rollback()
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, fmt.Errorf("insert failed: %w", err)
 		}
 
 		// Get last insert ID if available
 		lastID, err := result.LastInsertId()
-		if err == nil && lastID > 0 && len(rel.key) == 1 {
+		if err == nil && lastID > 0 && len(rel.Key) == 1 {
 			// Select the inserted row by last insert ID
 			selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
-				returning, quotedTable, quoteIdent(rel.DBType, rel.key[0]), placeholder(1))
+				returning, quotedTable, quoteIdent(rel.DBType, rel.Key[0]), placeholder(1))
 			row := tx.QueryRow(selQuery, lastID)
 
 			rowVals := make([]any, len(returningCols))
@@ -596,16 +559,10 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 			if err := row.Scan(scanArgs...); err != nil {
 				_ = tx.Rollback()
-				if breadcrumbs != nil {
-					breadcrumbs.Flush()
-				}
 				return nil, fmt.Errorf("scan failed: %w", err)
 			}
 
 			if err := tx.Commit(); err != nil {
-				if breadcrumbs != nil {
-					breadcrumbs.Flush()
-				}
 				return nil, fmt.Errorf("commit failed: %w", err)
 			}
 			return rowVals, nil
@@ -613,9 +570,6 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 		// Fallback: commit and return nil (caller should refresh manually)
 		if err := tx.Commit(); err != nil {
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, fmt.Errorf("commit failed: %w", err)
 		}
 		return nil, nil
@@ -633,9 +587,6 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 		}
 
 		if err := rel.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, fmt.Errorf("insert failed: %w", err)
 		}
 		return rowVals, nil
@@ -647,27 +598,21 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 	tx, err := rel.DB.Begin()
 	if err != nil {
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, fmt.Errorf("begin tx failed: %w", err)
 	}
 
 	result, err := tx.Exec(query, args...)
 	if err != nil {
 		_ = tx.Rollback()
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, fmt.Errorf("insert failed: %w", err)
 	}
 
 	// Get last insert ID if available
 	lastID, err := result.LastInsertId()
-	if err == nil && lastID > 0 && len(rel.key) == 1 {
+	if err == nil && lastID > 0 && len(rel.Key) == 1 {
 		// Select the inserted row by last insert ID
 		selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
-			returning, quotedTable, quoteIdent(rel.DBType, rel.key[0]), placeholder(1))
+			returning, quotedTable, quoteIdent(rel.DBType, rel.Key[0]), placeholder(1))
 		row := tx.QueryRow(selQuery, lastID)
 
 		rowVals := make([]any, len(returningCols))
@@ -678,16 +623,10 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 		if err := row.Scan(scanArgs...); err != nil {
 			_ = tx.Rollback()
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, fmt.Errorf("scan failed: %w", err)
 		}
 
 		if err := tx.Commit(); err != nil {
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, fmt.Errorf("commit failed: %w", err)
 		}
 		return rowVals, nil
@@ -695,9 +634,6 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 	// Fallback: commit and return nil (caller should refresh manually)
 	if err := tx.Commit(); err != nil {
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 	return nil, nil
@@ -705,25 +641,21 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 // UpdateDBValue updates a single cell in the underlying database using the
 // relation's lookup key columns to identify the row. It returns the refreshed
-// row values ordered by relation.attributeOrder. If no row is updated, returns
+// row values ordered by relation.AttributeOrder. If no row is updated, returns
 // an error.
 func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, newValue string) ([]any, error) {
 	if rowIdx < 0 || rowIdx >= len(records) {
 		return nil, fmt.Errorf("index out of range")
 	}
-	if len(rel.key) == 0 {
+	if len(rel.Key) == 0 {
 		return nil, fmt.Errorf("no lookup key configured")
 	}
 
-	// Record database operation in breadcrumbs
-	if breadcrumbs != nil {
-		breadcrumbs.RecordDatabase("UPDATE")
-	}
 
 	// Convert string to appropriate DB value
 	toDBValue := func(colName, raw string) any {
 		attrType := ""
-		if attr, ok := rel.attributes[colName]; ok {
+		if attr, ok := rel.Attributes[colName]; ok {
 			attrType = strings.ToLower(attr.Type)
 		}
 		if raw == NullGlyph {
@@ -767,10 +699,10 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 
 	// Build SET and WHERE clauses and args
 	valueArg := toDBValue(colName, newValue)
-	keyArgs := make([]any, 0, len(rel.key))
-	whereParts := make([]string, 0, len(rel.key))
-	for i := range rel.key {
-		lookupKeyCol := rel.key[i]
+	keyArgs := make([]any, 0, len(rel.Key))
+	whereParts := make([]string, 0, len(rel.Key))
+	for i := range rel.Key {
+		lookupKeyCol := rel.Key[i]
 		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
 		var ph string
 		if rel.DBType == PostgreSQL {
@@ -779,20 +711,14 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 			ph = placeholder(0)
 		}
 		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, ph))
-		colIdx, ok := rel.attributeIndex[lookupKeyCol]
+		colIdx, ok := rel.AttributeIndex[lookupKeyCol]
 		if !ok || rowIdx >= len(records) {
 			err := fmt.Errorf("lookup key column %s not found in records", lookupKeyCol)
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, err
 		}
 		row := records[rowIdx]
 		if colIdx < 0 || colIdx >= len(row) {
 			err := fmt.Errorf("lookup key column %s not loaded", lookupKeyCol)
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, err
 		}
 		keyArgs = append(keyArgs, row[colIdx])
@@ -807,16 +733,16 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(0))
 	}
 
-	returningCols := make([]string, len(rel.attributeOrder))
-	for i, name := range rel.attributeOrder {
+	returningCols := make([]string, len(rel.AttributeOrder))
+	for i, name := range rel.AttributeOrder {
 		returningCols[i] = quoteIdent(rel.DBType, name)
 	}
 
-	if len(rel.key) == 1 {
-		if rel.key[0] == "rowid" {
+	if len(rel.Key) == 1 {
+		if rel.Key[0] == "rowid" {
 			returningCols = append(returningCols, "rowid")
 		}
-		if rel.key[0] == "ctid" {
+		if rel.Key[0] == "ctid" {
 			returningCols = append(returningCols, "ctid")
 		}
 	}
@@ -825,7 +751,7 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	// Build full query
 	var query string
 	useReturning := databaseFeatures[rel.DBType].returning
-	quotedTable := quoteQualified(rel.DBType, rel.name)
+	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	if useReturning {
 		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
 		// Combine args: value + keys
@@ -841,9 +767,6 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 		}
 
 		if err := rel.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
-			if breadcrumbs != nil {
-				breadcrumbs.Flush()
-			}
 			return nil, fmt.Errorf("update failed: %w", err)
 		}
 		return rowVals, nil
@@ -856,9 +779,6 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	// Begin transaction
 	tx, err := rel.DB.Begin()
 	if err != nil {
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, fmt.Errorf("begin tx failed: %w", err)
 	}
 
@@ -869,17 +789,11 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	res, err := tx.Exec(query, args...)
 	if err != nil {
 		_ = tx.Rollback()
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, fmt.Errorf("update failed: %w", err)
 	}
 	if ra, _ := res.RowsAffected(); ra == 0 {
 		_ = tx.Rollback()
 		err := fmt.Errorf("no rows updated")
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, err
 	}
 
@@ -893,16 +807,10 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	}
 	if err := row.Scan(scanArgs...); err != nil {
 		_ = tx.Rollback()
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		if breadcrumbs != nil {
-			breadcrumbs.Flush()
-		}
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 	return rowVals, nil
@@ -911,7 +819,7 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
 func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
-	query, err := selectQuery(rel.DBType, rel.name, columns, sortCol, rel.key, len(params) > 0, inclusive, scrollDown)
+	query, err := selectQuery(rel.DBType, rel.Name, columns, sortCol, rel.Key, len(params) > 0, inclusive, scrollDown)
 	if err != nil {
 		return nil, err
 	}
@@ -933,20 +841,20 @@ func (rel *Relation) placeholder(pos int) string {
 // It searches below the current selection first, then wraps around to search from the top.
 // Returns: (keys of found row, true if found below/false if wrapped, error)
 func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColumn, sortColVal any, currentKeys []any) ([]any, bool, error) {
-	if findCol < 0 || findCol >= len(rel.attributeOrder) {
+	if findCol < 0 || findCol >= len(rel.AttributeOrder) {
 		return nil, false, fmt.Errorf("findCol index out of range")
 	}
-	if len(currentKeys) != len(rel.key) {
-		return nil, false, fmt.Errorf("currentKeys length mismatch: expected %d, got %d", len(rel.key), len(currentKeys))
+	if len(currentKeys) != len(rel.Key) {
+		return nil, false, fmt.Errorf("currentKeys length mismatch: expected %d, got %d", len(rel.Key), len(currentKeys))
 	}
 
-	searchColName := rel.attributeOrder[findCol]
+	searchColName := rel.AttributeOrder[findCol]
 	quotedSearchCol := quoteIdent(rel.DBType, searchColName)
-	quotedTable := quoteQualified(rel.DBType, rel.name)
+	quotedTable := quoteQualified(rel.DBType, rel.Name)
 
 	// Build key column list for SELECT
-	keyCols := make([]string, len(rel.key))
-	for i, k := range rel.key {
+	keyCols := make([]string, len(rel.Key))
+	for i, k := range rel.Key {
 		keyCols[i] = quoteIdent(rel.DBType, k)
 	}
 	selectClause := strings.Join(keyCols, ", ")
@@ -957,8 +865,8 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 		// The last key uses > (or <), the rest use >= (or <=)
 		var parts []string
 		var args []any
-		lastIdx := len(rel.key) - 1
-		for i, keyCol := range rel.key {
+		lastIdx := len(rel.Key) - 1
+		for i, keyCol := range rel.Key {
 			quoted := quoteIdent(rel.DBType, keyCol)
 			var cmp string
 			if i < lastIdx {
@@ -1005,7 +913,7 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" DESC")
 		}
 	}
-	for _, k := range rel.key {
+	for _, k := range rel.Key {
 		orderParts = append(orderParts, quoteIdent(rel.DBType, k)+" ASC")
 	}
 
@@ -1013,8 +921,8 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 		selectClause, quotedTable, strings.Join(whereParts, " AND "), strings.Join(orderParts, ", "))
 
 	row := rel.DB.QueryRow(query, args...)
-	foundKeys := make([]any, len(rel.key))
-	scanArgs := make([]any, len(rel.key))
+	foundKeys := make([]any, len(rel.Key))
+	scanArgs := make([]any, len(rel.Key))
 	for i := range foundKeys {
 		scanArgs[i] = &foundKeys[i]
 	}
@@ -1059,7 +967,7 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" ASC")
 		}
 	}
-	for _, k := range rel.key {
+	for _, k := range rel.Key {
 		orderParts = append(orderParts, quoteIdent(rel.DBType, k)+" DESC")
 	}
 

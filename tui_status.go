@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
+
+	"ted/internal/dblib"
 )
 
 // updateStatusForEditMode sets helpful status bar text based on column type and constraints
@@ -15,7 +17,7 @@ func (e *Editor) updateStatusForEditMode(col int) {
 	}
 
 	colName := e.columns[col].Name
-	attr, ok := e.relation.attributes[colName]
+	attr, ok := e.relation.Attributes[colName]
 	if !ok {
 		e.SetStatusMessage("Editing...")
 		return
@@ -52,8 +54,8 @@ func (e *Editor) updateStatusForEditMode(col int) {
 	}
 
 	// Foreign key reference
-	if attr.Reference >= 0 && attr.Reference < len(e.relation.references) {
-		refTable := e.relation.references[attr.Reference].ForeignTable.name
+	if attr.Reference >= 0 && attr.Reference < len(e.relation.References) {
+		refTable := e.relation.References[attr.Reference].ForeignTable.Name
 		parts = append(parts, fmt.Sprintf("→ %s", refTable))
 	}
 
@@ -75,8 +77,8 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 	}
 
 	colName := e.columns[col].Name
-	attr, ok := e.relation.attributes[colName]
-	if !ok || attr.Reference < 0 || attr.Reference >= len(e.relation.references) {
+	attr, ok := e.relation.Attributes[colName]
+	if !ok || attr.Reference < 0 || attr.Reference >= len(e.relation.References) {
 		return // Not a foreign key column
 	}
 
@@ -111,9 +113,9 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 		parts = append(parts, "NOT NULL")
 	}
 
-	ref := e.relation.references[attr.Reference]
-	if newText == "" || newText == NullGlyph {
-		parts = append(parts, fmt.Sprintf("→ %s", ref.ForeignTable.name))
+	ref := e.relation.References[attr.Reference]
+	if newText == "" || newText == dblib.NullGlyph {
+		parts = append(parts, fmt.Sprintf("→ %s", ref.ForeignTable.Name))
 	} else {
 		// Foreign key reference with preview
 		foreignKeys := make(map[string]any)
@@ -125,7 +127,7 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 			}
 		}
 		// TODO pass config columns if available
-		preview, err := getForeignRow(e.relation.DB, ref.ForeignTable, foreignKeys, nil)
+		preview, err := dblib.GetForeignRow(e.relation.DB, ref.ForeignTable, foreignKeys, nil)
 		if err != nil {
 			e.SetStatusErrorWithSentry(err)
 			return
@@ -138,10 +140,10 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 		previewStr = strings.Join(previewStrs, ", ")
 		if preview == nil {
 			parts = append(parts, fmt.Sprintf("[blueviolet]→ %s: not found[black]",
-				ref.ForeignTable.name))
+				ref.ForeignTable.Name))
 		} else {
 			parts = append(parts, fmt.Sprintf("[darkgreen]→ %s: %s[black]",
-				ref.ForeignTable.name, previewStr))
+				ref.ForeignTable.Name, previewStr))
 		}
 	}
 
@@ -239,7 +241,7 @@ func formatEnumValuesWithHighlight(values []string, currentValue string) string 
 	}
 
 	// If value doesn't match any enum, show warning
-	if !foundMatch && currentValue != "" && currentValue != NullGlyph {
+	if !foundMatch && currentValue != "" && currentValue != dblib.NullGlyph {
 		// Check if it's a partial match
 		hasPartial := false
 		for _, val := range values {
@@ -453,7 +455,7 @@ func (e *Editor) updateStatusWithCellContent() {
 	colName := e.columns[col].Name
 	var colType string
 	if e.relation != nil {
-		if attr, ok := e.relation.attributes[colName]; ok {
+		if attr, ok := e.relation.Attributes[colName]; ok {
 			colType = attr.Type
 		}
 	}

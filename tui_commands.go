@@ -5,6 +5,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+
+	"ted/internal/dblib"
 )
 
 // SQL execution
@@ -156,14 +158,14 @@ func (e *Editor) executeFind(findValue string) {
 	}
 
 	// Get current row's key values
-	currentKeys := make([]any, len(e.relation.key))
-	for i := range e.relation.key {
+	currentKeys := make([]any, len(e.relation.Key))
+	for i := range e.relation.Key {
 		currentKeys[i] = e.buffer[row].data[i]
 	}
 
 	// Find the column index in relation.attributeOrder
 	findCol := -1
-	for i, name := range e.relation.attributeOrder {
+	for i, name := range e.relation.AttributeOrder {
 		if name == e.columns[col].Name {
 			findCol = i
 			break
@@ -197,7 +199,7 @@ func (e *Editor) executeFind(findValue string) {
 		}
 		// Compare key values
 		match := true
-		for j := range e.relation.key {
+		for j := range e.relation.Key {
 			if e.buffer[i].data[j] != foundKeys[j] {
 				match = false
 				break
@@ -242,7 +244,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	fmt.Fprintf(os.Stderr, "[DEBUG] Picker closed\n")
 
 	// Reload the table data using the current database connection
-	relation, err := NewRelation(e.db, e.dbType, tableName)
+	relation, err := dblib.NewRelation(e.db, e.dbType, tableName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating relation: %v\n", err)
 		e.SetStatusErrorWithSentry(err)
@@ -255,13 +257,13 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 
 	// Reset columns
 	fmt.Fprintf(os.Stderr, "[DEBUG] Resetting columns\n")
-	e.columns = make([]Column, 0, len(e.relation.attributeOrder))
-	for _, name := range e.relation.key {
-		e.columns = append(e.columns, Column{Name: name, Width: 4})
+	e.columns = make([]dblib.Column, 0, len(e.relation.AttributeOrder))
+	for _, name := range e.relation.Key {
+		e.columns = append(e.columns, dblib.Column{Name: name, Width: 4})
 	}
-	for _, name := range e.relation.attributeOrder {
-		if !slices.Contains(e.relation.key, name) {
-			e.columns = append(e.columns, Column{Name: name, Width: 8})
+	for _, name := range e.relation.AttributeOrder {
+		if !slices.Contains(e.relation.Key, name) {
+			e.columns = append(e.columns, dblib.Column{Name: name, Width: 8})
 		}
 	}
 
@@ -274,7 +276,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 			Width: col.Width,
 		}
 	}
-	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.key)).SetTableName(tableName).SetVimMode(e.vimMode)
+	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.Key)).SetTableName(tableName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
 	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")

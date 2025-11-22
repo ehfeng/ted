@@ -15,6 +15,8 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
+
+	"ted/internal/dblib"
 )
 
 var (
@@ -112,7 +114,7 @@ Examples:
 			tablename = args[1]
 		}
 
-		var dbTypeOverride *DatabaseType
+		var dbTypeOverride *dblib.DatabaseType
 		// Validate mutually exclusive flags
 		if usePostgres && useMySQL {
 			fmt.Fprintln(os.Stderr, "Error: --postgres/--pg and --mysql/--my are mutually exclusive")
@@ -123,10 +125,10 @@ Examples:
 			os.Exit(1)
 		}
 		if usePostgres {
-			t := PostgreSQL
+			t := dblib.PostgreSQL
 			dbTypeOverride = &t
 		} else if useMySQL {
-			t := MySQL
+			t := dblib.MySQL
 			dbTypeOverride = &t
 		}
 

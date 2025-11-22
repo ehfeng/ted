@@ -1,4 +1,4 @@
-package main
+package dblib
 
 import (
 	"database/sql"
@@ -212,8 +212,8 @@ func loadForeignKeysMySQL(db *sql.DB, dbType DatabaseType, tableName string, att
 			if idx, ok := attrIndex[c.col]; ok {
 				foreignCol := c.refCol
 				// If refCol is empty, it references the foreign table's primary key
-				if foreignCol == "" && i < len(foreignRel.key) {
-					foreignCol = foreignRel.key[i]
+				if foreignCol == "" && i < len(foreignRel.Key) {
+					foreignCol = foreignRel.Key[i]
 				}
 				ref.ForeignColumns[idx] = foreignCol
 				// Update attribute with reference index

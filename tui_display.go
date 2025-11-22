@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+
+	"ted/internal/dblib"
 )
 
 func (e *Editor) moveColumn(col, direction int) {
@@ -51,11 +53,11 @@ func (e *Editor) adjustColumnWidth(col, delta int) {
 }
 
 func formatCellValue(value any, cellStyle tcell.Style) (string, tcell.Style) {
-	if value == EmptyCellValue {
+	if value == dblib.EmptyCellValue {
 		return "", cellStyle
 	}
 	if value == nil {
-		return NullDisplay, cellStyle.Italic(true).Foreground(tcell.ColorGray)
+		return dblib.NullDisplay, cellStyle.Italic(true).Foreground(tcell.ColorGray)
 	}
 
 	switch v := value.(type) {

@@ -5,9 +5,9 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-)
 
-const EmptyCellValue = '\000'
+	"ted/internal/dblib"
+)
 
 // Viewport handles horizontal scrolling for the table
 type Viewport struct {
@@ -282,7 +282,7 @@ func (tv *TableView) SetDataReferences(data []Row) *TableView {
 func (tv *TableView) SetupInsertRow() {
 	tv.insertRow = make([]any, len(tv.headers))
 	for i := range tv.insertRow {
-		tv.insertRow[i] = EmptyCellValue
+		tv.insertRow[i] = dblib.EmptyCellValue
 	}
 }
 
@@ -734,9 +734,9 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 		// Cell data
 		if isNewRecordRow {
 			// For insert mode row, render cell value with special styling
-			// EmptyCellValue means empty (column not included in INSERT) - show as ·
+			// dblib.EmptyCellValue means empty (column not included in INSERT) - show as ·
 			// nil means null
-			if tv.insertRow[i] == EmptyCellValue {
+			if tv.insertRow[i] == dblib.EmptyCellValue {
 				// Empty cell in insert mode - show repeating dots
 				for k := 0; k < header.Width; k++ {
 					tv.viewport.SetContent(pos+k, y, '·', nil, cellStyle)

@@ -10,6 +10,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"ted/internal/dblib"
 )
 
 const (
@@ -20,13 +22,6 @@ const (
 	pageTable            = "table"
 	chromeHeight         = 6
 )
-
-// this is a config concept
-// width = 0 means Column is hidden but selected
-type Column struct {
-	Name  string
-	Width int
-}
 
 type RowState int
 
@@ -49,14 +44,14 @@ type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
 	table    *TableView
-	columns  []Column // TODO move this into Config
-	relation *Relation
+	columns  []dblib.Column // TODO move this into Config
+	relation *dblib.Relation
 	config   *Config
 	vimMode  bool
 
 	// Database connection (stored separately to support table switching when relation is nil)
 	db     *sql.DB
-	dbType DatabaseType
+	dbType dblib.DatabaseType
 
 	// references to key components
 	tablePicker    *FuzzySelector // Table picker at the top
@@ -161,31 +156,31 @@ func runEditor(config *Config, dbname, tablename string) error {
 	terminalHeight := getTerminalHeight()
 	tableDataHeight := terminalHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
 
-	var relation *Relation
-	var columns []Column
+	var relation *dblib.Relation
+	var columns []dblib.Column
 
 	// Only load table if tablename is provided
 	if tablename != "" {
 		var err error
-		relation, err = NewRelation(db, dbType, tablename)
+		relation, err = dblib.NewRelation(db, dbType, tablename)
 		if err != nil {
 			CaptureError(err)
 			return err
 		}
 
 		// force key to be first column(s)
-		columns = make([]Column, 0, len(relation.attributeOrder))
-		for _, name := range relation.key {
-			columns = append(columns, Column{Name: name, Width: 4})
+		columns = make([]dblib.Column, 0, len(relation.AttributeOrder))
+		for _, name := range relation.Key {
+			columns = append(columns, dblib.Column{Name: name, Width: 4})
 		}
-		for _, name := range relation.attributeOrder {
-			if !slices.Contains(relation.key, name) {
-				columns = append(columns, Column{Name: name, Width: DefaultColumnWidth})
+		for _, name := range relation.AttributeOrder {
+			if !slices.Contains(relation.Key, name) {
+				columns = append(columns, dblib.Column{Name: name, Width: DefaultColumnWidth})
 			}
 		}
 	} else {
 		// No table specified - create empty state
-		columns = []Column{}
+		columns = []dblib.Column{}
 	}
 
 	// Get available tables for the picker
@@ -234,7 +229,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 	keyColumnCount := 0
 	if editor.relation != nil {
-		keyColumnCount = len(editor.relation.key)
+		keyColumnCount = len(editor.relation.Key)
 	}
 
 	editor.table = NewTableView(tableDataHeight+1, &TableViewConfig{
