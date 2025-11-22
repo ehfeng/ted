@@ -446,7 +446,6 @@ func (e *Editor) refresh() error {
 // id can be nil, in which case load from the top or bottom
 // refreshing indicates whether to apply diff highlighting logic
 func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshing bool) error {
-	debugLog("loadFromRowId: starting, fromTop=%v, focusColumn=%d, id=%v\n", fromTop, focusColumn, id)
 	if e.relation == nil || e.relation.DB == nil {
 		return fmt.Errorf("no database connection available")
 	}
@@ -683,11 +682,16 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		e.buffer[e.lastRowIdx()] = Row{} // Mark end of data
 	}
 
-	// Update previousRows to current buffer state (no diffing for scroll operations)
+	// Update previousRows to match current buffer view (for accurate diff on next refresh)
 	e.previousRows = make([]Row, 0, len(e.buffer))
-	for i := e.pointer; i < len(e.buffer); i++ {
-		e.previousRows = append(e.previousRows, e.buffer[i%len(e.buffer)])
+	for i := 0; i < len(e.buffer); i++ {
+		row := e.buffer[(e.pointer+i)%len(e.buffer)]
+		if row.data == nil {
+			break // Stop at nil sentinel
+		}
+		e.previousRows = append(e.previousRows, row)
 	}
+
 	e.renderData()
 	return rowsFetched < i, query.Err()
 }
@@ -775,10 +779,14 @@ func (e *Editor) prevRows(i int) (bool, error) {
 		e.buffer[e.pointer] = Row{state: RowStateNormal, data: row}
 	}
 
-	// Update previousRows to current buffer state (no diffing for scroll operations)
+	// Update previousRows to match current buffer view (for accurate diff on next refresh)
 	e.previousRows = make([]Row, 0, len(e.buffer))
-	for i := e.pointer; i < len(e.buffer); i++ {
-		e.previousRows = append(e.previousRows, e.buffer[i%len(e.buffer)])
+	for i := 0; i < len(e.buffer); i++ {
+		row := e.buffer[(e.pointer+i)%len(e.buffer)]
+		if row.data == nil {
+			break // Stop at nil sentinel
+		}
+		e.previousRows = append(e.previousRows, row)
 	}
 
 	e.renderData()
