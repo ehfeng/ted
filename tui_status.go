@@ -341,6 +341,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	// Update table view delete mode state
 	if e.table != nil {
 		e.table.SetDeleteMode(isDeleteMode)
+		e.table.SetGotoMode(mode == PaletteModeGoto)
 	}
 
 	// Update status bar background color
