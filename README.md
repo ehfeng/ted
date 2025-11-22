@@ -71,7 +71,7 @@ brew install ted
 1. g: home
 1. G: end
 1. ctrl+b: page up
-1. ctrl+f: page down
+1. ctrl+f: find next matching value in current column
 1. i: edit mode
 1. a: append mode
 

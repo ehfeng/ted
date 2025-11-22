@@ -98,7 +98,7 @@ const (
 	PaletteModeDefault PaletteMode = iota
 	PaletteModeCommand
 	PaletteModeSQL
-	PaletteModeGoto
+	PaletteModeFind
 	PaletteModeUpdate
 	PaletteModeInsert
 	PaletteModeDelete
@@ -112,7 +112,7 @@ func (m PaletteMode) Glyph() string {
 		return "> "
 	case PaletteModeSQL:
 		return "` "
-	case PaletteModeGoto:
+	case PaletteModeFind:
 		return "↪ "
 	case PaletteModeUpdate:
 		return "` "
@@ -440,9 +440,9 @@ func (e *Editor) setupCommandPalette() {
 		}
 
 		switch {
-		// Ctrl+G sends BEL (7) or 'g' depending on terminal
-		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
-			e.setPaletteMode(PaletteModeGoto, true)
+		// Ctrl+F sends ACK (6) or 'f' depending on terminal
+		case (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeFind, true)
 			return nil
 		// case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
 		// 	e.setPaletteMode(PaletteModeCommand, true)
@@ -463,14 +463,14 @@ func (e *Editor) setupCommandPalette() {
 				if strings.TrimSpace(command) != "" {
 					e.executeSQL(command)
 				}
-			case PaletteModeGoto:
-				e.executeGoto(command)
+			case PaletteModeFind:
+				e.executeFind(command)
 			case PaletteModeDelete:
 				e.executeDelete()
 			}
 
-			// For Goto mode, keep the palette open with text selected
-			if mode == PaletteModeGoto {
+			// For Find mode, keep the palette open with text selected
+			if mode == PaletteModeFind {
 				return nil
 			}
 

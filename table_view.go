@@ -139,7 +139,7 @@ type TableView struct {
 	selectedCol int
 	selectable  bool
 	deleteMode  bool // When true, selected row has red background
-	gotoMode    bool // When true, selected column has dark blue background
+	findMode    bool // When true, selected column has dark blue background
 	vimMode     bool // When true, display "vim mode" indicator
 
 	// Callbacks
@@ -330,9 +330,9 @@ func (tv *TableView) SetDeleteMode(deleteMode bool) *TableView {
 	return tv
 }
 
-// SetGotoMode sets whether the table is in goto mode (selected column will have dark blue background)
-func (tv *TableView) SetGotoMode(gotoMode bool) *TableView {
-	tv.gotoMode = gotoMode
+// SetFindMode sets whether the table is in find mode (selected column will have dark blue background)
+func (tv *TableView) SetFindMode(findMode bool) *TableView {
+	tv.findMode = findMode
 	return tv
 }
 
@@ -710,8 +710,8 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 		// Apply selection highlight on top of base style
 		cellStyle := baseCellStyle
 
-		// In Goto mode, highlight the entire selected column
-		if tv.gotoMode && i == tv.selectedCol {
+		// In Find mode, highlight the entire selected column
+		if tv.findMode && i == tv.selectedCol {
 			cellStyle = cellStyle.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorWhite)
 		}
 

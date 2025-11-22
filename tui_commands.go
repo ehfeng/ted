@@ -143,7 +143,7 @@ func (e *Editor) executeDelete() error {
 	return nil
 }
 
-func (e *Editor) executeGoto(gotoValue string) {
+func (e *Editor) executeFind(findValue string) {
 	if e.relation == nil {
 		e.SetStatusError("No database connection available")
 		return
@@ -162,21 +162,21 @@ func (e *Editor) executeGoto(gotoValue string) {
 	}
 
 	// Find the column index in relation.attributeOrder
-	gotoCol := -1
+	findCol := -1
 	for i, name := range e.relation.attributeOrder {
 		if name == e.columns[col].Name {
-			gotoCol = i
+			findCol = i
 			break
 		}
 	}
 
-	if gotoCol == -1 {
+	if findCol == -1 {
 		e.SetStatusError("Column not found in relation")
 		return
 	}
 
 	// Use FindNextRow to search for the next matching row
-	foundKeys, foundBelow, err := e.relation.FindNextRow(gotoCol, gotoValue, nil, nil, currentKeys)
+	foundKeys, foundBelow, err := e.relation.FindNextRow(findCol, findValue, nil, nil, currentKeys)
 	if err != nil {
 		e.SetStatusErrorWithSentry(err)
 		return

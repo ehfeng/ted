@@ -929,18 +929,18 @@ func (rel *Relation) placeholder(pos int) string {
 	return "?"
 }
 
-// FindNextRow searches for the next row matching gotoColVal in the column at index gotoCol.
+// FindNextRow searches for the next row matching findColVal in the column at index findCol.
 // It searches below the current selection first, then wraps around to search from the top.
 // Returns: (keys of found row, true if found below/false if wrapped, error)
-func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColumn, sortColVal any, currentKeys []any) ([]any, bool, error) {
-	if gotoCol < 0 || gotoCol >= len(rel.attributeOrder) {
-		return nil, false, fmt.Errorf("gotoCol index out of range")
+func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColumn, sortColVal any, currentKeys []any) ([]any, bool, error) {
+	if findCol < 0 || findCol >= len(rel.attributeOrder) {
+		return nil, false, fmt.Errorf("findCol index out of range")
 	}
 	if len(currentKeys) != len(rel.key) {
 		return nil, false, fmt.Errorf("currentKeys length mismatch: expected %d, got %d", len(rel.key), len(currentKeys))
 	}
 
-	searchColName := rel.attributeOrder[gotoCol]
+	searchColName := rel.attributeOrder[findCol]
 	quotedSearchCol := quoteIdent(rel.DBType, searchColName)
 	quotedTable := quoteQualified(rel.DBType, rel.name)
 
@@ -994,7 +994,7 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 
 	// Search column match
 	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, rel.placeholder(paramPos)))
-	args = append(args, gotoColVal)
+	args = append(args, findColVal)
 
 	// ORDER BY
 	var orderParts []string
@@ -1048,7 +1048,7 @@ func (rel *Relation) FindNextRow(gotoCol int, gotoColVal any, sortCol *SortColum
 
 	// Search column match
 	whereParts = append(whereParts, fmt.Sprintf("%s = %s", quotedSearchCol, rel.placeholder(paramPos)))
-	args = append(args, gotoColVal)
+	args = append(args, findColVal)
 
 	// ORDER BY (reversed)
 	orderParts = orderParts[:0]

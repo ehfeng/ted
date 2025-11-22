@@ -315,8 +315,8 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 			modeStr = "Command"
 		case PaletteModeSQL:
 			modeStr = "SQL"
-		case PaletteModeGoto:
-			modeStr = "Goto"
+		case PaletteModeFind:
+			modeStr = "Find"
 		case PaletteModeUpdate:
 			modeStr = "Update"
 		case PaletteModeInsert:
@@ -341,7 +341,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	// Update table view delete mode state
 	if e.table != nil {
 		e.table.SetDeleteMode(isDeleteMode)
-		e.table.SetGotoMode(mode == PaletteModeGoto)
+		e.table.SetFindMode(mode == PaletteModeFind)
 	}
 
 	// Update status bar background color
@@ -372,13 +372,13 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	} else {
 		switch mode {
 		case PaletteModeDefault:
-			e.commandPalette.SetPlaceholder("Ctrl+… I: Insert · `: SQL · G: Goto · D: Delete · C: Exit")
+			e.commandPalette.SetPlaceholder("Ctrl+… I: Insert · `: SQL · F: Find · D: Delete · C: Exit")
 		case PaletteModeCommand:
 			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
 		case PaletteModeSQL:
 			e.commandPalette.SetPlaceholder("Execute SQL… (Esc to exit)")
-		case PaletteModeGoto:
-			e.commandPalette.SetPlaceholder("Goto next matching value… (Esc to exit)")
+		case PaletteModeFind:
+			e.commandPalette.SetPlaceholder("Find next matching value… (Esc to exit)")
 		case PaletteModeUpdate:
 			// No placeholder in update mode
 			e.commandPalette.SetPlaceholder("")

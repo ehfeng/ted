@@ -70,12 +70,12 @@ func TestFindNextRow_FindBelow(t *testing.T) {
 
 	// Search for age=25 starting from id=1
 	// Should find Bob (id=2) which is below
-	gotoCol := 2 // age column
-	gotoColVal := int64(25)
+	findCol := 2 // age column
+	findColVal := int64(25)
 	currentKeys := []any{int64(1)}
 	sortColVal := int64(1) // current row's id value
 
-	keys, foundBelow, err := rel.FindNextRow(gotoCol, gotoColVal, nil, sortColVal, currentKeys)
+	keys, foundBelow, err := rel.FindNextRow(findCol, findColVal, nil, sortColVal, currentKeys)
 	if err != nil {
 		t.Fatalf("FindNextRow failed: %v", err)
 	}
@@ -99,12 +99,12 @@ func TestFindNextRow_WrapAround(t *testing.T) {
 	// Search for age=25 starting from id=6 (Frank, last row with age=25)
 	// Should wrap around and find the closest match before current position
 	// which is David (id=4)
-	gotoCol := 2 // age column
-	gotoColVal := int64(25)
+	findCol := 2 // age column
+	findColVal := int64(25)
 	currentKeys := []any{int64(6)}
 	sortColVal := int64(6) // current row's id value
 
-	keys, foundBelow, err := rel.FindNextRow(gotoCol, gotoColVal, nil, sortColVal, currentKeys)
+	keys, foundBelow, err := rel.FindNextRow(findCol, findColVal, nil, sortColVal, currentKeys)
 	if err != nil {
 		t.Fatalf("FindNextRow failed: %v", err)
 	}
@@ -128,12 +128,12 @@ func TestFindNextRow_NotFound(t *testing.T) {
 	_, rel := setupTestDB(t)
 
 	// Search for age=99 which doesn't exist
-	gotoCol := 2 // age column
-	gotoColVal := int64(99)
+	findCol := 2 // age column
+	findColVal := int64(99)
 	currentKeys := []any{int64(1)}
 	sortColVal := int64(1)
 
-	keys, foundBelow, err := rel.FindNextRow(gotoCol, gotoColVal, nil, sortColVal, currentKeys)
+	keys, foundBelow, err := rel.FindNextRow(findCol, findColVal, nil, sortColVal, currentKeys)
 	if err != nil {
 		t.Fatalf("FindNextRow failed: %v", err)
 	}
@@ -152,13 +152,13 @@ func TestFindNextRow_WithSortColumn(t *testing.T) {
 
 	// Search for age=30 with sort by age ascending, starting from id=1
 	// Should find Alice (id=1, age=30) first, then Charlie (id=3, age=30)
-	gotoCol := 2 // age column
-	gotoColVal := int64(30)
+	findCol := 2 // age column
+	findColVal := int64(30)
 	currentKeys := []any{int64(1)} // Starting from Alice
 	sortCol := &SortColumn{Name: "age", Asc: true}
 	sortColVal := int64(30) // Alice's age
 
-	keys, foundBelow, err := rel.FindNextRow(gotoCol, gotoColVal, sortCol, sortColVal, currentKeys)
+	keys, foundBelow, err := rel.FindNextRow(findCol, findColVal, sortCol, sortColVal, currentKeys)
 	if err != nil {
 		t.Fatalf("FindNextRow failed: %v", err)
 	}
@@ -179,11 +179,11 @@ func TestFindNextRow_WithSortColumn(t *testing.T) {
 func TestFindNextRow_InvalidColumn(t *testing.T) {
 	_, rel := setupTestDB(t)
 
-	gotoCol := 999 // Invalid column index
-	gotoColVal := "test"
+	findCol := 999 // Invalid column index
+	findColVal := "test"
 	currentKeys := []any{int64(1)}
 
-	_, _, err := rel.FindNextRow(gotoCol, gotoColVal, nil, nil, currentKeys)
+	_, _, err := rel.FindNextRow(findCol, findColVal, nil, nil, currentKeys)
 	if err == nil {
 		t.Error("Expected error for invalid column index")
 	}
@@ -192,11 +192,11 @@ func TestFindNextRow_InvalidColumn(t *testing.T) {
 func TestFindNextRow_KeyLengthMismatch(t *testing.T) {
 	_, rel := setupTestDB(t)
 
-	gotoCol := 2
-	gotoColVal := int64(25)
+	findCol := 2
+	findColVal := int64(25)
 	currentKeys := []any{int64(1), int64(2)} // Wrong length
 
-	_, _, err := rel.FindNextRow(gotoCol, gotoColVal, nil, nil, currentKeys)
+	_, _, err := rel.FindNextRow(findCol, findColVal, nil, nil, currentKeys)
 	if err == nil {
 		t.Error("Expected error for key length mismatch")
 	}

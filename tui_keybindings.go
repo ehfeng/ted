@@ -233,9 +233,9 @@ func (e *Editor) setupKeyBindings() {
 				e.app.QueueUpdateDraw(func() { e.nextRows(pageSize) })
 			}()
 			return nil
-		// Ctrl+G sends BEL (7) or 'g' depending on terminal
-		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
-			e.setPaletteMode(PaletteModeGoto, true)
+		// Ctrl+F sends ACK (6) or 'f' depending on terminal
+		case (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0:
+			e.setPaletteMode(PaletteModeFind, true)
 			return nil
 		// Ctrl+P sends DLE (16) or 'p' depending on terminal
 		case (rune == 'p' || rune == 16) && mod&tcell.ModCtrl != 0:
@@ -458,16 +458,6 @@ func (e *Editor) setupKeyBindings() {
 			}
 			// a: enter edit mode with cursor at end
 			e.enterEditModeWithSelection(row, col, false)
-			return nil
-		case e.vimMode && (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
-				return nil // Disable vertical navigation in insert mode or delete mode
-			}
-			// Ctrl+F: page down (already handled by KeyPgDn, but vim users might use Ctrl+F)
-			pageSize := max(1, e.table.rowsHeight-1)
-			go func() {
-				e.app.QueueUpdateDraw(func() { e.nextRows(pageSize) })
-			}()
 			return nil
 		case e.vimMode && (rune == 'b' || rune == 2) && mod&tcell.ModCtrl != 0:
 			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
