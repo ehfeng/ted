@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -74,6 +75,374 @@ func diffRows(oldRow, newRow []any) []int {
 	return modified
 }
 
+// rowsEqual checks if two slices of Rows are equal by comparing their data
+func rowsEqual(rows1, rows2 []Row) bool {
+	if len(rows1) != len(rows2) {
+		return false
+	}
+	for i := range rows1 {
+		if len(rows1[i].data) != len(rows2[i].data) {
+			return false
+		}
+		for j := range rows1[i].data {
+			if rows1[i].data[j] != rows2[i].data[j] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// findMatchingIndexes finds all pairs of matching rows between previousRows and currentRows
+// based on primary key equality. Returns a slice of [2]int where [0] is the index in previousRows
+// and [1] is the index in currentRows.
+func (e *Editor) findMatchingIndexes(previousRows, currentRows []Row) [][2]int {
+	var matches [][2]int
+
+	// Build a map of current row keys to their indexes for faster lookup
+	currentKeyMap := make(map[string]int)
+	for i, row := range currentRows {
+		keys := e.extractKeys(row.data)
+		if keys != nil {
+			keyStr := fmt.Sprintf("%v", keys)
+			currentKeyMap[keyStr] = i
+		}
+	}
+
+	// Find matches by looking up each previous row's key in the current map
+	for i, prevRow := range previousRows {
+		prevKeys := e.extractKeys(prevRow.data)
+		if prevKeys != nil {
+			keyStr := fmt.Sprintf("%v", prevKeys)
+			if currIdx, exists := currentKeyMap[keyStr]; exists {
+				matches = append(matches, [2]int{i, currIdx})
+			}
+		}
+	}
+
+	return matches
+}
+
+// checkRowsExistInDB checks if rows with the given primary keys still exist in the database
+// Returns a slice of booleans, one for each key, indicating existence
+func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	// Build the IN clause query
+	keyColCount := len(e.relation.key)
+	if keyColCount == 0 {
+		return nil, fmt.Errorf("no primary key defined for relation")
+	}
+
+	// For single-column keys, we can use a simple IN clause
+	// For multi-column keys, we need to use OR conditions
+	var query string
+	var args []any
+
+	if keyColCount == 1 {
+		// Simple case: single column key
+		query = fmt.Sprintf("SELECT %s FROM %s WHERE %s IN (",
+			e.relation.key[0], e.relation.name, e.relation.key[0])
+		placeholders := make([]string, len(keys))
+		for i, key := range keys {
+			placeholders[i] = "?"
+			args = append(args, key[0])
+		}
+		query += fmt.Sprintf("%s)", strings.Join(placeholders, ", "))
+	} else {
+		// Complex case: multi-column key
+		query = fmt.Sprintf("SELECT %s FROM %s WHERE ",
+			strings.Join(e.relation.key, ", "), e.relation.name)
+		conditions := make([]string, len(keys))
+		for i, key := range keys {
+			keyConditions := make([]string, keyColCount)
+			for j := 0; j < keyColCount; j++ {
+				keyConditions[j] = fmt.Sprintf("%s = ?", e.relation.key[j])
+				args = append(args, key[j])
+			}
+			conditions[i] = fmt.Sprintf("(%s)", strings.Join(keyConditions, " AND "))
+		}
+		query += strings.Join(conditions, " OR ")
+	}
+
+	rows, err := e.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Build a set of existing keys
+	existingKeys := make(map[string]bool)
+	scanTargets := make([]any, keyColCount)
+	scanPtrs := make([]any, keyColCount)
+	for i := range scanTargets {
+		scanPtrs[i] = &scanTargets[i]
+	}
+
+	for rows.Next() {
+		if err := rows.Scan(scanPtrs...); err != nil {
+			return nil, err
+		}
+		keyStr := fmt.Sprintf("%v", scanTargets)
+		existingKeys[keyStr] = true
+	}
+
+	// Check each input key against the set
+	result := make([]bool, len(keys))
+	for i, key := range keys {
+		keyStr := fmt.Sprintf("%v", key)
+		result[i] = existingKeys[keyStr]
+	}
+
+	return result, nil
+}
+
+// diffAndPopulateBuffer performs the diffing algorithm between previousRows and currentRows
+// and populates the buffer with appropriate state markers (Normal/New/Deleted/Modified)
+func (e *Editor) diffAndPopulateBuffer(currentRows []Row) {
+	// Use separate ptr variable instead of incrementing e.pointer
+	ptr := e.pointer
+	bufferSize := len(e.buffer)
+
+	// Find all matching indexes
+	matches := e.findMatchingIndexes(e.previousRows, currentRows)
+
+	// Track which indexes have been processed
+	prevIdx := 0
+	currIdx := 0
+
+	// Helper to add a row to buffer and advance ptr
+	addToBuffer := func(row Row) bool {
+		if ptr >= bufferSize {
+			return false // Buffer full
+		}
+		e.buffer[ptr] = row
+		ptr++
+		return true
+	}
+
+	// Process sequences between matches
+	for matchNum, match := range matches {
+		prevMatchIdx := match[0]
+		currMatchIdx := match[1]
+
+		// Process deleted rows (only in previousRows)
+		for i := prevIdx; i < prevMatchIdx; i++ {
+			deletedRow := e.previousRows[i]
+			deletedRow.state = RowStateDeleted
+			deletedRow.modified = nil
+			if !addToBuffer(deletedRow) {
+				return // Buffer full
+			}
+		}
+
+		// Process inserted rows (only in currentRows) before this match
+		for i := currIdx; i < currMatchIdx; i++ {
+			insertedRow := currentRows[i]
+			insertedRow.state = RowStateNew
+			insertedRow.modified = nil
+			if !addToBuffer(insertedRow) {
+				return // Buffer full
+			}
+		}
+
+		// Process the matched row (check for modifications)
+		matchedRow := currentRows[currMatchIdx]
+		matchedRow.state = RowStateNormal
+		matchedRow.modified = diffRows(e.previousRows[prevMatchIdx].data, currentRows[currMatchIdx].data)
+		if !addToBuffer(matchedRow) {
+			return // Buffer full
+		}
+
+		// Move indexes forward
+		prevIdx = prevMatchIdx + 1
+		currIdx = currMatchIdx + 1
+
+		// Special handling for last sequence
+		if matchNum == len(matches)-1 {
+			// Check if there are remaining rows in previousRows
+			if prevIdx < len(e.previousRows) {
+				// Build list of keys to check
+				var keysToCheck [][]any
+				for i := prevIdx; i < len(e.previousRows); i++ {
+					key := e.extractKeys(e.previousRows[i].data)
+					if key != nil {
+						keysToCheck = append(keysToCheck, key)
+					}
+				}
+
+				// Check if these rows still exist in DB
+				if len(keysToCheck) > 0 {
+					exists, err := e.checkRowsExistInDB(keysToCheck)
+					if err == nil {
+						// Add deleted rows for those that still exist in DB
+						keyIdx := 0
+						for i := prevIdx; i < len(e.previousRows); i++ {
+							if keyIdx < len(exists) && exists[keyIdx] {
+								deletedRow := e.previousRows[i]
+								deletedRow.state = RowStateDeleted
+								deletedRow.modified = nil
+								if !addToBuffer(deletedRow) {
+									return // Buffer full
+								}
+							}
+							keyIdx++
+						}
+					}
+				}
+			}
+
+			// Fill remaining buffer with inserted rows from currentRows
+			for i := currIdx; i < len(currentRows); i++ {
+				insertedRow := currentRows[i]
+				insertedRow.state = RowStateNew
+				insertedRow.modified = nil
+				if !addToBuffer(insertedRow) {
+					return // Buffer full
+				}
+			}
+
+			// Done processing
+			return
+		}
+	}
+
+	// If there were no matches, handle all rows
+	if len(matches) == 0 {
+		// All previousRows are deleted (if they exist in DB)
+		if len(e.previousRows) > 0 {
+			var keysToCheck [][]any
+			for _, row := range e.previousRows {
+				key := e.extractKeys(row.data)
+				if key != nil {
+					keysToCheck = append(keysToCheck, key)
+				}
+			}
+
+			if len(keysToCheck) > 0 {
+				exists, err := e.checkRowsExistInDB(keysToCheck)
+				if err == nil {
+					for i, row := range e.previousRows {
+						if i < len(exists) && exists[i] {
+							deletedRow := row
+							deletedRow.state = RowStateDeleted
+							deletedRow.modified = nil
+							if !addToBuffer(deletedRow) {
+								return // Buffer full
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// All currentRows are new
+		for _, row := range currentRows {
+			insertedRow := row
+			insertedRow.state = RowStateNew
+			insertedRow.modified = nil
+			if !addToBuffer(insertedRow) {
+				return // Buffer full
+			}
+		}
+	}
+}
+
+// refresh reloads data from the current position and applies change tracking
+func (e *Editor) refresh() error {
+	if e.relation == nil || e.relation.DB == nil {
+		return fmt.Errorf("no database connection available")
+	}
+
+	// Get current row ID for refresh anchor
+	if len(e.buffer) == 0 || e.buffer[e.pointer].data == nil {
+		return nil // Nothing to refresh
+	}
+	id := e.buffer[e.pointer].data[:len(e.relation.key)]
+
+	// Close existing query before refresh
+	e.queryMu.Lock()
+	if e.query != nil {
+		e.query.Close()
+		e.query = nil
+	}
+	e.queryMu.Unlock()
+
+	// Stop refresh timer during refresh operation
+	e.stopRefreshTimer()
+
+	// Prepare query
+	selectCols := make([]string, len(e.columns))
+	for i, col := range e.columns {
+		selectCols[i] = col.Name
+	}
+
+	colCount := len(e.columns)
+	if colCount == 0 {
+		return nil
+	}
+
+	// Query from current position (fromTop=true)
+	rows, err := e.relation.QueryRows(selectCols, nil, id, true, true)
+	if err != nil {
+		return err
+	}
+
+	// Scan all rows into local currentRows
+	e.pointer = 0
+	scanTargets := make([]any, colCount)
+	var currentRows []Row
+	for rows.Next() {
+		row := make([]any, colCount)
+		for j := 0; j < colCount; j++ {
+			scanTargets[j] = &row[j]
+		}
+		if err := rows.Scan(scanTargets...); err != nil {
+			rows.Close()
+			return err
+		}
+		currentRows = append(currentRows, Row{
+			state:    RowStateNormal,
+			data:     row,
+			modified: nil,
+		})
+	}
+	rows.Close()
+
+	// Apply diff tracking if previous data exists and differs
+	if e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
+		e.diffAndPopulateBuffer(currentRows)
+	} else {
+		// No diffing needed - just populate buffer normally
+		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+			e.buffer[i] = currentRows[i]
+		}
+		// Mark end with empty row if we didn't fill the buffer
+		if len(currentRows) < len(e.buffer) {
+			e.buffer[len(currentRows)] = Row{}
+			e.buffer = e.buffer[:len(currentRows)+1]
+		}
+	}
+
+	// Clone currentRows to previousRows for next refresh
+	e.previousRows = make([]Row, len(currentRows))
+	copy(e.previousRows, currentRows)
+
+	// Set up new query for scrolling
+	e.queryMu.Lock()
+	e.query = nil // Will be created on first scroll
+	e.scrollDown = true
+	e.queryMu.Unlock()
+
+	e.renderData()
+	e.table.Select(e.table.selectedRow, e.table.selectedCol)
+	e.startRefreshTimer()
+
+	return nil
+}
+
 // id can be nil, in which case load from the top or bottom
 // refreshing indicates whether to apply diff highlighting logic
 func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshing bool) error {
@@ -84,6 +453,16 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 
 	// Stop refresh timer when starting a new query
 	e.stopRefreshTimer()
+
+	// Close existing query if refreshing
+	if refreshing {
+		e.queryMu.Lock()
+		if e.query != nil {
+			e.query.Close()
+			e.query = nil
+		}
+		e.queryMu.Unlock()
+	}
 
 	selectCols := make([]string, len(e.columns))
 	for i, col := range e.columns {
@@ -103,49 +482,18 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 		if err != nil {
 			return err
 		}
-		e.nextQuery = rows
+		e.queryMu.Lock()
+		e.query = rows
+		e.scrollDown = true
+		e.queryMu.Unlock()
 		e.startRowsTimer()
 
 		// Scan rows into e.records starting from pointer
 		e.pointer = 0
-		rowsLoaded := 0
 		scanTargets := make([]any, colCount)
 
-		// Scan all new rows into temporary storage
-		var newRows []Row
-		var oldKeyMap map[string]int
-		var oldKeyData map[string][]any
-		var oldKeyStrings []string
-		var matchedOldKeys map[string]bool
-
-		if refreshing {
-			// Build a map of old keys to check if new rows existed before
-			// Also store old row data for diffing
-			oldKeyMap = make(map[string]int)    // key string -> index
-			oldKeyData = make(map[string][]any) // key string -> row data
-			oldKeyStrings = make([]string, len(e.buffer))
-			for i := 0; i < len(e.buffer); i++ {
-				if e.buffer[i].data == nil {
-					break
-				}
-				// Clear modified state from previous refresh
-				e.buffer[i].modified = nil
-				// Skip already deleted rows
-				if e.buffer[i].state == RowStateDeleted {
-					continue
-				}
-				oldKeys := e.extractKeys(e.buffer[i].data)
-				if oldKeys != nil {
-					keyStr := fmt.Sprintf("%v", oldKeys)
-					oldKeyStrings[i] = keyStr
-					oldKeyMap[keyStr] = i
-					oldKeyData[keyStr] = e.buffer[i].data
-				}
-			}
-			// Track which old keys are still present in new data
-			matchedOldKeys = make(map[string]bool)
-		}
-
+		// Scan all rows from database into local currentRows
+		var currentRows []Row
 		for rows.Next() {
 			row := make([]any, colCount)
 			for j := 0; j < colCount; j++ {
@@ -154,135 +502,48 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			if err := rows.Scan(scanTargets...); err != nil {
 				return err
 			}
-
-			newState := RowStateNormal
-			var modified []int
-
-			if refreshing {
-				// Determine state by checking if key existed in old buffer
-				newKeys := e.extractKeys(row)
-				keyStr := fmt.Sprintf("%v", newKeys)
-
-				if _, existedBefore := oldKeyMap[keyStr]; existedBefore {
-					// This key existed before - mark it as matched
-					matchedOldKeys[keyStr] = true
-					// Diff old and new rows to find modified columns
-					if oldData := oldKeyData[keyStr]; oldData != nil {
-						modified = diffRows(oldData, row)
-					}
-				} else if len(oldKeyMap) > 0 {
-					// This key didn't exist in old buffer (and there were old rows) - it's new
-					newState = RowStateNew
-				}
-				// else: first load (no old rows), keep as Normal
-			}
-
-			newRows = append(newRows, Row{state: newState, data: row, modified: modified})
+			currentRows = append(currentRows, Row{
+				state:    RowStateNormal,
+				data:     row,
+				modified: nil,
+			})
 		}
 
-		// Build final buffer: merge new rows with deleted old rows (or just use new rows if not refreshing)
-		var finalRecords []Row
-		if refreshing {
-			finalRecords = make([]Row, 0, len(e.buffer))
-			newRowIdx := 0
-
-			for i := 0; i < len(e.buffer) && i < len(oldKeyStrings); i++ {
-				if e.buffer[i].data == nil {
-					break
-				}
-
-				oldKeyStr := oldKeyStrings[i]
-				if oldKeyStr == "" || e.buffer[i].state == RowStateDeleted {
-					// Skip empty or already deleted rows
-					continue
-				}
-
-				if !matchedOldKeys[oldKeyStr] {
-					// This old row doesn't exist in new data - mark as deleted
-					e.buffer[i].state = RowStateDeleted
-					finalRecords = append(finalRecords, e.buffer[i])
-				} else if newRowIdx < len(newRows) {
-					// Insert corresponding new row
-					finalRecords = append(finalRecords, newRows[newRowIdx])
-					newRowIdx++
-				}
-			}
-
-			// Append any remaining new rows
-			for newRowIdx < len(newRows) {
-				finalRecords = append(finalRecords, newRows[newRowIdx])
-				newRowIdx++
-			}
+		if refreshing && e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
+			// Perform diff and populate buffer
+			e.diffAndPopulateBuffer(currentRows)
 		} else {
-			// Not refreshing, just use new rows directly
-			finalRecords = newRows
+			// No diffing needed - just populate buffer normally
+			for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+				e.buffer[i] = currentRows[i]
+			}
+			// Mark end with empty row if we didn't fill the buffer
+			if len(currentRows) < len(e.buffer) {
+				e.buffer[len(currentRows)] = Row{}
+				e.buffer = e.buffer[:len(currentRows)+1]
+			}
 		}
 
-		// Copy final records back to e.records
-		for i := 0; i < len(finalRecords) && i < len(e.buffer); i++ {
-			e.buffer[i] = finalRecords[i]
-			rowsLoaded++
-		}
-
-		// If we have more final records than buffer size, truncate
-		if len(finalRecords) > len(e.buffer) {
-			rowsLoaded = len(e.buffer)
-		}
-
-		// Mark end with nil if we didn't fill the buffer
-		if rowsLoaded < len(e.buffer) {
-			e.buffer[rowsLoaded] = Row{}
-			e.buffer = e.buffer[:rowsLoaded+1]
-		}
+		// Set previousRows to currentRows
+		e.previousRows = currentRows
 	} else {
 		// Load from bottom: use QueryRows with inclusive true, scrollDown false
 		rows, err = e.relation.QueryRows(selectCols, nil, id, true, false)
 		if err != nil {
 			return err
 		}
-		e.prevQuery = rows
+		e.queryMu.Lock()
+		e.query = rows
+		e.scrollDown = false
+		e.queryMu.Unlock()
 		e.startRowsTimer()
 
 		// Scan rows into e.records in reverse, starting from end of buffer
 		e.pointer = 0
 		scanTargets := make([]any, colCount)
-		rowsLoaded := 0
 
-		// Scan all new rows into temporary storage
-		var newRows []Row
-		var oldKeyMap map[string]int
-		var oldKeyData map[string][]any
-		var oldKeyStrings []string
-		var matchedOldKeys map[string]bool
-
-		if refreshing {
-			// Build a map of old keys to check if new rows existed before
-			// Also store old row data for diffing
-			oldKeyMap = make(map[string]int)    // key string -> index
-			oldKeyData = make(map[string][]any) // key string -> row data
-			oldKeyStrings = make([]string, len(e.buffer))
-			for i := 0; i < len(e.buffer); i++ {
-				if e.buffer[i].data == nil {
-					break
-				}
-				// Clear modified state from previous refresh
-				e.buffer[i].modified = nil
-				// Skip already deleted rows
-				if e.buffer[i].state == RowStateDeleted {
-					continue
-				}
-				oldKeys := e.extractKeys(e.buffer[i].data)
-				if oldKeys != nil {
-					keyStr := fmt.Sprintf("%v", oldKeys)
-					oldKeyStrings[i] = keyStr
-					oldKeyMap[keyStr] = i
-					oldKeyData[keyStr] = e.buffer[i].data
-				}
-			}
-			// Track which old keys are still present in new data
-			matchedOldKeys = make(map[string]bool)
-		}
-
+		// Scan all rows from database into local currentRows
+		var currentRows []Row
 		for rows.Next() {
 			row := make([]any, colCount)
 			for j := 0; j < colCount; j++ {
@@ -291,100 +552,32 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			if err := rows.Scan(scanTargets...); err != nil {
 				return err
 			}
-
-			newState := RowStateNormal
-			var modified []int
-
-			if refreshing {
-				// Determine state by checking if key existed in old buffer
-				newKeys := e.extractKeys(row)
-				keyStr := fmt.Sprintf("%v", newKeys)
-
-				if _, existedBefore := oldKeyMap[keyStr]; existedBefore {
-					// This key existed before - mark it as matched
-					matchedOldKeys[keyStr] = true
-					// Diff old and new rows to find modified columns
-					if oldData := oldKeyData[keyStr]; oldData != nil {
-						modified = diffRows(oldData, row)
-					}
-				} else if len(oldKeyMap) > 0 {
-					// This key didn't exist in old buffer (and there were old rows) - it's new
-					newState = RowStateNew
-				}
-				// else: first load (no old rows), keep as Normal
-			}
-
-			newRows = append(newRows, Row{state: newState, data: row, modified: modified})
-			if len(newRows) >= len(e.buffer)-1 {
+			currentRows = append(currentRows, Row{
+				state:    RowStateNormal,
+				data:     row,
+				modified: nil,
+			})
+			if len(currentRows) >= len(e.buffer)-1 {
 				break
 			}
 		}
 
-		// Build final buffer: merge new rows with deleted old rows (or just use new rows if not refreshing)
-		var finalRecords []Row
-		if refreshing {
-			finalRecords = make([]Row, 0, len(e.buffer))
-			newRowIdx := 0
+		// Reverse currentRows for fromBottom
+		slices.Reverse(currentRows)
 
-			for i := 0; i < len(e.buffer) && i < len(oldKeyStrings); i++ {
-				if e.buffer[i].data == nil {
-					break
-				}
-
-				oldKeyStr := oldKeyStrings[i]
-				if oldKeyStr == "" || e.buffer[i].state == RowStateDeleted {
-					// Skip empty or already deleted rows
-					continue
-				}
-
-				if !matchedOldKeys[oldKeyStr] {
-					// This old row doesn't exist in new data - mark as deleted
-					e.buffer[i].state = RowStateDeleted
-					finalRecords = append(finalRecords, e.buffer[i])
-				} else if newRowIdx < len(newRows) {
-					// Insert corresponding new row
-					finalRecords = append(finalRecords, newRows[newRowIdx])
-					newRowIdx++
-				}
-			}
-
-			// Append any remaining new rows
-			for newRowIdx < len(newRows) {
-				finalRecords = append(finalRecords, newRows[newRowIdx])
-				newRowIdx++
-			}
-
-			// Reverse the final records for fromBottom
-			for i := 0; i < len(finalRecords)/2; i++ {
-				j := len(finalRecords) - 1 - i
-				finalRecords[i], finalRecords[j] = finalRecords[j], finalRecords[i]
-			}
+		if refreshing && e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
+			// Perform diff and populate buffer
+			e.diffAndPopulateBuffer(currentRows)
 		} else {
-			// Not refreshing, just use new rows directly and reverse them
-			finalRecords = newRows
-			for i := 0; i < len(finalRecords)/2; i++ {
-				j := len(finalRecords) - 1 - i
-				finalRecords[i], finalRecords[j] = finalRecords[j], finalRecords[i]
+			// No diffing needed - just populate buffer normally
+			for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+				e.buffer[i] = currentRows[i]
 			}
 		}
 
-		// Copy final records back to e.records
-		for i := 0; i < len(finalRecords) && i < len(e.buffer); i++ {
-			e.buffer[i] = finalRecords[i]
-			rowsLoaded++
-		}
+		// Set previousRows to currentRows
+		e.previousRows = currentRows
 
-		// If we have more final records than buffer size, truncate
-		if len(finalRecords) > len(e.buffer) {
-			rowsLoaded = len(e.buffer)
-		}
-
-		e.buffer[len(e.buffer)-1] = Row{}
-
-		// Mark end with nil if we didn't fill the buffer
-		if rowsLoaded < len(e.buffer) {
-			e.buffer[rowsLoaded] = Row{}
-		}
 		e.buffer[len(e.buffer)-1] = Row{}
 		e.pointer = 0
 	}
@@ -404,12 +597,23 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 // when there are no more rows, adds a nil sentinel to mark the end
 // returns bool, err. bool if the edge of table is reached
 func (e *Editor) nextRows(i int) (bool, error) {
+	debugLog("nextRows: starting, i=%d, e.query nil=%v\n", i, e.query == nil)
 	// Check if we're already at the end (last record is nil)
 	if len(e.buffer) == 0 || e.buffer[e.lastRowIdx()].data == nil {
 		return false, nil // No-op, already at end of data
 	}
 
-	if e.nextQuery == nil {
+	// Only reuse query if it's in the correct direction (scrollDown)
+	e.queryMu.Lock()
+	needNewQuery := e.query == nil || !e.scrollDown
+	if needNewQuery && e.query != nil {
+		// Close existing query if it's in the wrong direction
+		e.query.Close()
+		e.query = nil
+	}
+	e.queryMu.Unlock()
+
+	if needNewQuery {
 		// Stop refresh timer when starting a new query
 		e.stopRefreshTimer()
 
@@ -425,11 +629,14 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		for i, col := range e.columns {
 			selectCols[i] = col.Name
 		}
-		var err error
-		e.nextQuery, err = e.relation.QueryRows(selectCols, nil, params, false, true)
+		newQuery, err := e.relation.QueryRows(selectCols, nil, params, false, true)
 		if err != nil {
 			return false, err
 		}
+		e.queryMu.Lock()
+		e.query = newQuery
+		e.scrollDown = true
+		e.queryMu.Unlock()
 		e.startRowsTimer()
 	}
 
@@ -446,15 +653,24 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		return false, nil
 	}
 
+	// Get a local reference to the query to avoid holding the lock during scanning
+	e.queryMu.Lock()
+	query := e.query
+	e.queryMu.Unlock()
+
+	if query == nil {
+		return false, fmt.Errorf("query is nil")
+	}
+
 	scanTargets := make([]any, colCount)
 
 	rowsFetched := 0
-	for ; rowsFetched < i && e.nextQuery.Next(); rowsFetched++ {
+	for ; rowsFetched < i && query.Next(); rowsFetched++ {
 		row := make([]any, colCount)
 		for j := 0; j < colCount; j++ {
 			scanTargets[j] = &row[j]
 		}
-		if err := e.nextQuery.Scan(scanTargets...); err != nil {
+		if err := query.Scan(scanTargets...); err != nil {
 			return false, err
 		}
 		e.buffer[(e.pointer+rowsFetched)%len(e.buffer)] = Row{state: RowStateNormal, data: row}
@@ -466,8 +682,14 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		e.incrPtr(1)
 		e.buffer[e.lastRowIdx()] = Row{} // Mark end of data
 	}
+
+	// Update previousRows to current buffer state (no diffing for scroll operations)
+	e.previousRows = make([]Row, 0, len(e.buffer))
+	for i := e.pointer; i < len(e.buffer); i++ {
+		e.previousRows = append(e.previousRows, e.buffer[i%len(e.buffer)])
+	}
 	e.renderData()
-	return rowsFetched < i, e.nextQuery.Err()
+	return rowsFetched < i, query.Err()
 }
 
 func (e *Editor) lastRowIdx() int {
@@ -481,7 +703,17 @@ func (e *Editor) incrPtr(n int) {
 // prevRows fetches the previous i rows (scrolling backwards in the circular buffer)
 // returns whether rows were moved (false means you'ved the edge)
 func (e *Editor) prevRows(i int) (bool, error) {
-	if e.prevQuery == nil {
+	// Only reuse query if it's in the correct direction (!scrollDown)
+	e.queryMu.Lock()
+	needNewQuery := e.query == nil || e.scrollDown
+	if needNewQuery && e.query != nil {
+		// Close existing query if it's in the wrong direction
+		e.query.Close()
+		e.query = nil
+	}
+	e.queryMu.Unlock()
+
+	if needNewQuery {
 		// Stop refresh timer when starting a new query
 		e.stopRefreshTimer()
 		if len(e.buffer) == 0 || e.buffer[e.pointer].data == nil {
@@ -495,11 +727,14 @@ func (e *Editor) prevRows(i int) (bool, error) {
 		for i, col := range e.columns {
 			selectCols[i] = col.Name
 		}
-		var err error
-		e.prevQuery, err = e.relation.QueryRows(selectCols, nil, params, false, false)
+		newQuery, err := e.relation.QueryRows(selectCols, nil, params, false, false)
 		if err != nil {
 			return false, err
 		}
+		e.queryMu.Lock()
+		e.query = newQuery
+		e.scrollDown = false
+		e.queryMu.Unlock()
 		e.startRowsTimer()
 	}
 
@@ -516,23 +751,38 @@ func (e *Editor) prevRows(i int) (bool, error) {
 		return false, nil
 	}
 
+	// Get a local reference to the query to avoid holding the lock during scanning
+	e.queryMu.Lock()
+	query := e.query
+	e.queryMu.Unlock()
+
+	if query == nil {
+		return false, fmt.Errorf("query is nil")
+	}
+
 	scanTargets := make([]any, colCount)
 
 	rowsFetched := 0
-	for ; rowsFetched < i && e.prevQuery.Next(); rowsFetched++ {
+	for ; rowsFetched < i && query.Next(); rowsFetched++ {
 		row := make([]any, colCount)
 		for j := 0; j < colCount; j++ {
 			scanTargets[j] = &row[j]
 		}
-		if err := e.prevQuery.Scan(scanTargets...); err != nil {
+		if err := query.Scan(scanTargets...); err != nil {
 			return false, err
 		}
 		e.pointer = e.lastRowIdx() // Move pointer backwards in the circular buffer
 		e.buffer[e.pointer] = Row{state: RowStateNormal, data: row}
 	}
 
+	// Update previousRows to current buffer state (no diffing for scroll operations)
+	e.previousRows = make([]Row, 0, len(e.buffer))
+	for i := e.pointer; i < len(e.buffer); i++ {
+		e.previousRows = append(e.previousRows, e.buffer[i%len(e.buffer)])
+	}
+
 	e.renderData()
-	return rowsFetched < i, e.prevQuery.Err()
+	return rowsFetched < i, query.Err()
 }
 
 // startRowsTimer starts or restarts the timer for auto-closing queries
@@ -588,18 +838,14 @@ func (e *Editor) stopRowsTimer() {
 		close(e.rowsTimerReset)
 		e.rowsTimerReset = nil
 	}
-	if e.nextQuery != nil {
-		if err := e.nextQuery.Close(); err != nil {
+	e.queryMu.Lock()
+	if e.query != nil {
+		if err := e.query.Close(); err != nil {
 			panic(err)
 		}
-		e.nextQuery = nil
+		e.query = nil
 	}
-	if e.prevQuery != nil {
-		if err := e.prevQuery.Close(); err != nil {
-			panic(err)
-		}
-		e.prevQuery = nil
-	}
+	e.queryMu.Unlock()
 
 	e.startRefreshTimer()
 }
@@ -640,8 +886,7 @@ func (e *Editor) startRefreshTimer() {
 					app.QueueUpdateDraw(func() {
 						// Update table rowsHeight before loading rows from database
 						e.table.UpdateRowsHeightFromRect(dataHeight)
-						id := e.buffer[e.pointer].data[:len(e.relation.key)]
-						e.loadFromRowId(id, true, e.table.selectedCol, true)
+						e.refresh()
 					})
 				}
 				timer.Reset(RefreshTimerInterval)
@@ -660,16 +905,12 @@ func (e *Editor) stopRefreshTimer() {
 		close(e.refreshTimerStop)
 		e.refreshTimerStop = nil
 	}
-	if e.prevQuery != nil {
-		if err := e.prevQuery.Close(); err != nil {
+	e.queryMu.Lock()
+	if e.query != nil {
+		if err := e.query.Close(); err != nil {
 			panic(err)
 		}
-		e.prevQuery = nil
+		e.query = nil
 	}
-	if e.nextQuery != nil {
-		if err := e.nextQuery.Close(); err != nil {
-			panic(err)
-		}
-		e.nextQuery = nil
-	}
+	e.queryMu.Unlock()
 }

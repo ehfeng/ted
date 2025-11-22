@@ -95,7 +95,9 @@ func (e *Editor) setupKeyBindings() {
 		if (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0 {
 			// Ctrl+I: Jump to end and enable insert mode
 			e.loadFromRowId(nil, false, 0, false)
-			e.nextRows(1)
+			go func() {
+				e.app.QueueUpdateDraw(func() { e.nextRows(1) })
+			}()
 			e.table.SetupInsertRow()
 			e.updateStatusForInsertMode()
 			e.renderData()
@@ -227,7 +229,9 @@ func (e *Editor) setupKeyBindings() {
 			// Page down: scroll data forward while keeping selection in same visual position
 			pageSize := max(1, e.table.rowsHeight-1)
 			// Keep selection at same position, just fetch next rows
-			e.nextRows(pageSize)
+			go func() {
+				e.app.QueueUpdateDraw(func() { e.nextRows(pageSize) })
+			}()
 			return nil
 		// Ctrl+G sends BEL (7) or 'g' depending on terminal
 		case (rune == 'g' || rune == 7) && mod&tcell.ModCtrl != 0:
@@ -302,7 +306,9 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			} else {
 				if row == 0 {
-					e.prevRows(1)
+					go func() {
+						e.app.QueueUpdateDraw(func() { e.prevRows(1) })
+					}()
 				} else {
 					e.table.Select(row-1, col)
 				}
@@ -321,7 +327,9 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			} else {
 				if row == len(e.buffer)-1 {
-					e.nextRows(1)
+					go func() {
+						e.app.QueueUpdateDraw(func() { e.nextRows(1) })
+					}()
 				} else {
 					if len(e.buffer[row+1].data) == 0 {
 						e.table.Select(row+2, col)
@@ -370,7 +378,9 @@ func (e *Editor) setupKeyBindings() {
 			}
 			// j: move down
 			if row == len(e.buffer)-1 {
-				e.nextRows(1)
+				go func() {
+					e.app.QueueUpdateDraw(func() { e.nextRows(1) })
+				}()
 			} else {
 				if len(e.buffer[row+1].data) == 0 {
 					e.table.Select(row+2, col)
@@ -455,7 +465,9 @@ func (e *Editor) setupKeyBindings() {
 			}
 			// Ctrl+F: page down (already handled by KeyPgDn, but vim users might use Ctrl+F)
 			pageSize := max(1, e.table.rowsHeight-1)
-			e.nextRows(pageSize)
+			go func() {
+				e.app.QueueUpdateDraw(func() { e.nextRows(pageSize) })
+			}()
 			return nil
 		case e.vimMode && (rune == 'b' || rune == 2) && mod&tcell.ModCtrl != 0:
 			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {

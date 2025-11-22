@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -72,10 +73,14 @@ type Editor struct {
 	editing bool
 
 	// data, records is a circular buffer
-	nextQuery *sql.Rows // nextRows
-	prevQuery *sql.Rows // prevRows
-	pointer   int       // pointer to the current record
-	buffer    []Row     // columns are keyed off e.columns
+	query      *sql.Rows // unified query for scrolling
+	scrollDown bool      // direction of current query: true = next/forward, false = prev/backward
+	queryMu    sync.Mutex // protects query and scrollDown from concurrent access
+	pointer    int       // pointer to the current record
+	buffer     []Row     // columns are keyed off e.columns
+
+	// change tracking for refresh
+	previousRows []Row // snapshot of rows from last refresh
 
 	// timer for auto-closing rows
 	rowsTimer      *time.Timer
@@ -311,50 +316,53 @@ func runEditor(config *Config, dbname, tablename string) error {
 		AddItem(editor.statusBar, 1, 0, false).
 		AddItem(editor.commandPalette, 1, 0, false)
 
-	// Setup resize handler
-	editor.pages.SetChangedFunc(func() {
-		// Don't handle resize when in edit mode to avoid deadlock
-		if editor.editing {
-			return
-		}
+	// TODO: unclear if this even works
+	// // Setup resize handler
+	// editor.pages.SetChangedFunc(func() {
+	// 	// Don't handle resize when in edit mode to avoid deadlock
+	// 	if editor.editing {
+	// 		return
+	// 	}
 
-		// Get the new terminal height
-		newHeight := getTerminalHeight()
-		newDataHeight := newHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
+	// 	// Get the new terminal height
+	// 	newHeight := getTerminalHeight()
+	// 	newDataHeight := newHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
 
-		// Only resize if the height has changed significantly
-		if newDataHeight != editor.table.rowsHeight && newDataHeight > 0 {
-			if newDataHeight > len(editor.buffer) && editor.buffer[len(editor.buffer)-1].data == nil {
-				// the table is smaller than the new data height, no need to fetch more rows
-				return
-			}
-			// Create new records buffer with the new size
-			newRecords := make([]Row, newDataHeight)
+	// 	// Only resize if the height has changed significantly
+	// 	if newDataHeight != editor.table.rowsHeight && newDataHeight > 0 {
+	// 		if newDataHeight > len(editor.buffer) && editor.buffer[len(editor.buffer)-1].data == nil {
+	// 			// the table is smaller than the new data height, no need to fetch more rows
+	// 			return
+	// 		}
+	// 		// Create new records buffer with the new size
+	// 		newRecords := make([]Row, newDataHeight)
 
-			// Copy existing data to the new buffer
-			copyCount := min(len(editor.buffer), newDataHeight)
-			for i := 0; i < copyCount; i++ {
-				ptr := (i + editor.pointer) % len(editor.buffer)
-				newRecords[i] = editor.buffer[ptr]
-			}
+	// 		// Copy existing data to the new buffer
+	// 		copyCount := min(len(editor.buffer), newDataHeight)
+	// 		for i := 0; i < copyCount; i++ {
+	// 			ptr := (i + editor.pointer) % len(editor.buffer)
+	// 			newRecords[i] = editor.buffer[ptr]
+	// 		}
 
-			// If the new buffer is larger, fetch more rows to fill it
-			if newDataHeight > len(editor.buffer) && editor.buffer[len(editor.buffer)-1].data != nil {
-				// We need to fetch more rows
-				oldLen := len(editor.buffer)
-				editor.buffer = newRecords
-				editor.pointer = 0
-				// Fetch additional rows
-				editor.nextRows(newDataHeight - oldLen)
-			} else {
-				editor.buffer = newRecords
-				editor.pointer = 0
-			}
+	// 		// If the new buffer is larger, fetch more rows to fill it
+	// 		if newDataHeight > len(editor.buffer) && editor.buffer[len(editor.buffer)-1].data != nil {
+	// 			// We need to fetch more rows
+	// 			oldLen := len(editor.buffer)
+	// 			editor.buffer = newRecords
+	// 			editor.pointer = 0
+	// 			// Fetch additional rows
+	// 			go func() {
+	// 				editor.app.QueueUpdateDraw(func() { editor.nextRows(newDataHeight - oldLen) })
+	// 			}()
+	// 		} else {
+	// 			editor.buffer = newRecords
+	// 			editor.pointer = 0
+	// 		}
 
-			editor.renderData()
-			go editor.app.Draw()
-		}
-	})
+	// 		editor.renderData()
+	// 		go editor.app.Draw()
+	// 	}
+	// })
 
 	editor.table.SetSelectionChangeFunc(func(row, col int) {
 		editor.updateStatusWithCellContent()
