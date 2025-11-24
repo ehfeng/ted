@@ -81,9 +81,11 @@ You can select cells, resize columns, and scroll with the mouse.
 
 ## Non-goals
 
-Transactions. This is an editor, not a sql editor or a psql replacement.
+Schema changes. ted is for browsing and editing data, schema changes better done in dedicated clients
 
-Column filtering or sorting. That's better done in [SQL views](https://github.com/ehfeng/ted/issues/9).
+Filtering: better to use Find to jump to the value.
+
+Sorting: better to use views and ORDER BY
 
 ## Development
 
