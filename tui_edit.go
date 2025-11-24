@@ -442,6 +442,11 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 		return
 	}
 
+	// Save old row data for comparison
+	ptr := (row + e.pointer) % len(e.buffer)
+	oldRow := make([]any, len(e.buffer[ptr].data))
+	copy(oldRow, e.buffer[ptr].data)
+
 	// Delegate DB work to database.go
 	// Convert records to [][]any for UpdateDBValue
 	recordsData := make([][]any, len(e.buffer))
@@ -453,10 +458,122 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 		e.exitEditMode()
 		return
 	}
-	// Update in-memory data and refresh table
-	ptr := (row + e.pointer) % len(e.buffer)
-	e.buffer[ptr] = Row{state: RowStateNormal, data: updated}
 
+	// Check if key or sort column values changed
+	// Note: sortCol is currently nil in most cases, but we handle it for future support
+	if e.hasKeyOrSortChanged(oldRow, updated, nil) {
+		// Extract updated key values
+		updatedKeys := e.extractKeys(updated)
+		if updatedKeys == nil {
+			// Fallback: update in place if we can't extract keys
+			e.buffer[ptr] = Row{state: RowStateNormal, data: updated}
+			e.renderData()
+			e.exitEditMode()
+			return
+		}
+
+		// First, scan current buffer to see if the updated row is still visible
+		foundInBuffer := false
+		foundRow := -1
+		for i := 0; i < len(e.buffer); i++ {
+			bufIdx := (e.pointer + i) % len(e.buffer)
+			if e.buffer[bufIdx].data == nil {
+				break // Hit nil sentinel, stop scanning
+			}
+			bufKeys := e.extractKeys(e.buffer[bufIdx].data)
+			if keysEqual(bufKeys, updatedKeys) {
+				foundInBuffer = true
+				foundRow = i
+				break
+			}
+		}
+
+		if foundInBuffer {
+			// Row is still in viewport, just update it and select it
+			bufIdx := (e.pointer + foundRow) % len(e.buffer)
+			e.buffer[bufIdx] = Row{state: RowStateNormal, data: updated}
+			e.renderData()
+			e.table.Select(foundRow, col)
+			e.exitEditMode()
+			return
+		}
+		// Row not in buffer, use database query to determine position
+		firstKeys, lastKeys := e.getViewportBoundaryKeys()
+		if firstKeys == nil || lastKeys == nil {
+			// Fallback: can't determine position, load from bottom
+			if err := e.loadFromRowId(updatedKeys, false, col); err != nil {
+				e.SetStatusErrorWithSentry(err)
+				e.exitEditMode()
+				return
+			}
+			// Select last row
+			if e.buffer[e.lastRowIdx()].data == nil {
+				e.table.Select(len(e.buffer)-2, col)
+			} else {
+				e.table.Select(len(e.buffer)-1, col)
+			}
+			e.exitEditMode()
+			return
+		}
+		debugLog("firstKeys: %v, lastKeys: %v\n", firstKeys, lastKeys)
+
+		// Query database to compare row positions
+		isAbove, isBelow, err := dblib.CompareRowPosition(e.db, e.relation, nil, updatedKeys, firstKeys, lastKeys)
+		if err != nil {
+			// On error, fall back to loading from bottom
+			e.SetStatusErrorWithSentry(err)
+			e.exitEditMode()
+			return
+		}
+
+		// Reposition viewport based on comparison result
+		if isAbove {
+			// Row is above viewport, load from top
+			if err := e.loadFromRowId(updatedKeys, true, col); err != nil {
+				e.SetStatusErrorWithSentry(err)
+				e.exitEditMode()
+				return
+			}
+			// Select first row
+			e.table.Select(0, col)
+			e.exitEditMode()
+			return
+		} else if isBelow {
+			// Row is below viewport, load from bottom
+			if err := e.loadFromRowId(updatedKeys, false, col); err != nil {
+				e.SetStatusErrorWithSentry(err)
+				e.exitEditMode()
+				return
+			}
+			// Select last row
+			if e.buffer[e.lastRowIdx()].data == nil {
+				e.table.Select(len(e.buffer)-2, col)
+			} else {
+				e.table.Select(len(e.buffer)-1, col)
+			}
+			e.exitEditMode()
+			return
+		} else {
+			// Both false or both true - row might be in viewport after all
+			// Load from bottom as fallback
+			if err := e.loadFromRowId(updatedKeys, false, col); err != nil {
+				e.SetStatusErrorWithSentry(err)
+				e.exitEditMode()
+				return
+			}
+			// Select last row
+			if e.buffer[e.lastRowIdx()].data == nil {
+				e.table.Select(len(e.buffer)-2, col)
+			} else {
+				e.table.Select(len(e.buffer)-1, col)
+			}
+			e.exitEditMode()
+			return
+		}
+	}
+
+	// Key/sort columns didn't change, update in place (original behavior)
+	e.buffer[ptr] = Row{state: RowStateNormal, data: updated}
 	e.renderData()
 	e.exitEditMode()
 }
@@ -485,7 +602,7 @@ func (e *Editor) executeInsert() error {
 		keyIdx, ok := e.relation.AttributeIndex[keyCol]
 		if !ok || insertedRow == nil {
 			// Fallback: load from bottom without specific row
-			e.loadFromRowId(nil, false, 0, false)
+			e.loadFromRowId(nil, false, 0)
 			e.table.Select(len(e.buffer)-2, 0)
 			return nil
 		}
@@ -493,7 +610,7 @@ func (e *Editor) executeInsert() error {
 	}
 
 	// Load from the inserted row (from bottom)
-	if err := e.loadFromRowId(keyVals, false, e.table.selectedCol, false); err != nil {
+	if err := e.loadFromRowId(keyVals, false, e.table.selectedCol); err != nil {
 		e.SetStatusErrorWithSentry(err)
 		return err
 	}
@@ -505,6 +622,38 @@ func (e *Editor) executeInsert() error {
 		e.table.Select(len(e.buffer)-1, e.table.selectedCol)
 	}
 	return nil
+}
+
+// hasKeyOrSortChanged checks if any key columns or sort column values changed
+func (e *Editor) hasKeyOrSortChanged(oldRow, newRow []any, sortCol *dblib.SortColumn) bool {
+	if oldRow == nil || newRow == nil {
+		return false
+	}
+
+	// Check if any key column values changed
+	for _, keyCol := range e.relation.Key {
+		keyIdx, ok := e.relation.AttributeIndex[keyCol]
+		if !ok {
+			continue
+		}
+		if keyIdx < len(oldRow) && keyIdx < len(newRow) {
+			if oldRow[keyIdx] != newRow[keyIdx] {
+				return true
+			}
+		}
+	}
+
+	// Check if sort column value changed (if sorting is applied)
+	if sortCol != nil {
+		sortIdx, ok := e.relation.AttributeIndex[sortCol.Name]
+		if ok && sortIdx < len(oldRow) && sortIdx < len(newRow) {
+			if oldRow[sortIdx] != newRow[sortIdx] {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (e *Editor) isMultilineColumnType(col int) bool {

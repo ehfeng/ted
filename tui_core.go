@@ -299,7 +299,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 	// Only load data if we have a table
 	if tablename != "" {
-		editor.loadFromRowId(nil, true, 0, false)
+		editor.loadFromRowId(nil, true, 0)
 	}
 	editor.setupKeyBindings()
 	editor.setupStatusBar()

@@ -141,7 +141,7 @@ func (e *Editor) executeDelete() error {
 
 	// Refresh data after deletion
 	e.SetStatusMessage("Record deleted successfully")
-	e.loadFromRowId(nil, e.buffer[e.lastRowIdx()].data != nil, col, false)
+	e.loadFromRowId(nil, e.buffer[e.lastRowIdx()].data != nil, col)
 	return nil
 }
 
@@ -220,13 +220,13 @@ func (e *Editor) executeFind(findValue string) {
 		// Row is outside the current window, need to load from that row
 		if foundBelow {
 			// Found row is after current window, load from bottom (reverse order)
-			if err := e.loadFromRowId(foundKeys, false, col, false); err != nil {
+			if err := e.loadFromRowId(foundKeys, false, col); err != nil {
 				e.SetStatusErrorWithSentry(err)
 				return
 			}
 		} else {
 			// Found row wrapped around to before current window, load from top
-			if err := e.loadFromRowId(foundKeys, true, col, false); err != nil {
+			if err := e.loadFromRowId(foundKeys, true, col); err != nil {
 				e.SetStatusErrorWithSentry(err)
 				return
 			}
@@ -282,7 +282,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")
 	e.pointer = 0
 	e.buffer = make([]Row, e.table.rowsHeight)
-	e.loadFromRowId(nil, true, 0, false)
+	e.loadFromRowId(nil, true, 0)
 	e.renderData()
 	e.table.Select(0, 0)
 	fmt.Fprintf(os.Stderr, "[DEBUG] Data loaded and rendered\n")

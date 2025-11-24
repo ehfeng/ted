@@ -94,7 +94,7 @@ func (e *Editor) setupKeyBindings() {
 		// Ctrl+R: Insert mode
 		if (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0 {
 			// Ctrl+I: Jump to end and enable insert mode
-			e.loadFromRowId(nil, false, 0, false)
+			e.loadFromRowId(nil, false, 0)
 			go func() {
 				e.app.QueueUpdateDraw(func() { e.nextRows(1) })
 			}()
@@ -192,7 +192,7 @@ func (e *Editor) setupKeyBindings() {
 					return nil // Disable vertical navigation in insert mode
 				}
 				// Ctrl+Home: jump to first row
-				e.loadFromRowId(nil, true, col, false)
+				e.loadFromRowId(nil, true, col)
 				e.table.Select(0, col)
 				return nil
 			}
@@ -208,7 +208,7 @@ func (e *Editor) setupKeyBindings() {
 					return nil // Disable vertical navigation in insert mode
 				}
 				// Ctrl+End: jump to last row
-				e.loadFromRowId(nil, false, col, false)
+				e.loadFromRowId(nil, false, col)
 				e.table.Select(e.lastRowIdx()-1, col) // -1 because the last row is the bottom border
 				return nil
 			}
@@ -408,12 +408,12 @@ func (e *Editor) setupKeyBindings() {
 			// Check if this is a double 'g' press (gg)
 			if time.Since(e.lastGPress) < 500*time.Millisecond {
 				// gg: jump to first row
-				e.loadFromRowId(nil, true, col, false)
+				e.loadFromRowId(nil, true, col)
 				e.table.Select(0, col)
 				e.lastGPress = time.Time{} // Reset
 			} else {
 				// Single g also jumps to first row (per spec)
-				e.loadFromRowId(nil, true, col, false)
+				e.loadFromRowId(nil, true, col)
 				e.table.Select(0, col)
 				e.lastGPress = time.Now() // Track for potential gg
 			}
@@ -424,7 +424,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 			// G: jump to last row
-			e.loadFromRowId(nil, false, col, false)
+			e.loadFromRowId(nil, false, col)
 			e.table.Select(e.lastRowIdx()-1, col)
 			return nil
 		case e.vimMode && key == tcell.KeyRune && (rune == '0' || rune == '^') && mod == 0:
@@ -511,7 +511,7 @@ func (e *Editor) consumeKittyCSI(key tcell.Key, r rune, mod tcell.ModMask) bool 
 							e.setPaletteMode(PaletteModeSQL, true)
 						case 105: // Ctrl+I: Jump to end and enable insert mode
 							e.table.SetupInsertRow()
-							e.loadFromRowId(nil, false, 0, false)
+							e.loadFromRowId(nil, false, 0)
 							e.updateStatusForInsertMode()
 							// Select the insert mode row (which is at index len(data))
 							e.table.Select(e.table.GetDataLength(), col)

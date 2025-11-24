@@ -61,6 +61,35 @@ func keysEqual(k1, k2 []any) bool {
 	return true
 }
 
+// getViewportBoundaryKeys returns the key values of the first and last visible rows
+func (e *Editor) getViewportBoundaryKeys() (firstKeys, lastKeys []any) {
+	if len(e.buffer) == 0 {
+		return nil, nil
+	}
+
+	// Get first visible row
+	firstRow := e.buffer[e.pointer]
+	if firstRow.data != nil {
+		firstKeys = e.extractKeys(firstRow.data)
+	}
+
+	// Get last visible row (accounting for nil sentinel at end)
+	lastIdx := e.lastRowIdx()
+	lastRow := e.buffer[lastIdx]
+
+	// If last row is nil sentinel, try previous row
+	if lastRow.data == nil && lastIdx != e.pointer {
+		lastIdx = (lastIdx - 1 + len(e.buffer)) % len(e.buffer)
+		lastRow = e.buffer[lastIdx]
+	}
+
+	if lastRow.data != nil {
+		lastKeys = e.extractKeys(lastRow.data)
+	}
+
+	return firstKeys, lastKeys
+}
+
 // diffRows compares two rows and returns the indices of columns that differ
 func diffRows(oldRow, newRow []any) []int {
 	if len(oldRow) != len(newRow) {
@@ -444,24 +473,13 @@ func (e *Editor) refresh() error {
 }
 
 // id can be nil, in which case load from the top or bottom
-// refreshing indicates whether to apply diff highlighting logic
-func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshing bool) error {
+func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	if e.relation == nil || e.relation.DB == nil {
 		return fmt.Errorf("no database connection available")
 	}
 
 	// Stop refresh timer when starting a new query
 	e.stopRefreshTimer()
-
-	// Close existing query if refreshing
-	if refreshing {
-		e.queryMu.Lock()
-		if e.query != nil {
-			e.query.Close()
-			e.query = nil
-		}
-		e.queryMu.Unlock()
-	}
 
 	selectCols := make([]string, len(e.columns))
 	for i, col := range e.columns {
@@ -508,19 +526,14 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 			})
 		}
 
-		if refreshing && e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
-			// Perform diff and populate buffer
-			e.diffAndPopulateBuffer(currentRows)
-		} else {
-			// No diffing needed - just populate buffer normally
-			for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
-				e.buffer[i] = currentRows[i]
-			}
-			// Mark end with empty row if we didn't fill the buffer
-			if len(currentRows) < len(e.buffer) {
-				e.buffer[len(currentRows)] = Row{}
-				e.buffer = e.buffer[:len(currentRows)+1]
-			}
+		// Populate buffer normally
+		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+			e.buffer[i] = currentRows[i]
+		}
+		// Mark end with empty row if we didn't fill the buffer
+		if len(currentRows) < len(e.buffer) {
+			e.buffer[len(currentRows)] = Row{}
+			e.buffer = e.buffer[:len(currentRows)+1]
 		}
 
 		// Set previousRows to currentRows
@@ -564,14 +577,9 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int, refreshi
 		// Reverse currentRows for fromBottom
 		slices.Reverse(currentRows)
 
-		if refreshing && e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
-			// Perform diff and populate buffer
-			e.diffAndPopulateBuffer(currentRows)
-		} else {
-			// No diffing needed - just populate buffer normally
-			for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
-				e.buffer[i] = currentRows[i]
-			}
+		// Populate buffer normally
+		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+			e.buffer[i] = currentRows[i]
 		}
 
 		// Set previousRows to currentRows

@@ -204,3 +204,72 @@ func GetForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []st
 	}
 	return result, nil
 }
+
+// CompareRowPosition compares the position of updatedKeys relative to viewport boundaries
+// Returns (isAbove, isBelow, error) where:
+// - isAbove=true means the updated row is above the first visible row
+// - isBelow=true means the updated row is below the last visible row
+// If both are false, the row is within the current viewport
+func CompareRowPosition(db *sql.DB, table *Relation, sortCol *SortColumn, updatedKeys, firstKeys, lastKeys []any) (bool, bool, error) {
+	if len(updatedKeys) == 0 || len(firstKeys) == 0 || len(lastKeys) == 0 {
+		return false, false, fmt.Errorf("key data cannot be empty")
+	}
+	if len(table.Key) == 0 {
+		return false, false, fmt.Errorf("table has no key columns")
+	}
+
+	// Build comparison using row value syntax for composite keys
+	// Query: SELECT (updated) < (first), (updated) > (last)
+	numCols := len(updatedKeys)
+
+	// Build placeholder tuples based on database type
+	// For positional placeholders: reuse $1,$2 for both comparisons
+	// Args: [updated..., first..., last...]
+	nextPlaceholder := func(pos int) string {
+		if databaseFeatures[table.DBType].positionalPlaceholder {
+			return fmt.Sprintf("$%d", pos)
+		}
+		return "?"
+	}
+
+	updatedPlaceholders := make([]string, numCols)
+	firstPlaceholders := make([]string, numCols)
+	lastPlaceholders := make([]string, numCols)
+
+	for i := 0; i < numCols; i++ {
+		updatedPlaceholders[i] = nextPlaceholder(i + 1)
+		firstPlaceholders[i] = nextPlaceholder(i + 1 + numCols)
+		lastPlaceholders[i] = nextPlaceholder(i + 1 + 2*numCols)
+	}
+
+	// Build tuples - for single column, use scalar; for multiple, use row value syntax
+	var updatedExpr, firstExpr, lastExpr string
+	if numCols == 1 {
+		updatedExpr = updatedPlaceholders[0]
+		firstExpr = firstPlaceholders[0]
+		lastExpr = lastPlaceholders[0]
+	} else {
+		updatedExpr = "(" + strings.Join(updatedPlaceholders, ", ") + ")"
+		firstExpr = "(" + strings.Join(firstPlaceholders, ", ") + ")"
+		lastExpr = "(" + strings.Join(lastPlaceholders, ", ") + ")"
+	}
+
+	// Build the comparison query
+	query := fmt.Sprintf("SELECT %s < %s AS is_above, %s > %s AS is_below",
+		updatedExpr, firstExpr, updatedExpr, lastExpr)
+	// Combine all arguments: updated, first, last
+	args := make([]any, 0, 3*numCols)
+	args = append(args, updatedKeys...)
+	args = append(args, firstKeys...)
+	args = append(args, updatedKeys...)
+	args = append(args, lastKeys...)
+
+	// Execute query
+	var isAbove, isBelow bool
+	err := db.QueryRow(query, args...).Scan(&isAbove, &isBelow)
+	if err != nil {
+		return false, false, fmt.Errorf("failed to compare row positions: %w", err)
+	}
+
+	return isAbove, isBelow, nil
+}
