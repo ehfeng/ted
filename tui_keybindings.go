@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,12 @@ func (e *Editor) setupKeyBindings() {
 		mod := event.Modifiers()
 
 		row, col := e.table.GetSelection()
+
+		// Debug logging for key events
+		if key == tcell.KeyDelete || key == tcell.KeyBackspace || key == tcell.KeyBackspace2 {
+			fmt.Fprintf(os.Stderr, "[DEBUG] Key event: key=%v, mod=%v, hasCtrl=%v\n",
+				key, mod, mod&tcell.ModCtrl != 0)
+		}
 
 		// Disable all selection navigation when in delete mode (except Enter to confirm and Escape to cancel)
 		if e.paletteMode == PaletteModeDelete {
@@ -339,18 +346,25 @@ func (e *Editor) setupKeyBindings() {
 				}
 				return nil
 			}
-		case key == tcell.KeyBackspace || key == tcell.KeyBackspace2 || key == tcell.KeyDEL || key == tcell.KeyDelete:
-			// Disable in delete mode
-			if e.paletteMode == PaletteModeDelete {
-				return nil
-			}
-			// Backspace or Delete: start editing with empty string
-			e.enterEditModeWithInitialValue(row, col, "")
-			return nil
-		case (rune == 'd' || rune == 4) && mod&tcell.ModCtrl != 0:
-			// Ctrl+D: enter delete mode
+		case key == tcell.KeyCtrlH:
+			// Ctrl+Backspace (sent as Ctrl+H by some terminals): enter delete mode
+			fmt.Fprintf(os.Stderr, "[DEBUG] Entering delete mode via Ctrl+H (Ctrl+Backspace)\n")
 			e.enterDeleteMode(row, col)
 			return nil
+		case (key == tcell.KeyDelete || key == tcell.KeyBackspace || key == tcell.KeyBackspace2):
+			if mod&tcell.ModCtrl != 0 {
+				// Ctrl+Delete or Ctrl+Backspace: enter delete mode
+				fmt.Fprintf(os.Stderr, "[DEBUG] Entering delete mode via Ctrl+Delete/Backspace\n")
+				e.enterDeleteMode(row, col)
+				return nil
+			} else {
+				// Disable in delete mode
+				if e.paletteMode == PaletteModeDelete {
+					return nil
+				}
+				// Backspace or Delete: start editing with empty string
+				e.enterEditModeWithInitialValue(row, col, "")
+			}
 		case (rune == 'q' || rune == 17) && mod&tcell.ModCtrl != 0:
 			// Ctrl+Q: quit application
 			e.app.Stop()
