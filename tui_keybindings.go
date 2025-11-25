@@ -235,10 +235,25 @@ func (e *Editor) setupKeyBindings() {
 			}
 			// Page down: scroll data forward while keeping selection in same visual position
 			pageSize := max(1, e.table.rowsHeight-1)
-			// Keep selection at same position, just fetch next rows
-			go func() {
-				e.app.QueueUpdateDraw(func() { e.nextRows(pageSize) })
-			}()
+			// Check if we're at or near the bottom before paging
+			if e.isAtBottom() {
+				e.table.Select(len(e.buffer)-2, col)
+				return nil
+			} else {
+				// Keep selection at same position, just fetch next rows
+				go func() {
+					reachedEnd, _ := e.nextRows(pageSize)
+					// If we were near the bottom and reached the end, move selection to bottom row
+					if reachedEnd {
+						e.app.QueueUpdateDraw(func() {
+							bottomRow := len(e.table.data) - 2
+							if bottomRow >= 0 {
+								e.table.Select(bottomRow, e.table.selectedCol)
+							}
+						})
+					}
+				}()
+			}
 			return nil
 		// Ctrl+F sends ACK (6) or 'f' depending on terminal
 		case (rune == 'f' || rune == 6) && mod&tcell.ModCtrl != 0:
@@ -326,7 +341,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			if mod&tcell.ModMeta != 0 {
-				if len(e.buffer[len(e.buffer)-1].data) == 0 {
+				if e.isAtBottom() {
 					e.table.Select(len(e.buffer)-2, col)
 				} else {
 					e.table.Select(len(e.buffer)-1, col)

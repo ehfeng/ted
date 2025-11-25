@@ -606,7 +606,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 func (e *Editor) nextRows(i int) (bool, error) {
 	debugLog("nextRows: starting, i=%d, e.query nil=%v\n", i, e.query == nil)
 	// Check if we're already at the end (last record is nil)
-	if len(e.buffer) == 0 || e.buffer[e.lastRowIdx()].data == nil {
+	if e.isAtBottom() {
 		return true, nil // No-op, already at end of data
 	}
 
@@ -706,6 +706,12 @@ func (e *Editor) nextRows(i int) (bool, error) {
 
 func (e *Editor) lastRowIdx() int {
 	return (e.pointer + len(e.buffer) - 1) % len(e.buffer)
+}
+
+// isAtBottom returns true if the table is currently at the bottom of the data
+// (i.e., the last row in the buffer is nil, indicating we've reached the end)
+func (e *Editor) isAtBottom() bool {
+	return len(e.buffer) == 0 || e.buffer[e.lastRowIdx()].data == nil
 }
 
 func (e *Editor) incrPtr(n int) {
