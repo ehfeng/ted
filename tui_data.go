@@ -607,7 +607,7 @@ func (e *Editor) nextRows(i int) (bool, error) {
 	debugLog("nextRows: starting, i=%d, e.query nil=%v\n", i, e.query == nil)
 	// Check if we're already at the end (last record is nil)
 	if len(e.buffer) == 0 || e.buffer[e.lastRowIdx()].data == nil {
-		return false, nil // No-op, already at end of data
+		return true, nil // No-op, already at end of data
 	}
 
 	// Only reuse query if it's in the correct direction (scrollDown)

@@ -68,11 +68,11 @@ type Editor struct {
 	editing bool
 
 	// data, records is a circular buffer
-	query      *sql.Rows // unified query for scrolling
-	scrollDown bool      // direction of current query: true = next/forward, false = prev/backward
+	query      *sql.Rows  // unified query for scrolling
+	scrollDown bool       // direction of current query: true = next/forward, false = prev/backward
 	queryMu    sync.Mutex // protects query and scrollDown from concurrent access
-	pointer    int       // pointer to the current record
-	buffer     []Row     // columns are keyed off e.columns
+	pointer    int        // pointer to the current record
+	buffer     []Row      // columns are keyed off e.columns
 
 	// change tracking for refresh
 	previousRows []Row // snapshot of rows from last refresh
