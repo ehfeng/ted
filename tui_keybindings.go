@@ -351,6 +351,10 @@ func (e *Editor) setupKeyBindings() {
 			// Ctrl+D: enter delete mode
 			e.enterDeleteMode(row, col)
 			return nil
+		case (rune == 'q' || rune == 17) && mod&tcell.ModCtrl != 0:
+			// Ctrl+Q: quit application
+			e.app.Stop()
+			return nil
 		// Vim mode keybindings
 		case e.vimMode && key == tcell.KeyRune && rune == 'h' && mod == 0:
 			// Disable in delete mode

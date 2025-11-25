@@ -374,7 +374,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 	} else {
 		switch mode {
 		case PaletteModeDefault:
-			e.commandPalette.SetPlaceholder("Ctrl+… I: Insert · `: SQL · F: Find · D: Delete · C: Exit")
+			e.commandPalette.SetPlaceholder("Ctrl+… R: Insert · `: SQL · F: Find · D: Delete · Q: Exit")
 		case PaletteModeCommand:
 			e.commandPalette.SetPlaceholder("Command… (Esc to exit)")
 		case PaletteModeSQL:

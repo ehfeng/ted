@@ -54,7 +54,6 @@ brew install ted
 ### Data
 
 1. enter: edit/down/new row (if at bottom)
-1. shift+enter: edit/up (if at top)
 1. esc: exit from editing, discarding changes
 1. ctrl+f: find in column
 1. alt+←/→: rearranges column display order

@@ -445,6 +445,10 @@ func (e *Editor) setupCommandPalette() {
 		case (rune == '`' || rune == 0) && mod&tcell.ModCtrl != 0:
 			e.setPaletteMode(PaletteModeSQL, true)
 			return nil
+		case (rune == 'q' || rune == 17) && mod&tcell.ModCtrl != 0:
+			// Ctrl+Q: quit application
+			e.app.Stop()
+			return nil
 		}
 
 		switch event.Key() {
