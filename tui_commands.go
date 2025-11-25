@@ -24,6 +24,28 @@ func (e *Editor) executeSQL(query string) {
 		return
 	}
 
+	// Check for transaction statements
+	queryUpper := strings.TrimSpace(strings.ToUpper(query))
+	queryUpper = strings.Join(strings.Fields(queryUpper), " ") // Normalize whitespace
+
+	// Disallow transaction control statements
+	if strings.HasPrefix(queryUpper, "BEGIN") ||
+		strings.HasPrefix(queryUpper, "START TRANSACTION") ||
+		strings.HasPrefix(queryUpper, "BEGIN WORK") ||
+		strings.HasPrefix(queryUpper, "BEGIN TRANSACTION") {
+		e.SetStatusError("Transaction statements are not allowed in SQL mode")
+		e.startRefreshTimer()
+		return
+	}
+
+	// Check for multiple statements (semicolon not at the end)
+	trimmedQuery := strings.TrimRight(query, "; \t\n\r")
+	if strings.Contains(trimmedQuery, ";") {
+		e.SetStatusError("Multiple statements are not allowed in SQL mode")
+		e.startRefreshTimer()
+		return
+	}
+
 	result, err := e.relation.DB.Exec(query)
 	if err != nil {
 		e.SetStatusError(err.Error())
