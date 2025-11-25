@@ -264,6 +264,172 @@ func loadEnumAndCustomTypesMySQL(db *sql.DB, tableName string, attributes map[st
 	return updatedAttrs, nil
 }
 
+// getBestKeyMySQL identifies the best key for a MySQL table using information_schema.
+// Ranking: primary key > unique NOT NULL > fewer columns > shorter > earlier.
+func getBestKeyMySQL(db *sql.DB, tableName string) ([]string, error) {
+	type keyCandidate struct {
+		cols       []string
+		isPK       bool
+		numCols    int
+		totalSize  int
+		minOrdinal int // minimum ordinal_position among columns in this key
+	}
+
+	// Get column metadata
+	colInfo := make(map[string]struct {
+		dataType string
+		length   int
+		ordinal  int
+		notNull  bool
+	})
+	colQuery := `SELECT column_name, data_type,
+	                    COALESCE(character_maximum_length, -1) AS max_len,
+	                    ordinal_position, is_nullable
+	             FROM information_schema.columns
+	             WHERE table_name = ? AND table_schema = DATABASE()`
+	colRows, err := db.Query(colQuery, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query column metadata: %w", err)
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var name, dtype, isNullable string
+		var maxLen, ordinal int
+		if err := colRows.Scan(&name, &dtype, &maxLen, &ordinal, &isNullable); err != nil {
+			continue
+		}
+		notNull := strings.ToLower(isNullable) == "no"
+		colInfo[name] = struct {
+			dataType string
+			length   int
+			ordinal  int
+			notNull  bool
+		}{dtype, maxLen, ordinal, notNull}
+	}
+	colRows.Close()
+
+	var candidates []keyCandidate
+
+	// Check for primary key
+	pkQuery := `SELECT column_name
+	            FROM information_schema.key_column_usage
+	            WHERE table_name = ? AND table_schema = DATABASE()
+	              AND constraint_name = 'PRIMARY'
+	            ORDER BY ordinal_position`
+	pkRows, err := db.Query(pkQuery, tableName)
+	if err == nil {
+		defer pkRows.Close()
+		var pkCols []string
+		for pkRows.Next() {
+			var colName string
+			if err := pkRows.Scan(&colName); err == nil {
+				pkCols = append(pkCols, colName)
+			}
+		}
+		pkRows.Close()
+		if len(pkCols) > 0 {
+			// Compute size and min ordinal for PK
+			totalSize := 0
+			minOrd := int(^uint(0) >> 1) // max int
+			for _, col := range pkCols {
+				if info, ok := colInfo[col]; ok {
+					totalSize += sizeOf(info.dataType, info.length)
+					if info.ordinal < minOrd {
+						minOrd = info.ordinal
+					}
+				}
+			}
+			candidates = append(candidates, keyCandidate{
+				cols:       pkCols,
+				isPK:       true,
+				numCols:    len(pkCols),
+				totalSize:  totalSize,
+				minOrdinal: minOrd,
+			})
+		}
+	}
+
+	// Check for unique non-primary indexes (only those with all NOT NULL columns)
+	uQuery := `SELECT index_name, column_name, seq_in_index
+	           FROM information_schema.statistics
+	           WHERE table_name = ? AND table_schema = DATABASE()
+	             AND non_unique = 0 AND index_name != 'PRIMARY'
+	           ORDER BY index_name, seq_in_index`
+	uRows, err := db.Query(uQuery, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query unique indexes: %w", err)
+	}
+	defer uRows.Close()
+
+	idxCols := make(map[string][]string)
+	for uRows.Next() {
+		var idxName, colName string
+		var seq int
+		if err := uRows.Scan(&idxName, &colName, &seq); err != nil {
+			continue
+		}
+		idxCols[idxName] = append(idxCols[idxName], colName)
+	}
+	uRows.Close()
+
+	for _, cols := range idxCols {
+		if len(cols) == 0 {
+			continue
+		}
+		// Check all columns are NOT NULL
+		allNotNull := true
+		totalSize := 0
+		minOrd := int(^uint(0) >> 1) // max int
+		for _, col := range cols {
+			if info, ok := colInfo[col]; ok {
+				if !info.notNull {
+					allNotNull = false
+					break
+				}
+				totalSize += sizeOf(info.dataType, info.length)
+				if info.ordinal < minOrd {
+					minOrd = info.ordinal
+				}
+			} else {
+				allNotNull = false
+				break
+			}
+		}
+
+		if !allNotNull {
+			continue
+		}
+
+		candidates = append(candidates, keyCandidate{
+			cols:       cols,
+			isPK:       false,
+			numCols:    len(cols),
+			totalSize:  totalSize,
+			minOrdinal: minOrd,
+		})
+	}
+
+	if len(candidates) == 0 {
+		return []string{}, nil
+	}
+
+	// Sort by: isPK desc, numCols asc, totalSize asc, minOrdinal asc
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].isPK != candidates[j].isPK {
+			return candidates[i].isPK
+		}
+		if candidates[i].numCols != candidates[j].numCols {
+			return candidates[i].numCols < candidates[j].numCols
+		}
+		if candidates[i].totalSize != candidates[j].totalSize {
+			return candidates[i].totalSize < candidates[j].totalSize
+		}
+		return candidates[i].minOrdinal < candidates[j].minOrdinal
+	})
+
+	return candidates[0].cols, nil
+}
+
 // parseEnumValues extracts enum values from MySQL's column_type string
 // Example input: "enum('active','inactive','pending')"
 // Returns: ["active", "inactive", "pending"]

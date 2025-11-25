@@ -243,6 +243,191 @@ func loadForeignKeysPostgreSQL(db *sql.DB, dbType DatabaseType, tableName string
 	return references, updatedAttrs, nil
 }
 
+// getBestKeyPostgreSQL identifies the best key for a PostgreSQL table using system catalogs.
+// Ranking: primary key > unique (NOT NULL/NULLS NOT DISTINCT) > fewer columns > shorter > earlier.
+func getBestKeyPostgreSQL(db *sql.DB, tableName string) ([]string, error) {
+	type keyCandidate struct {
+		cols       []string
+		isPK       bool
+		numCols    int
+		totalSize  int
+		minOrdinal int // minimum ordinal position among columns in this key
+	}
+
+	// Extract schema and relation name
+	schema := "public"
+	rel := tableName
+	if dot := strings.IndexByte(rel, '.'); dot != -1 {
+		schema = rel[:dot]
+		rel = rel[dot+1:]
+	}
+
+	// Get column metadata: name, type, length, ordinal position
+	colInfo := make(map[string]struct {
+		dataType string
+		length   int
+		ordinal  int
+	})
+	colQuery := `SELECT column_name, data_type,
+	                    COALESCE(character_maximum_length, -1) AS max_len,
+	                    ordinal_position
+	             FROM information_schema.columns
+	             WHERE table_schema = $1 AND table_name = $2`
+	colRows, err := db.Query(colQuery, schema, rel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query column metadata: %w", err)
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var name, dtype string
+		var maxLen, ordinal int
+		if err := colRows.Scan(&name, &dtype, &maxLen, &ordinal); err != nil {
+			continue
+		}
+		colInfo[name] = struct {
+			dataType string
+			length   int
+			ordinal  int
+		}{dtype, maxLen, ordinal}
+	}
+	colRows.Close()
+
+	var candidates []keyCandidate
+
+	// Check for primary key
+	pkQuery := `SELECT a.attname
+	            FROM pg_index i
+	            JOIN pg_class c ON c.oid = i.indrelid
+	            JOIN pg_namespace n ON n.oid = c.relnamespace
+	            JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+	            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+	            WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
+	            ORDER BY k.ord`
+	pkRows, err := db.Query(pkQuery, schema, rel)
+	if err == nil {
+		defer pkRows.Close()
+		var pkCols []string
+		for pkRows.Next() {
+			var colName string
+			if err := pkRows.Scan(&colName); err == nil {
+				pkCols = append(pkCols, colName)
+			}
+		}
+		pkRows.Close()
+		if len(pkCols) > 0 {
+			// Compute size and min ordinal for PK
+			totalSize := 0
+			minOrd := int(^uint(0) >> 1) // max int
+			for _, col := range pkCols {
+				if info, ok := colInfo[col]; ok {
+					totalSize += sizeOf(info.dataType, info.length)
+					if info.ordinal < minOrd {
+						minOrd = info.ordinal
+					}
+				}
+			}
+			candidates = append(candidates, keyCandidate{
+				cols:       pkCols,
+				isPK:       true,
+				numCols:    len(pkCols),
+				totalSize:  totalSize,
+				minOrdinal: minOrd,
+			})
+		}
+	}
+
+	// Check for unique indexes with NOT NULL or NULLS NOT DISTINCT
+	uQuery := `SELECT i.indexrelid::regclass::text AS index_name,
+	                  array_agg(a.attname ORDER BY k.ord) AS columns,
+	                  idx.indnullsnotdistinct
+	           FROM pg_index idx
+	           JOIN pg_class c ON c.oid = idx.indrelid
+	           JOIN pg_namespace n ON n.oid = c.relnamespace
+	           JOIN pg_class i ON i.oid = idx.indexrelid
+	           JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+	           JOIN pg_attribute a ON a.attrelid = idx.indrelid AND a.attnum = k.attnum
+	           WHERE n.nspname = $1 AND c.relname = $2
+	             AND idx.indisunique AND NOT idx.indisprimary
+	           GROUP BY idx.indexrelid, idx.indnullsnotdistinct`
+	uRows, err := db.Query(uQuery, schema, rel)
+	if err == nil {
+		defer uRows.Close()
+		for uRows.Next() {
+			var indexName, colArray string
+			var nullsNotDistinct sql.NullBool
+			if err := uRows.Scan(&indexName, &colArray, &nullsNotDistinct); err != nil {
+				continue
+			}
+			// Parse array: {col1,col2,...}
+			colArray = strings.Trim(colArray, "{}")
+			if colArray == "" {
+				continue
+			}
+			cols := strings.Split(colArray, ",")
+
+			// Check if all columns are NOT NULL, or if NULLS NOT DISTINCT is enabled
+			allNotNull := true
+			for _, col := range cols {
+				// Check nullability from information_schema
+				var nullable string
+				nullQuery := `SELECT is_nullable FROM information_schema.columns
+				              WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`
+				if err := db.QueryRow(nullQuery, schema, rel, col).Scan(&nullable); err == nil {
+					if strings.ToLower(nullable) == "yes" {
+						allNotNull = false
+						break
+					}
+				}
+			}
+
+			// Accept if all NOT NULL, or NULLS NOT DISTINCT is true
+			if !allNotNull && !(nullsNotDistinct.Valid && nullsNotDistinct.Bool) {
+				continue
+			}
+
+			// Compute size and min ordinal
+			totalSize := 0
+			minOrd := int(^uint(0) >> 1) // max int
+			for _, col := range cols {
+				if info, ok := colInfo[col]; ok {
+					totalSize += sizeOf(info.dataType, info.length)
+					if info.ordinal < minOrd {
+						minOrd = info.ordinal
+					}
+				}
+			}
+			candidates = append(candidates, keyCandidate{
+				cols:       cols,
+				isPK:       false,
+				numCols:    len(cols),
+				totalSize:  totalSize,
+				minOrdinal: minOrd,
+			})
+		}
+		uRows.Close()
+	}
+
+	if len(candidates) == 0 {
+		return []string{}, nil
+	}
+
+	// Sort by: isPK desc, numCols asc, totalSize asc, minOrdinal asc
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].isPK != candidates[j].isPK {
+			return candidates[i].isPK // true < false
+		}
+		if candidates[i].numCols != candidates[j].numCols {
+			return candidates[i].numCols < candidates[j].numCols
+		}
+		if candidates[i].totalSize != candidates[j].totalSize {
+			return candidates[i].totalSize < candidates[j].totalSize
+		}
+		return candidates[i].minOrdinal < candidates[j].minOrdinal
+	})
+
+	return candidates[0].cols, nil
+}
+
 // loadEnumAndCustomTypesPostgreSQL fetches enum values and custom type information for PostgreSQL columns.
 func loadEnumAndCustomTypesPostgreSQL(db *sql.DB, tableName string, attributes map[string]Attribute) (map[string]Attribute, error) {
 	updatedAttrs := make(map[string]Attribute)

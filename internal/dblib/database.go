@@ -27,6 +27,29 @@ func getShortestLookupKey(db *sql.DB, dbType DatabaseType, tableName string) ([]
 	}
 }
 
+// GetBestKey identifies the best key column(s) for a relation, using system tables
+// when available. The ranking preferences are (in order of priority):
+// 1. Primary keys over unique constraints (with NOT NULL or NULLS NOT DISTINCT)
+// 2. Fewer columns over more columns
+// 3. Shorter columns over longer columns (by estimated byte width)
+// 4. Earlier columns over later columns in the table definition
+//
+// Returns the column names comprising the best key, or an empty slice if no suitable key exists.
+func GetBestKey(db *sql.DB, dbType DatabaseType, tableName string) ([]string, error) {
+	switch dbType {
+	case SQLite:
+		return getBestKeySQLite(db, tableName)
+	case PostgreSQL:
+		return getBestKeyPostgreSQL(db, tableName)
+	case MySQL:
+		return getBestKeyMySQL(db, tableName)
+	case DuckDB:
+		return getBestKeyDuckDB(db, tableName)
+	default:
+		return []string{}, fmt.Errorf("unsupported database type: %v", dbType)
+	}
+}
+
 func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, error) {
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")

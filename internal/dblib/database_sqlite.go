@@ -257,6 +257,188 @@ func loadForeignKeysSQLite(db *sql.DB, dbType DatabaseType, tableName string, at
 	return references, updatedAttrs, nil
 }
 
+// getBestKeySQLite identifies the best key for a SQLite table using PRAGMA commands.
+// Ranking: primary key > unique NOT NULL > fewer columns > shorter > earlier.
+func getBestKeySQLite(db *sql.DB, tableName string) ([]string, error) {
+	type keyCandidate struct {
+		cols       []string
+		isPK       bool
+		numCols    int
+		totalSize  int
+		minOrdinal int // minimum column ID (cid) among columns in this key
+	}
+
+	// Get column metadata from PRAGMA table_info
+	colInfo := make(map[string]struct {
+		cid      int
+		dataType string
+		notNull  bool
+	})
+	type pkEntry struct {
+		ord  int
+		name string
+		cid  int
+	}
+	var pkEntries []pkEntry
+
+	tiQuery := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
+	tiRows, err := db.Query(tiQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query table_info: %w", err)
+	}
+	defer tiRows.Close()
+	for tiRows.Next() {
+		var cid, pk int
+		var name, dtype, notnullStr string
+		var dflt sql.NullString
+		if err := tiRows.Scan(&cid, &name, &dtype, &notnullStr, &dflt, &pk); err != nil {
+			continue
+		}
+		notNull := (notnullStr == "1")
+		colInfo[name] = struct {
+			cid      int
+			dataType string
+			notNull  bool
+		}{cid, dtype, notNull}
+
+		if pk > 0 {
+			pkEntries = append(pkEntries, pkEntry{ord: pk, name: name, cid: cid})
+		}
+	}
+	tiRows.Close()
+
+	var candidates []keyCandidate
+
+	// Check for primary key
+	if len(pkEntries) > 0 {
+		sort.Slice(pkEntries, func(i, j int) bool {
+			return pkEntries[i].ord < pkEntries[j].ord
+		})
+		var pkCols []string
+		totalSize := 0
+		minCid := int(^uint(0) >> 1) // max int
+		for _, e := range pkEntries {
+			pkCols = append(pkCols, e.name)
+			if info, ok := colInfo[e.name]; ok {
+				totalSize += sizeOf(info.dataType, -1)
+				if info.cid < minCid {
+					minCid = info.cid
+				}
+			}
+		}
+		candidates = append(candidates, keyCandidate{
+			cols:       pkCols,
+			isPK:       true,
+			numCols:    len(pkCols),
+			totalSize:  totalSize,
+			minOrdinal: minCid,
+		})
+	}
+
+	// Check for unique indexes (only those with all NOT NULL columns)
+	ilQuery := fmt.Sprintf("PRAGMA index_list(%s)", tableName)
+	ilRows, err := db.Query(ilQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query index_list: %w", err)
+	}
+	defer ilRows.Close()
+	for ilRows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := ilRows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			continue
+		}
+		// Skip non-unique and primary key indexes
+		if unique != 1 || origin == "pk" {
+			continue
+		}
+
+		// Get columns in this index
+		iiQuery := fmt.Sprintf("PRAGMA index_info(%s)", name)
+		iiRows, err := db.Query(iiQuery)
+		if err != nil {
+			continue
+		}
+		type idxEntry struct {
+			ord  int
+			name string
+		}
+		var idxEntries []idxEntry
+		for iiRows.Next() {
+			var seqno, cid int
+			var cname string
+			if err := iiRows.Scan(&seqno, &cid, &cname); err == nil {
+				idxEntries = append(idxEntries, idxEntry{ord: seqno, name: cname})
+			}
+		}
+		iiRows.Close()
+
+		if len(idxEntries) == 0 {
+			continue
+		}
+
+		// Sort by index column order
+		sort.Slice(idxEntries, func(i, j int) bool {
+			return idxEntries[i].ord < idxEntries[j].ord
+		})
+
+		// Check all columns are NOT NULL
+		var cols []string
+		allNotNull := true
+		totalSize := 0
+		minCid := int(^uint(0) >> 1) // max int
+		for _, e := range idxEntries {
+			cols = append(cols, e.name)
+			if info, ok := colInfo[e.name]; ok {
+				if !info.notNull {
+					allNotNull = false
+					break
+				}
+				totalSize += sizeOf(info.dataType, -1)
+				if info.cid < minCid {
+					minCid = info.cid
+				}
+			} else {
+				allNotNull = false
+				break
+			}
+		}
+
+		if !allNotNull {
+			continue
+		}
+
+		candidates = append(candidates, keyCandidate{
+			cols:       cols,
+			isPK:       false,
+			numCols:    len(cols),
+			totalSize:  totalSize,
+			minOrdinal: minCid,
+		})
+	}
+	ilRows.Close()
+
+	if len(candidates) == 0 {
+		return []string{}, nil
+	}
+
+	// Sort by: isPK desc, numCols asc, totalSize asc, minOrdinal asc
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].isPK != candidates[j].isPK {
+			return candidates[i].isPK
+		}
+		if candidates[i].numCols != candidates[j].numCols {
+			return candidates[i].numCols < candidates[j].numCols
+		}
+		if candidates[i].totalSize != candidates[j].totalSize {
+			return candidates[i].totalSize < candidates[j].totalSize
+		}
+		return candidates[i].minOrdinal < candidates[j].minOrdinal
+	})
+
+	return candidates[0].cols, nil
+}
+
 // loadEnumAndCustomTypesSQLite is a no-op for SQLite (no native ENUM support).
 func loadEnumAndCustomTypesSQLite(db *sql.DB, tableName string, attributes map[string]Attribute) (map[string]Attribute, error) {
 	// SQLite doesn't have native ENUM support, but we can check for CHECK constraints

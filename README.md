@@ -57,12 +57,12 @@ brew install ted
 1. shift+enter: edit/up (if at top)
 1. esc: exit from editing, discarding changes
 1. ctrl+f: find in column
-1. ctrl+r: start insert row
-1. ctrl+enter: execute insert row
-1. ctrl+del: delete row
 1. alt+←/→: rearranges column display order
 1. ctrl+</>: increase/decrease column width
 1. ctrl+q: exit
+1. ctrl+r: start insert row
+1. ctrl+enter: execute insert row
+1. ctrl+del: delete row
 1. shift+enter: start tx
 1. shift+enter: commit tx
 1. ctrl+c: rollback tx
