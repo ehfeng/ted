@@ -164,37 +164,29 @@ var commonReservedIdents = map[string]struct{}{
 	"as": {}, "on": {},
 }
 
-func GetForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]any, error) {
-	if len(columns) == 0 {
-		// choose non-key columns
-		keyColNames := make(map[string]bool)
-		for _, keyIdx := range table.Key {
-			if keyIdx < len(table.Columns) {
-				keyColNames[table.Columns[keyIdx].Name] = true
-			}
-		}
-		columns = make([]string, 0, len(table.Columns))
-		for _, col := range table.Columns {
-			if !keyColNames[col.Name] {
-				columns = append(columns, col.Name)
-			}
-		}
+// columns is the list of columns to display in the preview based on configs
+func GetForeignRow(db *sql.DB, table *Relation, foreignKey map[string]any, columns []string) (map[string]any, error) {
+	// choose non-key columns
+	columnNames := make([]string, 0, len(columns))
+	for _, col := range columns {
+		columnNames = append(columnNames, col)
 	}
-	whereParts := make([]string, 0, len(key))
-	args := make([]any, 0, len(key))
+
+	whereParts := make([]string, 0, len(foreignKey))
+	args := make([]any, 0, len(foreignKey))
 	placeholderPos := 1
-	for col := range key {
+	for col := range foreignKey {
 		whereParts = append(whereParts, fmt.Sprintf("%s = %s", quoteIdent(table.DBType, col), table.placeholder(placeholderPos)))
-		args = append(args, key[col])
+		args = append(args, foreignKey[col])
 		placeholderPos++
 	}
-	quotedColumns := make([]string, len(columns))
-	for i, col := range columns {
+	quotedColumns := make([]string, len(columnNames))
+	for i, col := range columnNames {
 		quotedColumns[i] = quoteIdent(table.DBType, col)
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", strings.Join(quotedColumns, ", "), quoteQualified(table.DBType, table.Name), strings.Join(whereParts, " AND "))
 	row := db.QueryRow(query, args...)
-	values := make([]any, len(columns))
+	values := make([]any, len(columnNames))
 	// scan into pointers
 	scanArgs := make([]any, len(values))
 	for i := range values {
@@ -203,8 +195,8 @@ func GetForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []st
 	if err := row.Scan(scanArgs...); err != nil {
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
-	result := make(map[string]any, len(columns))
-	for i, col := range columns {
+	result := make(map[string]any, len(columnNames))
+	for i, col := range columnNames {
 		result[col] = *scanArgs[i].(*any)
 	}
 	return result, nil
