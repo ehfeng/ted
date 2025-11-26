@@ -35,13 +35,12 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "ted [database] [table|view]",
-	Short: "ted is a tabular editor for databases",
-	Long: `ted is a spreadsheet-like editor for database tables and views, allowing for easy viewing and editing of table and view data.
+	Short: "A tabular editor for SQL databases",
+	Long: `ted is a spreadsheet-like editor for SQL databases, with support for PostgreSQL, MySQL, and SQLite.
 
 Examples:
   ted mydb.sqlite users
-  ted --pg mydb users
-  ted mydb.sqlite my_view`,
+  ted --pg mydb users_view`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		// Allow 0 args if using --crash-reporting or --completion flags
 		if crashReporting != "" || completion != "" {
