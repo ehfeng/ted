@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 
 	"ted/internal/dblib"
@@ -181,17 +180,17 @@ func (e *Editor) executeFind(findValue string) {
 
 	// Get current row's key values
 	currentKeys := make([]any, len(e.relation.Key))
-	for i := range e.relation.Key {
-		currentKeys[i] = e.buffer[row].data[i]
+	for i, keyIdx := range e.relation.Key {
+		if keyIdx < len(e.buffer[row].data) {
+			currentKeys[i] = e.buffer[row].data[keyIdx]
+		}
 	}
 
-	// Find the column index in relation.attributeOrder
+	// Find the column index in relation.Columns
 	findCol := -1
-	for i, name := range e.relation.AttributeOrder {
-		if name == e.columns[col].Name {
-			findCol = i
-			break
-		}
+	colName := e.columns[col].Name
+	if colIdx, ok := e.relation.ColumnIndex[colName]; ok {
+		findCol = colIdx
 	}
 
 	if findCol == -1 {
@@ -221,8 +220,12 @@ func (e *Editor) executeFind(findValue string) {
 		}
 		// Compare key values
 		match := true
-		for j := range e.relation.Key {
-			if e.buffer[i].data[j] != foundKeys[j] {
+		for j, keyIdx := range e.relation.Key {
+			if keyIdx >= len(e.buffer[i].data) || keyIdx >= len(foundKeys) {
+				match = false
+				break
+			}
+			if e.buffer[i].data[keyIdx] != foundKeys[j] {
 				match = false
 				break
 			}
@@ -257,7 +260,7 @@ func (e *Editor) executeFind(findValue string) {
 	}
 }
 
-// selectTableFromPicker handles selecting a table from the picker
+// selectTableFromPicker handles selecting a table or view from the picker
 func (e *Editor) selectTableFromPicker(tableName string) {
 	fmt.Fprintf(os.Stderr, "[DEBUG] selectTableFromPicker: %s\n", tableName)
 	e.pages.HidePage(pagePicker)
@@ -265,11 +268,17 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	e.setCursorStyle(0)         // Reset to default cursor style
 	fmt.Fprintf(os.Stderr, "[DEBUG] Picker closed\n")
 
-	// Reload the table data using the current database connection
+	// Reload the relation (table or view) data using the current database connection
 	relation, err := dblib.NewRelation(e.db, e.dbType, tableName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating relation: %v\n", err)
 		e.SetStatusErrorWithSentry(err)
+		return
+	}
+
+	// Check if relation is keyable (has keys) - required for viewing
+	if len(relation.Key) == 0 {
+		e.SetStatusError(fmt.Sprintf("Relation %s has no keyable columns and cannot be viewed", tableName))
 		return
 	}
 
@@ -279,13 +288,17 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 
 	// Reset columns
 	fmt.Fprintf(os.Stderr, "[DEBUG] Resetting columns\n")
-	e.columns = make([]dblib.Column, 0, len(e.relation.AttributeOrder))
-	for _, name := range e.relation.Key {
-		e.columns = append(e.columns, dblib.Column{Name: name, Width: 4})
+	e.columns = make([]dblib.DisplayColumn, 0, len(e.relation.Columns))
+	keyColNames := make(map[string]bool)
+	for _, keyIdx := range e.relation.Key {
+		if keyIdx < len(e.relation.Columns) {
+			keyColNames[e.relation.Columns[keyIdx].Name] = true
+			e.columns = append(e.columns, dblib.DisplayColumn{Name: e.relation.Columns[keyIdx].Name, Width: 4})
+		}
 	}
-	for _, name := range e.relation.AttributeOrder {
-		if !slices.Contains(e.relation.Key, name) {
-			e.columns = append(e.columns, dblib.Column{Name: name, Width: 8})
+	for _, col := range e.relation.Columns {
+		if !keyColNames[col.Name] {
+			e.columns = append(e.columns, dblib.DisplayColumn{Name: col.Name, Width: 8})
 		}
 	}
 

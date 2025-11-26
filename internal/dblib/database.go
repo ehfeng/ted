@@ -6,6 +6,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	_ "github.com/pingcap/tidb/parser/test_driver"
 )
 
 // getShortestLookupKey returns the best lookup key for a table by considering
@@ -59,104 +63,687 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		return nil, fmt.Errorf("failed to load table schema: %w", err)
 	}
 
+	// First check if it's a view or table
+	isView, err := checkIsView(db, dbType, tableName)
+	if err != nil {
+		return wrapErr(fmt.Errorf("failed to check if relation is view: %w", err))
+	}
 	relation := &Relation{
-		DB:             db,
-		DBType:         dbType,
-		Name:           tableName,
-		Attributes:     make(map[string]Attribute),
-		AttributeIndex: make(map[string]int),
-		References:     []Reference{},
+		DB:          db,
+		DBType:      dbType,
+		Name:        tableName,
+		IsView:      isView,
+		Tables:      make(map[string]*Table),
+		Columns:     []Column{},
+		ColumnIndex: make(map[string]int),
+		References:  []Reference{},
 	}
 
 	var (
-		attributes     map[string]Attribute
-		attributeOrder []string
-		attributeIndex map[string]int
+		columns        []Column
+		columnIndex    map[string]int
 		primaryKeyCols []string
-		err            error
+		err2           error
 	)
 
-	// Load attributes based on database type
-	switch dbType {
-	case SQLite:
-		attributes, attributeOrder, attributeIndex, primaryKeyCols, err = loadAttributesSQLite(db, tableName)
-		if err != nil {
-			return wrapErr(err)
+	if isView {
+		// Load view columns and metadata
+		os.Stderr.WriteString(fmt.Sprintf("loading view columns for %s\n", tableName))
+		columns, columnIndex, err2 = loadViewColumns(db, dbType, tableName)
+		if err2 != nil {
+			return wrapErr(err2)
 		}
-	case PostgreSQL:
-		attributes, attributeOrder, attributeIndex, err = loadAttributesPostgreSQL(db, tableName)
-		if err != nil {
-			return wrapErr(err)
+		os.Stderr.WriteString(fmt.Sprintf("columns: %+v\n", columns))
+		os.Stderr.WriteString(fmt.Sprintf("columnIndex: %+v\n", columnIndex))
+		relation.Columns = columns
+		relation.ColumnIndex = columnIndex
+
+		// Identify view keys
+		viewKeys, err2 := getViewKeys(db, dbType, tableName, relation)
+		if err2 != nil {
+			return wrapErr(fmt.Errorf("failed to identify view keys: %w", err2))
 		}
-	case MySQL:
-		attributes, attributeOrder, attributeIndex, err = loadAttributesMySQL(db, tableName)
-		if err != nil {
-			return wrapErr(err)
+		if len(viewKeys) == 0 {
+			return wrapErr(fmt.Errorf("view has no keyable columns"))
 		}
-	default:
-		return wrapErr(fmt.Errorf("unsupported database type: %v", dbType))
-	}
+		relation.Key = viewKeys
+	} else {
+		// Load table columns based on database type
+		switch dbType {
+		case SQLite:
+			columns, columnIndex, primaryKeyCols, err2 = loadColumnsSQLite(db, tableName)
+			if err2 != nil {
+				return wrapErr(err2)
+			}
+		case PostgreSQL:
+			columns, columnIndex, err2 = loadColumnsPostgreSQL(db, tableName)
+			if err2 != nil {
+				return wrapErr(err2)
+			}
+		case MySQL:
+			columns, columnIndex, err2 = loadColumnsMySQL(db, tableName)
+			if err2 != nil {
+				return wrapErr(err2)
+			}
+		default:
+			return wrapErr(fmt.Errorf("unsupported database type: %v", dbType))
+		}
 
-	relation.Attributes = attributes
-	relation.AttributeOrder = attributeOrder
-	relation.AttributeIndex = attributeIndex
+		relation.Columns = columns
+		relation.ColumnIndex = columnIndex
 
-	// Consolidated lookup key selection: choose shortest lookup key
-	lookupCols, err := getShortestLookupKey(db, dbType, relation.Name)
-	if err != nil {
-		return wrapErr(err)
-	}
-	if dbType == SQLite && len(lookupCols) == 0 {
-		// For SQLite, use the primary key columns if no unique constraints found
-		lookupCols = primaryKeyCols
-	}
+		// Consolidated lookup key selection: choose shortest lookup key
+		lookupCols, err2 := getShortestLookupKey(db, dbType, relation.Name)
+		if err2 != nil {
+			return wrapErr(err2)
+		}
+		if dbType == SQLite && len(lookupCols) == 0 {
+			// For SQLite, use the primary key columns if no unique constraints found
+			lookupCols = primaryKeyCols
+		}
 
-	// TODO if lookup key not found, use databaseFeature.systemId if available
+		// TODO if lookup key not found, use databaseFeature.systemId if available
 
-	// If not nullable unique constraint is found, error
-	if len(lookupCols) == 0 {
-		return wrapErr(fmt.Errorf("no primary key found"))
+		// If not nullable unique constraint is found, error
+		if len(lookupCols) == 0 {
+			return wrapErr(fmt.Errorf("no primary key found"))
+		}
+
+		// Convert key column names to indices
+		relation.Key = make([]int, 0, len(lookupCols))
+		for _, keyCol := range lookupCols {
+			if idx, ok := relation.ColumnIndex[keyCol]; ok {
+				relation.Key = append(relation.Key, idx)
+			}
+		}
+
+		if len(relation.Key) == 0 {
+			return wrapErr(fmt.Errorf("key columns not found in column list"))
+		}
 	}
-	relation.Key = make([]string, len(lookupCols))
-	copy(relation.Key, lookupCols)
 
 	// Fetch enum values and custom type information
-	if err := relation.loadEnumAndCustomTypes(); err != nil {
+	if err2 := relation.loadEnumAndCustomTypes(); err2 != nil {
 		// Non-fatal error, just log and continue
-		fmt.Fprintf(os.Stderr, "Warning: failed to load enum/custom types: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to load enum/custom types: %v\n", err2)
 	}
 
 	// Load foreign keys
 	var references []Reference
-	var updatedAttrs map[string]Attribute
+	var updatedColumns []Column
 	switch dbType {
 	case SQLite:
-		references, updatedAttrs, err = loadForeignKeysSQLite(db, dbType, tableName, relation.AttributeIndex, relation.Attributes)
+		references, updatedColumns, err2 = loadForeignKeysSQLite(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
 	case PostgreSQL:
-		references, updatedAttrs, err = loadForeignKeysPostgreSQL(db, dbType, tableName, relation.AttributeIndex, relation.Attributes)
+		references, updatedColumns, err2 = loadForeignKeysPostgreSQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
 	case MySQL:
-		references, updatedAttrs, err = loadForeignKeysMySQL(db, dbType, tableName, relation.AttributeIndex, relation.Attributes)
+		references, updatedColumns, err2 = loadForeignKeysMySQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
 	}
-	if err == nil {
+	if err2 == nil {
 		relation.References = references
-		relation.Attributes = updatedAttrs
+		relation.Columns = updatedColumns
 	}
 
 	return relation, nil
 }
 
+// checkIsView checks if a relation is a view or table
+func checkIsView(db *sql.DB, dbType DatabaseType, relationName string) (bool, error) {
+	switch dbType {
+	case SQLite:
+		var sqlType string
+		err := db.QueryRow("SELECT type FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')", relationName).Scan(&sqlType)
+		if err != nil {
+			return false, err
+		}
+		return sqlType == "view", nil
+	case PostgreSQL:
+		// Extract schema and relation name
+		schema := "public"
+		rel := relationName
+		if dot := strings.IndexByte(rel, '.'); dot != -1 {
+			schema = rel[:dot]
+			rel = rel[dot+1:]
+		}
+		var isView bool
+		err := db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM pg_views 
+				WHERE schemaname = $1 AND viewname = $2
+			)`, schema, rel).Scan(&isView)
+		return isView, err
+	case MySQL:
+		var isView bool
+		err := db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.views 
+				WHERE table_schema = DATABASE() AND table_name = ?
+			)`, relationName).Scan(&isView)
+		return isView, err
+	default:
+		return false, fmt.Errorf("unsupported database type: %v", dbType)
+	}
+}
+
+// loadViewColumns loads columns for a view by parsing its definition
+func loadViewColumns(db *sql.DB, dbType DatabaseType, viewName string) ([]Column, map[string]int, error) {
+	// Get view definition
+	var viewDef string
+	var err error
+	switch dbType {
+	case SQLite:
+		viewDef, err = getViewDefinitionSQLite(db, viewName)
+	case PostgreSQL:
+		viewDef, err = getViewDefinitionPostgreSQL(db, viewName)
+	case MySQL:
+		viewDef, err = getViewDefinitionMySQL(db, viewName)
+	default:
+		return nil, nil, fmt.Errorf("unsupported database type for views: %v", dbType)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get view definition: %w", err)
+	}
+	os.Stderr.WriteString(fmt.Sprintf("viewDef: %s\n", viewDef))
+	// Parse view definition - handle both CREATE VIEW and plain SELECT
+	// Try parsing as SELECT first, if that fails, try to extract SELECT from CREATE VIEW
+	analysis, err := ParseViewDefinition(viewDef, dbType, db)
+	if err != nil {
+		// If it's a CREATE VIEW statement, try to extract the SELECT part
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(viewDef)), "CREATE") {
+			// Parse as CREATE VIEW and extract the SELECT
+			p := parser.New()
+			stmtNodes, _, parseErr := p.Parse(viewDef, "", "")
+			if parseErr == nil && len(stmtNodes) > 0 {
+				if createView, ok := stmtNodes[0].(*ast.CreateViewStmt); ok {
+					if selectStmt, ok := createView.Select.(*ast.SelectStmt); ok {
+						// Create a temporary analysis and parse the SELECT
+						tempAnalysis := &ViewAnalysis{
+							CTEs: make(map[string]*ViewAnalysis),
+						}
+						analysis, err = parseSelectStmt(selectStmt, dbType, tempAnalysis, db, viewDef)
+					}
+				}
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse view definition: %w", err)
+		}
+	}
+	os.Stderr.WriteString(fmt.Sprintf("analysis: %+v\n", analysis))
+
+	// Get actual column names from the view by querying it
+	// Use SELECT * LIMIT 0 to get column metadata without fetching data
+	queryView := fmt.Sprintf("SELECT * FROM %s LIMIT 0", quoteQualified(dbType, viewName))
+	rows, err := db.Query(queryView)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to query view for column names: %w", err)
+	}
+	defer rows.Close()
+
+	columnNames, err := rows.Columns()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get column names from query: %w", err)
+	}
+
+	// Verify we have the same number of columns as in the analysis
+	if len(columnNames) != len(analysis.Columns) {
+		return nil, nil, fmt.Errorf("column count mismatch: analysis has %d columns, query returned %d", len(analysis.Columns), len(columnNames))
+	}
+
+	// Convert analysis to columns, mapping positionally
+	columns := make([]Column, 0, len(analysis.Columns))
+	columnIndex := make(map[string]int)
+
+	for i, lineage := range analysis.Columns {
+		// Use column name from query result (positional mapping)
+		colName := columnNames[i]
+
+		col := Column{
+			Name:       colName,
+			Table:      lineage.SourceTable,
+			BaseColumn: lineage.SourceColumn, // Base column name (empty if derived)
+			Reference:  -1,
+		}
+
+		// Get column type from system tables if passthrough
+		if !lineage.IsDerived && lineage.SourceTable != "" && lineage.SourceColumn != "" {
+			// Try to get type from base table
+			baseRel, err := NewRelation(db, dbType, lineage.SourceTable)
+			if err == nil {
+				if baseColIdx, ok := baseRel.ColumnIndex[lineage.SourceColumn]; ok && baseColIdx < len(baseRel.Columns) {
+					baseCol := baseRel.Columns[baseColIdx]
+					col.Type = baseCol.Type
+					col.Nullable = baseCol.Nullable
+				}
+			}
+		} else {
+			// For derived columns, use a generic type
+			col.Type = "text" // Default for derived columns
+			col.Nullable = true
+		}
+
+		columns = append(columns, col)
+		columnIndex[col.Name] = i
+	}
+
+	return columns, columnIndex, nil
+}
+
+// getViewKeys identifies key columns for a view
+func getViewKeys(db *sql.DB, dbType DatabaseType, viewName string, relation *Relation) ([]int, error) {
+	// Get view definition
+	var viewDef string
+	var err error
+	switch dbType {
+	case SQLite:
+		viewDef, err = getViewDefinitionSQLite(db, viewName)
+	case PostgreSQL:
+		viewDef, err = getViewDefinitionPostgreSQL(db, viewName)
+	case MySQL:
+		viewDef, err = getViewDefinitionMySQL(db, viewName)
+	default:
+		return nil, fmt.Errorf("unsupported database type for views: %v", dbType)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get view definition: %w", err)
+	}
+
+	// Parse view definition - handle both CREATE VIEW and plain SELECT
+	analysis, err := ParseViewDefinition(viewDef, dbType, db)
+	if err != nil {
+		// If it's a CREATE VIEW statement, try to extract the SELECT
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(viewDef)), "CREATE") {
+			p := parser.New()
+			stmtNodes, _, parseErr := p.Parse(viewDef, "", "")
+			if parseErr == nil && len(stmtNodes) > 0 {
+				if createView, ok := stmtNodes[0].(*ast.CreateViewStmt); ok {
+					if selectStmt, ok := createView.Select.(*ast.SelectStmt); ok {
+						// Create a temporary analysis and parse the SELECT
+						tempAnalysis := &ViewAnalysis{
+							CTEs: make(map[string]*ViewAnalysis),
+						}
+						analysis, err = parseSelectStmt(selectStmt, dbType, tempAnalysis, db, viewDef)
+					}
+				}
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse view definition: %w", err)
+		}
+	}
+
+	// Collect base tables and their keys
+	baseTableKeys := make(map[string][]int) // table name -> key column indices in relation
+
+	for _, tableName := range analysis.BaseTables {
+		baseRel, err := NewRelation(db, dbType, tableName)
+		if err != nil {
+			continue // Skip if we can't load the base table
+		}
+
+		// Store the table in relation.Tables
+		table := &Table{
+			Name: tableName,
+			Key:  []int{},
+		}
+
+		// Map base table key columns to view column indices
+		for _, keyIdx := range baseRel.Key {
+			if keyIdx < len(baseRel.Columns) {
+				baseKeyCol := baseRel.Columns[keyIdx]
+				// Find this column in the view
+				for viewColIdx, viewCol := range relation.Columns {
+					if viewCol.Table == tableName && viewCol.BaseColumn == baseKeyCol.Name {
+						table.Key = append(table.Key, viewColIdx)
+						break
+					}
+				}
+			}
+		}
+
+		relation.Tables[tableName] = table
+		baseTableKeys[tableName] = table.Key
+	}
+
+	// Determine view keys based on GROUP BY or base table keys
+	var viewKeys []int
+
+	if analysis.HasGroupBy {
+		// If GROUP BY is present, check if it includes base table keys
+		groupByCols := make(map[string]bool)
+		for _, expr := range analysis.GroupByExprs {
+			// Try to match GROUP BY expressions to columns
+			for _, col := range relation.Columns {
+				if expr == col.Name || expr == col.BaseColumn {
+					groupByCols[col.Name] = true
+					break
+				}
+			}
+		}
+
+		// Check if all base table keys are in GROUP BY
+		allKeysInGroupBy := true
+		for _, keyIndices := range baseTableKeys {
+			if len(keyIndices) == 0 {
+				continue
+			}
+			for _, keyIdx := range keyIndices {
+				if keyIdx < len(relation.Columns) {
+					keyCol := relation.Columns[keyIdx]
+					if !groupByCols[keyCol.Name] {
+						allKeysInGroupBy = false
+						break
+					}
+				}
+			}
+			if !allKeysInGroupBy {
+				break
+			}
+		}
+
+		if allKeysInGroupBy {
+			// GROUP BY includes all keys, so use base table keys
+			for _, keyIndices := range baseTableKeys {
+				viewKeys = append(viewKeys, keyIndices...)
+			}
+		} else {
+			// GROUP BY doesn't include all keys, use GROUP BY columns as keys
+			for _, expr := range analysis.GroupByExprs {
+				if colIdx, ok := relation.ColumnIndex[expr]; ok {
+					viewKeys = append(viewKeys, colIdx)
+				}
+			}
+		}
+	} else if analysis.HasDistinct {
+		// SELECT DISTINCT - all columns form the key
+		for i := range relation.Columns {
+			viewKeys = append(viewKeys, i)
+		}
+	} else {
+		// No GROUP BY or DISTINCT - combine all base table keys
+		for _, keyIndices := range baseTableKeys {
+			viewKeys = append(viewKeys, keyIndices...)
+		}
+	}
+
+	// Remove duplicates and sort
+	keyMap := make(map[int]bool)
+	var uniqueKeys []int
+	for _, keyIdx := range viewKeys {
+		if !keyMap[keyIdx] {
+			keyMap[keyIdx] = true
+			uniqueKeys = append(uniqueKeys, keyIdx)
+		}
+	}
+
+	return uniqueKeys, nil
+}
+
+// IsColumnEditable returns true if a column can be edited
+func (r *Relation) IsColumnEditable(colIdx int) bool {
+	if colIdx < 0 || colIdx >= len(r.Columns) {
+		return false
+	}
+
+	// All table columns are editable
+	if !r.IsView {
+		return true
+	}
+
+	col := r.Columns[colIdx]
+
+	// Derived columns are never editable
+	if col.Table == "" {
+		return false
+	}
+
+	// Check if base table key is included in view columns
+	baseTable, ok := r.Tables[col.Table]
+	if !ok {
+		return false
+	}
+
+	// All key columns of the base table must be present in the view
+	for _, keyIdx := range baseTable.Key {
+		if keyIdx >= len(r.Columns) {
+			return false
+		}
+		keyCol := r.Columns[keyIdx]
+		if keyCol.Table != col.Table {
+			return false
+		}
+	}
+
+	return true
+}
+
+// updateViewColumn updates a column in a view by updating the base table
+func (rel *Relation) updateViewColumn(records [][]any, rowIdx int, colName string, newValue string) ([]any, error) {
+	// Find the column
+	colIdx, ok := rel.ColumnIndex[colName]
+	if !ok || colIdx >= len(rel.Columns) {
+		return nil, fmt.Errorf("column %s not found", colName)
+	}
+
+	col := rel.Columns[colIdx]
+
+	// Check if editable
+	if !rel.IsColumnEditable(colIdx) {
+		return nil, fmt.Errorf("column %s is not editable", colName)
+	}
+
+	// Get base table
+	baseTable, ok := rel.Tables[col.Table]
+	if !ok {
+		return nil, fmt.Errorf("base table %s not found", col.Table)
+	}
+
+	// Load base table relation
+	baseRel, err := NewRelation(rel.DB, rel.DBType, col.Table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load base table: %w", err)
+	}
+
+	// Build key values for base table from view row
+	baseKeyValues := make([]any, len(baseTable.Key))
+	for i, viewKeyIdx := range baseTable.Key {
+		if viewKeyIdx < len(records[rowIdx]) {
+			baseKeyValues[i] = records[rowIdx][viewKeyIdx]
+		}
+	}
+
+	// Find base table column name
+	baseColName := col.BaseColumn
+	if baseColName == "" {
+		baseColName = colName
+	}
+
+	// Update base table using base table's UpdateDBValue
+	// We need to find the row in the base table using the key values
+	// For now, use a direct UPDATE query
+	whereParts := make([]string, 0, len(baseRel.Key))
+	whereParams := make([]any, 0, len(baseRel.Key))
+	for i, keyIdx := range baseRel.Key {
+		if keyIdx < len(baseRel.Columns) {
+			keyCol := baseRel.Columns[keyIdx]
+			whereParts = append(whereParts, fmt.Sprintf("%s = ?", quoteIdent(rel.DBType, keyCol.Name)))
+			whereParams = append(whereParams, baseKeyValues[i])
+		}
+	}
+
+	// Convert newValue to appropriate type
+	toDBValue := func(colName, raw string) any {
+		attrType := ""
+		if colIdx, ok := baseRel.ColumnIndex[colName]; ok && colIdx < len(baseRel.Columns) {
+			attrType = strings.ToLower(baseRel.Columns[colIdx].Type)
+		}
+		if raw == NullGlyph {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(raw))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return raw
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return v
+			}
+			return raw
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+				return v
+			}
+			return raw
+		default:
+			return raw
+		}
+	}
+
+	valueArg := toDBValue(baseColName, newValue)
+
+	// Build UPDATE query
+	placeholder := func(i int) string {
+		switch rel.DBType {
+		case PostgreSQL:
+			return fmt.Sprintf("$%d", i)
+		default:
+			return "?"
+		}
+	}
+
+	var setClause string
+	quotedTarget := quoteIdent(rel.DBType, baseColName)
+	if rel.DBType == PostgreSQL {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(1))
+	} else {
+		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(0))
+	}
+
+	returningCols := make([]string, len(baseRel.Columns))
+	for i, col := range baseRel.Columns {
+		returningCols[i] = quoteIdent(rel.DBType, col.Name)
+	}
+	returning := strings.Join(returningCols, ", ")
+
+	quotedTable := quoteQualified(rel.DBType, baseRel.Name)
+	useReturning := databaseFeatures[rel.DBType].returning
+
+	var query string
+	var args []any
+	if rel.DBType == PostgreSQL {
+		args = append(args, valueArg)
+		args = append(args, whereParams...)
+	} else {
+		args = append(args, valueArg)
+		args = append(args, whereParams...)
+	}
+
+	if useReturning {
+		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s",
+			quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+	} else {
+		query = fmt.Sprintf("UPDATE %s SET %s WHERE %s",
+			quotedTable, setClause, strings.Join(whereParts, " AND "))
+	}
+
+	// Execute update
+	if useReturning {
+		rowVals := make([]any, len(returningCols))
+		scanArgs := make([]any, len(returningCols))
+		for i := range rowVals {
+			scanArgs[i] = &rowVals[i]
+		}
+
+		if err := rel.DB.QueryRow(query, args...).Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("update failed: %w", err)
+		}
+
+		// Map base table columns back to view columns
+		viewRow := make([]any, len(rel.Columns))
+		for i, viewCol := range rel.Columns {
+			if viewCol.Table == col.Table && viewCol.BaseColumn != "" {
+				// Find in base table result
+				if baseColIdx, ok := baseRel.ColumnIndex[viewCol.BaseColumn]; ok && baseColIdx < len(rowVals) {
+					viewRow[i] = rowVals[baseColIdx]
+				}
+			} else if i < len(records[rowIdx]) {
+				// Keep existing value for non-updated columns
+				viewRow[i] = records[rowIdx][i]
+			}
+		}
+
+		return viewRow, nil
+	}
+
+	// For databases without RETURNING, use transaction
+	tx, err := rel.DB.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx failed: %w", err)
+	}
+
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("update failed: %w", err)
+	}
+	if ra, _ := res.RowsAffected(); ra == 0 {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("no rows updated")
+	}
+
+	// Re-select the updated row
+	selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s", returning, quotedTable, strings.Join(whereParts, " AND "))
+	row := tx.QueryRow(selQuery, whereParams...)
+	rowVals := make([]any, len(returningCols))
+	scanArgs := make([]any, len(rowVals))
+	for i := range rowVals {
+		scanArgs[i] = &rowVals[i]
+	}
+	if err := row.Scan(scanArgs...); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("scan failed: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit failed: %w", err)
+	}
+
+	// Map base table columns back to view columns
+	viewRow := make([]any, len(rel.Columns))
+	for i, viewCol := range rel.Columns {
+		if viewCol.Table == col.Table && viewCol.BaseColumn != "" {
+			// Find in base table result
+			if baseColIdx, ok := baseRel.ColumnIndex[viewCol.BaseColumn]; ok && baseColIdx < len(rowVals) {
+				viewRow[i] = rowVals[baseColIdx]
+			}
+		} else if i < len(records[rowIdx]) {
+			// Keep existing value for non-updated columns
+			viewRow[i] = records[rowIdx][i]
+		}
+	}
+
+	return viewRow, nil
+}
+
 // loadEnumAndCustomTypes fetches enum values and custom type information for columns
 func (rel *Relation) loadEnumAndCustomTypes() error {
-	var updatedAttrs map[string]Attribute
+	var updatedColumns []Column
 	var err error
 
 	switch rel.DBType {
 	case MySQL:
-		updatedAttrs, err = loadEnumAndCustomTypesMySQL(rel.DB, rel.Name, rel.Attributes)
+		updatedColumns, err = loadEnumAndCustomTypesMySQL(rel.DB, rel.Name, rel.Columns)
 	case PostgreSQL:
-		updatedAttrs, err = loadEnumAndCustomTypesPostgreSQL(rel.DB, rel.Name, rel.Attributes)
+		updatedColumns, err = loadEnumAndCustomTypesPostgreSQL(rel.DB, rel.Name, rel.Columns)
 	case SQLite:
-		updatedAttrs, err = loadEnumAndCustomTypesSQLite(rel.DB, rel.Name, rel.Attributes)
+		updatedColumns, err = loadEnumAndCustomTypesSQLite(rel.DB, rel.Name, rel.Columns)
 	default:
 		return nil
 	}
@@ -165,7 +752,7 @@ func (rel *Relation) loadEnumAndCustomTypes() error {
 		return err
 	}
 
-	rel.Attributes = updatedAttrs
+	rel.Columns = updatedColumns
 	return nil
 }
 
@@ -216,7 +803,7 @@ func (rel *Relation) formatLiteral(val any, attrType string) string {
 
 // BuildInsertPreview constructs a SQL INSERT statement as a string with literal
 // values inlined for preview purposes. Intended only for UI preview.
-func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) string {
+func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []DisplayColumn) string {
 
 	// Check if all values are nil/empty
 	hasNonNullValue := false
@@ -236,11 +823,15 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) st
 	var cols []string
 	var vals []string
 	for i, column := range columns {
-		attr := rel.Attributes[column.Name]
+		colIdx, ok := rel.ColumnIndex[column.Name]
+		if !ok || colIdx >= len(rel.Columns) {
+			continue
+		}
+		col := rel.Columns[colIdx]
 		// nil means no update
 		if newRecordRow[i] != EmptyCellValue {
 			cols = append(cols, quoteIdent(rel.DBType, column.Name))
-			vals = append(vals, rel.formatLiteral(newRecordRow[i], attr.Type))
+			vals = append(vals, rel.formatLiteral(newRecordRow[i], col.Type))
 		}
 	}
 
@@ -251,9 +842,9 @@ func (rel *Relation) BuildInsertPreview(newRecordRow []any, columns []Column) st
 	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	useReturning := databaseFeatures[rel.DBType].returning
 
-	returningCols := make([]string, len(rel.AttributeOrder))
-	for i, name := range rel.AttributeOrder {
-		returningCols[i] = quoteIdent(rel.DBType, name)
+	returningCols := make([]string, len(rel.Columns))
+	for i, col := range rel.Columns {
+		returningCols[i] = quoteIdent(rel.DBType, col.Name)
 	}
 	returning := strings.Join(returningCols, ", ")
 
@@ -276,8 +867,8 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 	// Convert raw text to DB-typed value (mirrors UpdateDBValue's toDBValue)
 	toDBValue := func(colName, raw string) any {
 		attrType := ""
-		if attr, ok := rel.Attributes[colName]; ok {
-			attrType = strings.ToLower(attr.Type)
+		if colIdx, ok := rel.ColumnIndex[colName]; ok && colIdx < len(rel.Columns) {
+			attrType = strings.ToLower(rel.Columns[colIdx].Type)
 		}
 		if raw == NullGlyph {
 			return nil
@@ -310,42 +901,45 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 
 	// Where clause with literal values
 	whereParts := make([]string, 0, len(rel.Key))
-	for _, lookupKeyCol := range rel.Key {
-		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
-		idx, ok := rel.AttributeIndex[lookupKeyCol]
-		if !ok || rowIdx >= len(records) {
+	for _, keyIdx := range rel.Key {
+		if keyIdx >= len(rel.Columns) {
+			return ""
+		}
+		keyCol := rel.Columns[keyIdx]
+		qKeyName := quoteIdent(rel.DBType, keyCol.Name)
+		if rowIdx >= len(records) {
 			return ""
 		}
 		row := records[rowIdx]
-		if idx < 0 || idx >= len(row) {
+		if keyIdx < 0 || keyIdx >= len(row) {
 			return ""
 		}
-		attr, ok := rel.Attributes[lookupKeyCol]
-		if !ok {
-			return ""
-		}
-		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, rel.formatLiteral(row[idx], attr.Type)))
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, rel.formatLiteral(row[keyIdx], keyCol.Type)))
 	}
 
 	// SET clause literal
 	targetAttrType := ""
-	if attr, ok := rel.Attributes[colName]; ok {
-		targetAttrType = attr.Type
+	if colIdx, ok := rel.ColumnIndex[colName]; ok && colIdx < len(rel.Columns) {
+		targetAttrType = rel.Columns[colIdx].Type
 	}
 	valueArg := toDBValue(colName, newValue)
 	quotedTarget := quoteIdent(rel.DBType, colName)
 	setClause := fmt.Sprintf("%s = %s", quotedTarget, rel.formatLiteral(valueArg, targetAttrType))
 
-	returningCols := make([]string, len(rel.AttributeOrder))
-	for i, name := range rel.AttributeOrder {
-		returningCols[i] = quoteIdent(rel.DBType, name)
+	returningCols := make([]string, len(rel.Columns))
+	for i, col := range rel.Columns {
+		returningCols[i] = quoteIdent(rel.DBType, col.Name)
 	}
 	if len(rel.Key) == 1 {
-		if rel.Key[0] == "rowid" {
-			returningCols = append(returningCols, "rowid")
-		}
-		if rel.Key[0] == "ctid" {
-			returningCols = append(returningCols, "ctid")
+		keyIdx := rel.Key[0]
+		if keyIdx < len(rel.Columns) {
+			keyCol := rel.Columns[keyIdx]
+			if keyCol.Name == "rowid" {
+				returningCols = append(returningCols, "rowid")
+			}
+			if keyCol.Name == "ctid" {
+				returningCols = append(returningCols, "ctid")
+			}
 		}
 	}
 	returning := strings.Join(returningCols, ", ")
@@ -367,21 +961,20 @@ func (rel *Relation) BuildDeletePreview(records [][]any, rowIdx int) string {
 
 	// Where clause with literal values
 	whereParts := make([]string, 0, len(rel.Key))
-	for _, lookupKeyCol := range rel.Key {
-		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
-		idx, ok := rel.AttributeIndex[lookupKeyCol]
-		if !ok || rowIdx >= len(records) {
+	for _, keyIdx := range rel.Key {
+		if keyIdx >= len(rel.Columns) {
+			return ""
+		}
+		keyCol := rel.Columns[keyIdx]
+		qKeyName := quoteIdent(rel.DBType, keyCol.Name)
+		if rowIdx >= len(records) {
 			return ""
 		}
 		row := records[rowIdx]
-		if idx < 0 || idx >= len(row) {
+		if keyIdx < 0 || keyIdx >= len(row) {
 			return ""
 		}
-		attr, ok := rel.Attributes[lookupKeyCol]
-		if !ok {
-			return ""
-		}
-		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, rel.formatLiteral(row[idx], attr.Type)))
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, rel.formatLiteral(row[keyIdx], keyCol.Type)))
 	}
 
 	quotedTable := quoteQualified(rel.DBType, rel.Name)
@@ -397,18 +990,18 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 	// Build WHERE clause using key columns
 	whereParts := make([]string, 0, len(rel.Key))
 	whereParams := make([]any, 0, len(rel.Key))
-	for _, lookupKeyCol := range rel.Key {
-		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
-		idx, ok := rel.AttributeIndex[lookupKeyCol]
-		if !ok {
-			return fmt.Errorf("key column %s not found in attribute index", lookupKeyCol)
+	for _, keyIdx := range rel.Key {
+		if keyIdx >= len(rel.Columns) {
+			return fmt.Errorf("key column index %d out of range", keyIdx)
 		}
+		keyCol := rel.Columns[keyIdx]
+		qKeyName := quoteIdent(rel.DBType, keyCol.Name)
 		row := records[rowIdx]
-		if idx < 0 || idx >= len(row) {
-			return fmt.Errorf("key column %s index out of range", lookupKeyCol)
+		if keyIdx < 0 || keyIdx >= len(row) {
+			return fmt.Errorf("key column %s index out of range", keyCol.Name)
 		}
 		whereParts = append(whereParts, fmt.Sprintf("%s = ?", qKeyName))
-		whereParams = append(whereParams, row[idx])
+		whereParams = append(whereParams, row[keyIdx])
 	}
 
 	quotedTable := quoteQualified(rel.DBType, rel.Name)
@@ -432,18 +1025,18 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 }
 
 // InsertDBRecord inserts a new record into the database. It returns the inserted
-// row values ordered by relation.AttributeOrder. The newRecordRow should contain
+// row values ordered by relation.Columns. The newRecordRow should contain
 // values for all columns (or nil/NullGlyph for NULL values).
 func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
-	if len(newRecordRow) != len(rel.AttributeOrder) {
-		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.AttributeOrder), len(newRecordRow))
+	if len(newRecordRow) != len(rel.Columns) {
+		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.Columns), len(newRecordRow))
 	}
 
 	// Convert string values to appropriate DB values
-	toDBValue := func(colName, raw string) any {
+	toDBValue := func(colIdx int, raw string) any {
 		attrType := ""
-		if attr, ok := rel.Attributes[colName]; ok {
-			attrType = strings.ToLower(attr.Type)
+		if colIdx < len(rel.Columns) {
+			attrType = strings.ToLower(rel.Columns[colIdx].Type)
 		}
 		if raw == NullGlyph || raw == "" {
 			return nil
@@ -490,18 +1083,13 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 	var args []any
 	paramPos := 1
 
-	for i, attrName := range rel.AttributeOrder {
-		attr, ok := rel.Attributes[attrName]
-		if !ok {
-			continue
-		}
-
+	for i, col := range rel.Columns {
 		val := newRecordRow[i]
 
 		// Convert to DB value
 		var dbVal any
 		if strVal, ok := val.(string); ok {
-			dbVal = toDBValue(attrName, strVal)
+			dbVal = toDBValue(i, strVal)
 		} else {
 			dbVal = val
 		}
@@ -509,23 +1097,23 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 		// Skip NULL/empty values ONLY if column is nullable AND has a default
 		// For now, we include all NOT NULL columns even if nil (let DB handle constraint violations)
 		// We skip nullable columns with nil values (let DB use defaults)
-		if (dbVal == nil || dbVal == "" || dbVal == NullGlyph) && attr.Nullable {
+		if (dbVal == nil || dbVal == "" || dbVal == NullGlyph) && col.Nullable {
 			continue
 		}
 
 		if dbVal == EmptyCellValue {
 			continue
 		}
-		cols = append(cols, quoteIdent(rel.DBType, attrName))
+		cols = append(cols, quoteIdent(rel.DBType, col.Name))
 		placeholders = append(placeholders, placeholder(paramPos))
 		args = append(args, dbVal)
 		paramPos++
 	}
 
 	// Build RETURNING clause
-	returningCols := make([]string, len(rel.AttributeOrder))
-	for i, name := range rel.AttributeOrder {
-		returningCols[i] = quoteIdent(rel.DBType, name)
+	returningCols := make([]string, len(rel.Columns))
+	for i, col := range rel.Columns {
+		returningCols[i] = quoteIdent(rel.DBType, col.Name)
 	}
 	returning := strings.Join(returningCols, ", ")
 
@@ -570,8 +1158,13 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 		lastID, err := result.LastInsertId()
 		if err == nil && lastID > 0 && len(rel.Key) == 1 {
 			// Select the inserted row by last insert ID
+			keyIdx := rel.Key[0]
+			if keyIdx >= len(rel.Columns) {
+				return nil, fmt.Errorf("key column index out of range")
+			}
+			keyColName := rel.Columns[keyIdx].Name
 			selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
-				returning, quotedTable, quoteIdent(rel.DBType, rel.Key[0]), placeholder(1))
+				returning, quotedTable, quoteIdent(rel.DBType, keyColName), placeholder(1))
 			row := tx.QueryRow(selQuery, lastID)
 
 			rowVals := make([]any, len(returningCols))
@@ -634,8 +1227,13 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 	lastID, err := result.LastInsertId()
 	if err == nil && lastID > 0 && len(rel.Key) == 1 {
 		// Select the inserted row by last insert ID
+		keyIdx := rel.Key[0]
+		if keyIdx >= len(rel.Columns) {
+			return nil, fmt.Errorf("key column index out of range")
+		}
+		keyColName := rel.Columns[keyIdx].Name
 		selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
-			returning, quotedTable, quoteIdent(rel.DBType, rel.Key[0]), placeholder(1))
+			returning, quotedTable, quoteIdent(rel.DBType, keyColName), placeholder(1))
 		row := tx.QueryRow(selQuery, lastID)
 
 		rowVals := make([]any, len(returningCols))
@@ -664,8 +1262,9 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 
 // UpdateDBValue updates a single cell in the underlying database using the
 // relation's lookup key columns to identify the row. It returns the refreshed
-// row values ordered by relation.AttributeOrder. If no row is updated, returns
+// row values ordered by relation.Columns. If no row is updated, returns
 // an error.
+// For views, this updates the base table column.
 func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, newValue string) ([]any, error) {
 	if rowIdx < 0 || rowIdx >= len(records) {
 		return nil, fmt.Errorf("index out of range")
@@ -674,12 +1273,16 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 		return nil, fmt.Errorf("no lookup key configured")
 	}
 
+	// For views, update the base table instead
+	if rel.IsView {
+		return rel.updateViewColumn(records, rowIdx, colName, newValue)
+	}
 
 	// Convert string to appropriate DB value
 	toDBValue := func(colName, raw string) any {
 		attrType := ""
-		if attr, ok := rel.Attributes[colName]; ok {
-			attrType = strings.ToLower(attr.Type)
+		if colIdx, ok := rel.ColumnIndex[colName]; ok && colIdx < len(rel.Columns) {
+			attrType = strings.ToLower(rel.Columns[colIdx].Type)
 		}
 		if raw == NullGlyph {
 			return nil
@@ -724,9 +1327,12 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 	valueArg := toDBValue(colName, newValue)
 	keyArgs := make([]any, 0, len(rel.Key))
 	whereParts := make([]string, 0, len(rel.Key))
-	for i := range rel.Key {
-		lookupKeyCol := rel.Key[i]
-		qKeyName := quoteIdent(rel.DBType, lookupKeyCol)
+	for i, keyIdx := range rel.Key {
+		if keyIdx >= len(rel.Columns) {
+			return nil, fmt.Errorf("key column index %d out of range", keyIdx)
+		}
+		keyCol := rel.Columns[keyIdx]
+		qKeyName := quoteIdent(rel.DBType, keyCol.Name)
 		var ph string
 		if rel.DBType == PostgreSQL {
 			ph = placeholder(2 + i)
@@ -734,17 +1340,16 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 			ph = placeholder(0)
 		}
 		whereParts = append(whereParts, fmt.Sprintf("%s = %s", qKeyName, ph))
-		colIdx, ok := rel.AttributeIndex[lookupKeyCol]
-		if !ok || rowIdx >= len(records) {
-			err := fmt.Errorf("lookup key column %s not found in records", lookupKeyCol)
+		if rowIdx >= len(records) {
+			err := fmt.Errorf("lookup key column %s not found in records", keyCol.Name)
 			return nil, err
 		}
 		row := records[rowIdx]
-		if colIdx < 0 || colIdx >= len(row) {
-			err := fmt.Errorf("lookup key column %s not loaded", lookupKeyCol)
+		if keyIdx < 0 || keyIdx >= len(row) {
+			err := fmt.Errorf("lookup key column %s not loaded", keyCol.Name)
 			return nil, err
 		}
-		keyArgs = append(keyArgs, row[colIdx])
+		keyArgs = append(keyArgs, row[keyIdx])
 	}
 
 	// SET clause placeholder
@@ -756,17 +1361,21 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 		setClause = fmt.Sprintf("%s = %s", quotedTarget, placeholder(0))
 	}
 
-	returningCols := make([]string, len(rel.AttributeOrder))
-	for i, name := range rel.AttributeOrder {
-		returningCols[i] = quoteIdent(rel.DBType, name)
+	returningCols := make([]string, len(rel.Columns))
+	for i, col := range rel.Columns {
+		returningCols[i] = quoteIdent(rel.DBType, col.Name)
 	}
 
 	if len(rel.Key) == 1 {
-		if rel.Key[0] == "rowid" {
-			returningCols = append(returningCols, "rowid")
-		}
-		if rel.Key[0] == "ctid" {
-			returningCols = append(returningCols, "ctid")
+		keyIdx := rel.Key[0]
+		if keyIdx < len(rel.Columns) {
+			keyCol := rel.Columns[keyIdx]
+			if keyCol.Name == "rowid" {
+				returningCols = append(returningCols, "rowid")
+			}
+			if keyCol.Name == "ctid" {
+				returningCols = append(returningCols, "ctid")
+			}
 		}
 	}
 	returning := strings.Join(returningCols, ", ")
@@ -842,7 +1451,14 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
 func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
-	query, err := selectQuery(rel.DBType, rel.Name, columns, sortCol, rel.Key, len(params) > 0, inclusive, scrollDown)
+	// Convert key indices to column names
+	keyColNames := make([]string, len(rel.Key))
+	for i, keyIdx := range rel.Key {
+		if keyIdx < len(rel.Columns) {
+			keyColNames[i] = rel.Columns[keyIdx].Name
+		}
+	}
+	query, err := selectQuery(rel.DBType, rel.Name, columns, sortCol, keyColNames, len(params) > 0, inclusive, scrollDown)
 	if err != nil {
 		return nil, err
 	}
@@ -864,21 +1480,23 @@ func (rel *Relation) placeholder(pos int) string {
 // It searches below the current selection first, then wraps around to search from the top.
 // Returns: (keys of found row, true if found below/false if wrapped, error)
 func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColumn, sortColVal any, currentKeys []any) ([]any, bool, error) {
-	if findCol < 0 || findCol >= len(rel.AttributeOrder) {
+	if findCol < 0 || findCol >= len(rel.Columns) {
 		return nil, false, fmt.Errorf("findCol index out of range")
 	}
 	if len(currentKeys) != len(rel.Key) {
 		return nil, false, fmt.Errorf("currentKeys length mismatch: expected %d, got %d", len(rel.Key), len(currentKeys))
 	}
 
-	searchColName := rel.AttributeOrder[findCol]
+	searchColName := rel.Columns[findCol].Name
 	quotedSearchCol := quoteIdent(rel.DBType, searchColName)
 	quotedTable := quoteQualified(rel.DBType, rel.Name)
 
 	// Build key column list for SELECT
 	keyCols := make([]string, len(rel.Key))
-	for i, k := range rel.Key {
-		keyCols[i] = quoteIdent(rel.DBType, k)
+	for i, keyIdx := range rel.Key {
+		if keyIdx < len(rel.Columns) {
+			keyCols[i] = quoteIdent(rel.DBType, rel.Columns[keyIdx].Name)
+		}
 	}
 	selectClause := strings.Join(keyCols, ", ")
 
@@ -889,8 +1507,12 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 		var parts []string
 		var args []any
 		lastIdx := len(rel.Key) - 1
-		for i, keyCol := range rel.Key {
-			quoted := quoteIdent(rel.DBType, keyCol)
+		for i, keyIdx := range rel.Key {
+			if keyIdx >= len(rel.Columns) {
+				continue
+			}
+			keyColName := rel.Columns[keyIdx].Name
+			quoted := quoteIdent(rel.DBType, keyColName)
 			var cmp string
 			if i < lastIdx {
 				cmp = op + "="
@@ -936,8 +1558,10 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" DESC")
 		}
 	}
-	for _, k := range rel.Key {
-		orderParts = append(orderParts, quoteIdent(rel.DBType, k)+" ASC")
+	for _, keyIdx := range rel.Key {
+		if keyIdx < len(rel.Columns) {
+			orderParts = append(orderParts, quoteIdent(rel.DBType, rel.Columns[keyIdx].Name)+" ASC")
+		}
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT 1",
@@ -990,8 +1614,10 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 			orderParts = append(orderParts, quoteIdent(rel.DBType, sortCol.Name)+" ASC")
 		}
 	}
-	for _, k := range rel.Key {
-		orderParts = append(orderParts, quoteIdent(rel.DBType, k)+" DESC")
+	for _, keyIdx := range rel.Key {
+		if keyIdx < len(rel.Columns) {
+			orderParts = append(orderParts, quoteIdent(rel.DBType, rel.Columns[keyIdx].Name)+" DESC")
+		}
 	}
 
 	query = fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT 1",

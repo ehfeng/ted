@@ -40,11 +40,15 @@ func (e *Editor) renderData() {
 
 // extractKeys returns a copy of the key values from a row
 func (e *Editor) extractKeys(row []any) []any {
-	if row == nil || len(row) < len(e.relation.Key) {
+	if row == nil || len(e.relation.Key) == 0 {
 		return nil
 	}
 	keys := make([]any, len(e.relation.Key))
-	copy(keys, row[0:len(e.relation.Key)])
+	for i, keyIdx := range e.relation.Key {
+		if keyIdx < len(row) {
+			keys[i] = row[keyIdx]
+		}
+	}
 	return keys
 }
 
@@ -165,6 +169,14 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 		return nil, fmt.Errorf("no primary key defined for relation")
 	}
 
+	// Get key column names
+	keyColNames := make([]string, len(e.relation.Key))
+	for i, keyIdx := range e.relation.Key {
+		if keyIdx < len(e.relation.Columns) {
+			keyColNames[i] = e.relation.Columns[keyIdx].Name
+		}
+	}
+
 	// For single-column keys, we can use a simple IN clause
 	// For multi-column keys, we need to use OR conditions
 	var query string
@@ -172,8 +184,9 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 
 	if keyColCount == 1 {
 		// Simple case: single column key
+		keyColName := keyColNames[0]
 		query = fmt.Sprintf("SELECT %s FROM %s WHERE %s IN (",
-			e.relation.Key[0], e.relation.Name, e.relation.Key[0])
+			keyColName, e.relation.Name, keyColName)
 		placeholders := make([]string, len(keys))
 		for i, key := range keys {
 			placeholders[i] = "?"
@@ -183,12 +196,12 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 	} else {
 		// Complex case: multi-column key
 		query = fmt.Sprintf("SELECT %s FROM %s WHERE ",
-			strings.Join(e.relation.Key, ", "), e.relation.Name)
+			strings.Join(keyColNames, ", "), e.relation.Name)
 		conditions := make([]string, len(keys))
 		for i, key := range keys {
 			keyConditions := make([]string, keyColCount)
 			for j := 0; j < keyColCount; j++ {
-				keyConditions[j] = fmt.Sprintf("%s = ?", e.relation.Key[j])
+				keyConditions[j] = fmt.Sprintf("%s = ?", keyColNames[j])
 				args = append(args, key[j])
 			}
 			conditions[i] = fmt.Sprintf("(%s)", strings.Join(keyConditions, " AND "))
@@ -629,8 +642,10 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if e.buffer[lastRecordIdx].data == nil {
 			return false, nil // Can't query from nil record
 		}
-		for i := range e.relation.Key {
-			params[i] = e.buffer[lastRecordIdx].data[i]
+		for i, keyIdx := range e.relation.Key {
+			if keyIdx < len(e.buffer[lastRecordIdx].data) {
+				params[i] = e.buffer[lastRecordIdx].data[keyIdx]
+			}
 		}
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {
@@ -738,8 +753,10 @@ func (e *Editor) prevRows(i int) (bool, error) {
 			return false, nil // Can't query from nil or empty records
 		}
 		params := make([]any, len(e.relation.Key))
-		for i := range e.relation.Key {
-			params[i] = e.buffer[e.pointer].data[i]
+		for i, keyIdx := range e.relation.Key {
+			if keyIdx < len(e.buffer[e.pointer].data) {
+				params[i] = e.buffer[e.pointer].data[keyIdx]
+			}
 		}
 		selectCols := make([]string, len(e.columns))
 		for i, col := range e.columns {

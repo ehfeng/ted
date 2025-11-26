@@ -3,7 +3,6 @@ package dblib
 import (
 	"database/sql"
 	"fmt"
-	"slices"
 	"strings"
 )
 
@@ -168,10 +167,16 @@ var commonReservedIdents = map[string]struct{}{
 func GetForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]any, error) {
 	if len(columns) == 0 {
 		// choose non-key columns
-		columns = make([]string, 0, len(table.AttributeOrder))
-		for _, col := range table.AttributeOrder {
-			if !slices.Contains(table.Key, col) {
-				columns = append(columns, col)
+		keyColNames := make(map[string]bool)
+		for _, keyIdx := range table.Key {
+			if keyIdx < len(table.Columns) {
+				keyColNames[table.Columns[keyIdx].Name] = true
+			}
+		}
+		columns = make([]string, 0, len(table.Columns))
+		for _, col := range table.Columns {
+			if !keyColNames[col.Name] {
+				columns = append(columns, col.Name)
 			}
 		}
 	}

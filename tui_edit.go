@@ -11,6 +11,15 @@ import (
 )
 
 func (e *Editor) enterEditMode(row, col int) {
+	// Check if column is editable (for views)
+	if e.relation != nil && e.relation.IsView {
+		colIdx, ok := e.relation.ColumnIndex[e.columns[col].Name]
+		if !ok || !e.relation.IsColumnEditable(colIdx) {
+			e.SetStatusMessage("Column is not editable")
+			return
+		}
+	}
+
 	var currentValue any
 	if len(e.table.insertRow) > 0 {
 		currentValue = e.table.insertRow[col]
@@ -142,6 +151,15 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 // selectAll=true: select all text (for vim 'i' mode)
 // selectAll=false: cursor at end (for vim 'a' mode)
 func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
+	// Check if column is editable (for views)
+	if e.relation != nil && e.relation.IsView {
+		colIdx, ok := e.relation.ColumnIndex[e.columns[col].Name]
+		if !ok || !e.relation.IsColumnEditable(colIdx) {
+			e.SetStatusMessage("Column is not editable")
+			return
+		}
+	}
+
 	var currentValue any
 	if len(e.table.insertRow) > 0 {
 		currentValue = e.table.insertRow[col]
@@ -598,9 +616,8 @@ func (e *Editor) executeInsert() error {
 
 	// Extract the key values from the inserted row
 	keyVals := make([]any, len(e.relation.Key))
-	for i, keyCol := range e.relation.Key {
-		keyIdx, ok := e.relation.AttributeIndex[keyCol]
-		if !ok || insertedRow == nil {
+	for i, keyIdx := range e.relation.Key {
+		if keyIdx >= len(insertedRow) || insertedRow == nil {
 			// Fallback: load from bottom without specific row
 			e.loadFromRowId(nil, false, 0)
 			e.table.Select(len(e.buffer)-2, 0)
@@ -631,11 +648,7 @@ func (e *Editor) hasKeyOrSortChanged(oldRow, newRow []any, sortCol *dblib.SortCo
 	}
 
 	// Check if any key column values changed
-	for _, keyCol := range e.relation.Key {
-		keyIdx, ok := e.relation.AttributeIndex[keyCol]
-		if !ok {
-			continue
-		}
+	for _, keyIdx := range e.relation.Key {
 		if keyIdx < len(oldRow) && keyIdx < len(newRow) {
 			if oldRow[keyIdx] != newRow[keyIdx] {
 				return true
@@ -645,7 +658,7 @@ func (e *Editor) hasKeyOrSortChanged(oldRow, newRow []any, sortCol *dblib.SortCo
 
 	// Check if sort column value changed (if sorting is applied)
 	if sortCol != nil {
-		sortIdx, ok := e.relation.AttributeIndex[sortCol.Name]
+		sortIdx, ok := e.relation.ColumnIndex[sortCol.Name]
 		if ok && sortIdx < len(oldRow) && sortIdx < len(newRow) {
 			if oldRow[sortIdx] != newRow[sortIdx] {
 				return true
@@ -663,8 +676,8 @@ func (e *Editor) isMultilineColumnType(col int) bool {
 
 	column := e.columns[col]
 	attrType := ""
-	if attr, ok := e.relation.Attributes[column.Name]; ok {
-		attrType = attr.Type
+	if colIdx, ok := e.relation.ColumnIndex[column.Name]; ok && colIdx < len(e.relation.Columns) {
+		attrType = e.relation.Columns[colIdx].Type
 	}
 
 	// Normalize type for consistent matching

@@ -34,20 +34,21 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "ted [database] [table]",
+	Use:   "ted [database] [table|view]",
 	Short: "ted is a tabular editor for databases",
-	Long: `ted is a spreadsheet-like editor for database tables, allowing for easy viewing and editing of table data.
+	Long: `ted is a spreadsheet-like editor for database tables and views, allowing for easy viewing and editing of table and view data.
 
 Examples:
   ted mydb.sqlite users
-  ted --pg mydb users`,
+  ted --pg mydb users
+  ted mydb.sqlite my_view`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		// Allow 0 args if using --crash-reporting or --completion flags
 		if crashReporting != "" || completion != "" {
 			return nil
 		}
 		// Require at least 1 arg (database name)
-		// Table name is now optional - if missing, we'll show a picker
+		// Table/view name is now optional - if missing, we'll show a picker
 		if len(args) < 1 {
 			return fmt.Errorf("missing database name\n\nTip: \x1b[3mted <TAB>\x1b[0m for available databases\n")
 		}
@@ -155,7 +156,7 @@ Examples:
 			VimMode:        useVimMode,
 		}
 
-		// Table name is now optional - the table picker will be shown in the editor if not provided
+		// Table/view name is now optional - the picker will be shown in the editor if not provided
 		if err := runEditor(config, dbname, tablename); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -407,7 +408,7 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 		}
 	} else if len(args) == 1 {
 		if postgres {
-			// Get PostgreSQL tables in current database
+			// Get PostgreSQL tables and views in current database
 			dbname := args[0]
 			dbHost := hostFlag
 			if dbHost == "" {
@@ -427,7 +428,7 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
-			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type IN ('BASE TABLE', 'VIEW')")
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
@@ -444,7 +445,7 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			return results, cobra.ShellCompDirectiveNoFileComp
 		}
 		if mysql {
-			// Get MySQL tables in current database
+			// Get MySQL tables and views in current database
 			dbname := args[0]
 			dbHost := hostFlag
 			if dbHost == "" {
@@ -466,7 +467,7 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
 			defer db.Close()
-			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = ?", dbname)
+			rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW')", dbname)
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
@@ -482,12 +483,12 @@ func completionFunc(cmd *cobra.Command, args []string, toComplete string) ([]str
 			}
 			return results, cobra.ShellCompDirectiveNoFileComp
 		}
-		// get sqlite tables in current database
+		// get sqlite tables and views in current database
 		db, err := sql.Open("sqlite3", args[0])
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		rows, err := db.Query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+		rows, err := db.Query("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'")
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}

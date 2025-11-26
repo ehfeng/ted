@@ -134,64 +134,62 @@ func getShortestLookupKeySQLite(db *sql.DB, tableName string, sizeOf func(string
 	return candidates[0].cols, nil
 }
 
-// loadAttributesSQLite loads column attributes for a SQLite table.
-func loadAttributesSQLite(db *sql.DB, tableName string) (map[string]Attribute, []string, map[string]int, []string, error) {
+// loadColumnsSQLite loads columns for a SQLite table.
+func loadColumnsSQLite(db *sql.DB, tableName string) ([]Column, map[string]int, []string, error) {
 	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
 	rows, err := db.Query(query)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer rows.Close()
 
-	attributes := make(map[string]Attribute)
-	var attributeOrder []string
-	attributeIndex := make(map[string]int)
+	var columns []Column
+	columnIndex := make(map[string]int)
 	var primaryKeyColumns []string
 
 	for rows.Next() {
-		var attr Attribute
-		attr.Reference = -1 // Initialize to -1 (not a foreign key)
+		var col Column
+		col.Reference = -1 // Initialize to -1 (not a foreign key)
 		var nullable string
 		var cid int
 		var dfltValue sql.NullString
 		var pk int
 
-		err = rows.Scan(&cid, &attr.Name, &attr.Type, &nullable, &dfltValue, &pk)
+		err = rows.Scan(&cid, &col.Name, &col.Type, &nullable, &dfltValue, &pk)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, err
 		}
 
-		attr.Nullable = nullable != "1"
+		col.Nullable = nullable != "1"
+		col.Table = tableName     // For tables, Table is the table name itself
+		col.BaseColumn = col.Name // For tables, BaseColumn is the same as Name
 		if pk == 1 {
-			primaryKeyColumns = append(primaryKeyColumns, attr.Name)
+			primaryKeyColumns = append(primaryKeyColumns, col.Name)
 		}
 
-		idx := len(attributeOrder)
-		attributeOrder = append(attributeOrder, attr.Name)
-		attributes[attr.Name] = attr
-		attributeIndex[attr.Name] = idx
+		idx := len(columns)
+		columns = append(columns, col)
+		columnIndex[col.Name] = idx
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return attributes, attributeOrder, attributeIndex, primaryKeyColumns, nil
+	return columns, columnIndex, primaryKeyColumns, nil
 }
 
 // loadForeignKeysSQLite loads foreign key constraints for a SQLite table.
-func loadForeignKeysSQLite(db *sql.DB, dbType DatabaseType, tableName string, attrIndex map[string]int, attributes map[string]Attribute) ([]Reference, map[string]Attribute, error) {
+func loadForeignKeysSQLite(db *sql.DB, dbType DatabaseType, tableName string, columnIndex map[string]int, columns []Column) ([]Reference, []Column, error) {
 	var references []Reference
-	updatedAttrs := make(map[string]Attribute)
-	for k, v := range attributes {
-		updatedAttrs[k] = v
-	}
+	updatedColumns := make([]Column, len(columns))
+	copy(updatedColumns, columns)
 
 	// PRAGMA foreign_key_list returns one row per referencing column
 	// cols: id, seq, table, from, to, on_update, on_delete, match
 	fkRows, err := db.Query(fmt.Sprintf("PRAGMA foreign_key_list(%s)", tableName))
 	if err != nil {
-		return references, updatedAttrs, nil
+		return references, updatedColumns, nil
 	}
 	defer fkRows.Close()
 
@@ -217,14 +215,14 @@ func loadForeignKeysSQLite(db *sql.DB, dbType DatabaseType, tableName string, at
 		byID[id] = append(byID[id], col)
 	}
 
-	// Build references slice and update attributes
+	// Build references slice and update columns
 	for _, cols := range byID {
 		sort.Slice(cols, func(i, j int) bool { return cols[i].seq < cols[j].seq })
 		if len(cols) == 0 {
 			continue
 		}
 		refTableName := cols[0].refTable
-		// Load the foreign table metadata
+		// Load the foreign table metadata to get key column names
 		foreignRel, err := NewRelation(db, dbType, refTableName)
 		if err != nil {
 			// If we can't load the foreign table, skip this reference
@@ -233,28 +231,33 @@ func loadForeignKeysSQLite(db *sql.DB, dbType DatabaseType, tableName string, at
 		}
 		// Create a new Reference entry
 		ref := Reference{
-			ForeignTable:   foreignRel,
-			ForeignColumns: make(map[int]string),
+			Table:   refTableName,
+			Columns: make(map[string]string),
 		}
 		for i, c := range cols {
-			if idx, ok := attrIndex[c.col]; ok {
+			if idx, ok := columnIndex[c.col]; ok {
 				foreignCol := c.toCol
 				// If toCol is empty, it references the foreign table's primary key
-				if foreignCol == "" && i < len(foreignRel.Key) {
-					foreignCol = foreignRel.Key[i]
+				if foreignCol == "" {
+					// Get key column name from foreign relation
+					if i < len(foreignRel.Key) {
+						keyIdx := foreignRel.Key[i]
+						if keyIdx < len(foreignRel.Columns) {
+							foreignCol = foreignRel.Columns[keyIdx].Name
+						}
+					}
 				}
-				ref.ForeignColumns[idx] = foreignCol
-				// Update attribute with reference index
-				if attr, exists := updatedAttrs[c.col]; exists {
-					attr.Reference = len(references)
-					updatedAttrs[c.col] = attr
+				ref.Columns[c.col] = foreignCol
+				// Update column with reference index
+				if idx < len(updatedColumns) {
+					updatedColumns[idx].Reference = len(references)
 				}
 			}
 		}
 		references = append(references, ref)
 	}
 
-	return references, updatedAttrs, nil
+	return references, updatedColumns, nil
 }
 
 // getBestKeySQLite identifies the best key for a SQLite table using PRAGMA commands.
@@ -440,11 +443,37 @@ func getBestKeySQLite(db *sql.DB, tableName string) ([]string, error) {
 }
 
 // loadEnumAndCustomTypesSQLite is a no-op for SQLite (no native ENUM support).
-func loadEnumAndCustomTypesSQLite(db *sql.DB, tableName string, attributes map[string]Attribute) (map[string]Attribute, error) {
+func loadEnumAndCustomTypesSQLite(db *sql.DB, tableName string, columns []Column) ([]Column, error) {
 	// SQLite doesn't have native ENUM support, but we can check for CHECK constraints
 	// that simulate enums. This is a best-effort approach.
 	// For now, we'll skip this as it's complex to parse CHECK constraints reliably
-	return attributes, nil
+	return columns, nil
+}
+
+// getViewDefinitionSQLite retrieves the SQL definition of a view in SQLite
+func getViewDefinitionSQLite(db *sql.DB, viewName string) (string, error) {
+	var sqlDef sql.NullString
+	err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type='view' AND name=?", viewName).Scan(&sqlDef)
+	if err != nil {
+		return "", fmt.Errorf("failed to get view definition: %w", err)
+	}
+	if !sqlDef.Valid {
+		return "", fmt.Errorf("view %s not found", viewName)
+	}
+	// SQLite stores CREATE VIEW ... AS SELECT ..., extract just the SELECT part
+	// Look for " AS" followed by any whitespace (space, tab, newline)
+	def := sqlDef.String
+	upper := strings.ToUpper(def)
+	idx := strings.Index(upper, " AS")
+	if idx != -1 && idx+3 < len(def) {
+		// Check that " AS" is followed by whitespace
+		nextChar := def[idx+3]
+		if nextChar == ' ' || nextChar == '\t' || nextChar == '\n' || nextChar == '\r' {
+			def = def[idx+3:]
+			def = strings.TrimSpace(def)
+		}
+	}
+	return def, nil
 }
 
 // sizeOf estimates the byte width of a database column type.

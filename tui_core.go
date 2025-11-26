@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,7 +43,7 @@ type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
 	table    *TableView
-	columns  []dblib.Column // TODO move this into Config
+	columns  []dblib.DisplayColumn // TODO move this into Config
 	relation *dblib.Relation
 	config   *Config
 	vimMode  bool
@@ -157,30 +156,40 @@ func runEditor(config *Config, dbname, tablename string) error {
 	tableDataHeight := terminalHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
 
 	var relation *dblib.Relation
-	var columns []dblib.Column
+	var columns []dblib.DisplayColumn
 
 	// Only load table if tablename is provided
 	if tablename != "" {
 		var err error
 		relation, err = dblib.NewRelation(db, dbType, tablename)
+		debugLog(fmt.Sprintf("relation: %+v\n", relation))
 		if err != nil {
 			CaptureError(err)
 			return err
 		}
 
-		// force key to be first column(s)
-		columns = make([]dblib.Column, 0, len(relation.AttributeOrder))
-		for _, name := range relation.Key {
-			columns = append(columns, dblib.Column{Name: name, Width: 4})
+		// Check if relation is keyable (has keys)
+		if len(relation.Key) == 0 {
+			return fmt.Errorf("relation %s has no keyable columns and cannot be viewed", tablename)
 		}
-		for _, name := range relation.AttributeOrder {
-			if !slices.Contains(relation.Key, name) {
-				columns = append(columns, dblib.Column{Name: name, Width: DefaultColumnWidth})
+
+		// force key to be first column(s)
+		columns = make([]dblib.DisplayColumn, 0, len(relation.Columns))
+		keyColNames := make(map[string]bool)
+		for _, keyIdx := range relation.Key {
+			if keyIdx < len(relation.Columns) {
+				keyColNames[relation.Columns[keyIdx].Name] = true
+				columns = append(columns, dblib.DisplayColumn{Name: relation.Columns[keyIdx].Name, Width: 4})
+			}
+		}
+		for _, col := range relation.Columns {
+			if !keyColNames[col.Name] {
+				columns = append(columns, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
 			}
 		}
 	} else {
 		// No table specified - create empty state
-		columns = []dblib.Column{}
+		columns = []dblib.DisplayColumn{}
 	}
 
 	// Get available tables for the picker

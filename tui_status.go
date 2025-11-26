@@ -17,7 +17,11 @@ func (e *Editor) updateStatusForEditMode(col int) {
 	}
 
 	colName := e.columns[col].Name
-	attr, ok := e.relation.Attributes[colName]
+	colIdx, ok := e.relation.ColumnIndex[colName]
+	if !ok || colIdx >= len(e.relation.Columns) {
+		return
+	}
+	attr := e.relation.Columns[colIdx]
 	if !ok {
 		e.SetStatusMessage("Editing...")
 		return
@@ -55,7 +59,7 @@ func (e *Editor) updateStatusForEditMode(col int) {
 
 	// Foreign key reference
 	if attr.Reference >= 0 && attr.Reference < len(e.relation.References) {
-		refTable := e.relation.References[attr.Reference].ForeignTable.Name
+		refTable := e.relation.References[attr.Reference].Table
 		parts = append(parts, fmt.Sprintf("→ %s", refTable))
 	}
 
@@ -77,8 +81,12 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 	}
 
 	colName := e.columns[col].Name
-	attr, ok := e.relation.Attributes[colName]
-	if !ok || attr.Reference < 0 || attr.Reference >= len(e.relation.References) {
+	colIdx, ok := e.relation.ColumnIndex[colName]
+	if !ok || colIdx >= len(e.relation.Columns) {
+		return
+	}
+	attr := e.relation.Columns[colIdx]
+	if attr.Reference < 0 || attr.Reference >= len(e.relation.References) {
 		return // Not a foreign key column
 	}
 
@@ -115,19 +123,28 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 
 	ref := e.relation.References[attr.Reference]
 	if newText == "" || newText == dblib.NullGlyph {
-		parts = append(parts, fmt.Sprintf("→ %s", ref.ForeignTable.Name))
+		parts = append(parts, fmt.Sprintf("→ %s", ref.Table))
 	} else {
 		// Foreign key reference with preview
 		foreignKeys := make(map[string]any)
-		for attrIdx, foreignCol := range ref.ForeignColumns {
-			if attrIdx == col {
+		for localCol, foreignCol := range ref.Columns {
+			if localCol == colName {
 				foreignKeys[foreignCol] = newText
 			} else {
-				foreignKeys[foreignCol] = e.buffer[row].data[attrIdx]
+				// Find the local column index
+				if localColIdx, ok := e.relation.ColumnIndex[localCol]; ok && localColIdx < len(e.buffer[row].data) {
+					foreignKeys[foreignCol] = e.buffer[row].data[localColIdx]
+				}
 			}
 		}
+		// Load the foreign relation to pass to GetForeignRow
+		foreignRel, err := dblib.NewRelation(e.relation.DB, e.relation.DBType, ref.Table)
+		if err != nil {
+			e.SetStatusErrorWithSentry(err)
+			return
+		}
 		// TODO pass config columns if available
-		preview, err := dblib.GetForeignRow(e.relation.DB, ref.ForeignTable, foreignKeys, nil)
+		preview, err := dblib.GetForeignRow(e.relation.DB, foreignRel, foreignKeys, nil)
 		if err != nil {
 			e.SetStatusErrorWithSentry(err)
 			return
@@ -140,10 +157,10 @@ func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
 		previewStr = strings.Join(previewStrs, ", ")
 		if preview == nil {
 			parts = append(parts, fmt.Sprintf("[blueviolet]→ %s: not found[black]",
-				ref.ForeignTable.Name))
+				ref.Table))
 		} else {
 			parts = append(parts, fmt.Sprintf("[darkgreen]→ %s: %s[black]",
-				ref.ForeignTable.Name, previewStr))
+				ref.Table, previewStr))
 		}
 	}
 
@@ -455,8 +472,8 @@ func (e *Editor) updateStatusWithCellContent() {
 	colName := e.columns[col].Name
 	var colType string
 	if e.relation != nil {
-		if attr, ok := e.relation.Attributes[colName]; ok {
-			colType = attr.Type
+		if colIdx, ok := e.relation.ColumnIndex[colName]; ok && colIdx < len(e.relation.Columns) {
+			colType = e.relation.Columns[colIdx].Type
 		}
 	}
 
