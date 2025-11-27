@@ -83,15 +83,14 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		columns        []Column
 		columnIndex    map[string]int
 		primaryKeyCols []string
-		err2           error
 	)
 
 	if isView {
 		// Load view columns and metadata
 		os.Stderr.WriteString(fmt.Sprintf("loading view columns for %s\n", tableName))
-		columns, columnIndex, err2 = loadViewColumns(db, dbType, tableName)
-		if err2 != nil {
-			return wrapErr(err2)
+		columns, columnIndex, err = loadViewColumns(db, dbType, tableName)
+		if err != nil {
+			return wrapErr(err)
 		}
 		os.Stderr.WriteString(fmt.Sprintf("columns: %+v\n", columns))
 		os.Stderr.WriteString(fmt.Sprintf("columnIndex: %+v\n", columnIndex))
@@ -99,9 +98,9 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		relation.ColumnIndex = columnIndex
 
 		// Identify view keys
-		viewKeys, err2 := getViewKeys(db, dbType, tableName, relation)
-		if err2 != nil {
-			return wrapErr(fmt.Errorf("failed to identify view keys: %w", err2))
+		viewKeys, err := getViewKeys(db, dbType, tableName, relation)
+		if err != nil {
+			return wrapErr(fmt.Errorf("failed to identify view keys: %w", err))
 		}
 		if len(viewKeys) == 0 {
 			return wrapErr(fmt.Errorf("view has no keyable columns"))
@@ -111,19 +110,19 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		// Load table columns based on database type
 		switch dbType {
 		case SQLite:
-			columns, columnIndex, primaryKeyCols, err2 = loadColumnsSQLite(db, tableName)
-			if err2 != nil {
-				return wrapErr(err2)
+			columns, columnIndex, primaryKeyCols, err = loadColumnsSQLite(db, tableName)
+			if err != nil {
+				return wrapErr(err)
 			}
 		case PostgreSQL:
-			columns, columnIndex, err2 = loadColumnsPostgreSQL(db, tableName)
-			if err2 != nil {
-				return wrapErr(err2)
+			columns, columnIndex, err = loadColumnsPostgreSQL(db, tableName)
+			if err != nil {
+				return wrapErr(err)
 			}
 		case MySQL:
-			columns, columnIndex, err2 = loadColumnsMySQL(db, tableName)
-			if err2 != nil {
-				return wrapErr(err2)
+			columns, columnIndex, err = loadColumnsMySQL(db, tableName)
+			if err != nil {
+				return wrapErr(err)
 			}
 		default:
 			return wrapErr(fmt.Errorf("unsupported database type: %v", dbType))
@@ -133,9 +132,9 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		relation.ColumnIndex = columnIndex
 
 		// Consolidated lookup key selection: choose shortest lookup key
-		lookupCols, err2 := getShortestLookupKey(db, dbType, relation.Name)
-		if err2 != nil {
-			return wrapErr(err2)
+		lookupCols, err := getShortestLookupKey(db, dbType, relation.Name)
+		if err != nil {
+			return wrapErr(err)
 		}
 		if dbType == SQLite && len(lookupCols) == 0 {
 			// For SQLite, use the primary key columns if no unique constraints found
@@ -163,9 +162,9 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	}
 
 	// Fetch enum values and custom type information
-	if err2 := relation.loadEnumAndCustomTypes(); err2 != nil {
+	if err := relation.loadEnumAndCustomTypes(); err != nil {
 		// Non-fatal error, just log and continue
-		fmt.Fprintf(os.Stderr, "Warning: failed to load enum/custom types: %v\n", err2)
+		fmt.Fprintf(os.Stderr, "Warning: failed to load enum/custom types: %v\n", err)
 	}
 
 	// Load foreign keys
@@ -173,13 +172,13 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	var updatedColumns []Column
 	switch dbType {
 	case SQLite:
-		references, updatedColumns, err2 = loadForeignKeysSQLite(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
+		references, updatedColumns, err = loadForeignKeysSQLite(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
 	case PostgreSQL:
-		references, updatedColumns, err2 = loadForeignKeysPostgreSQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
+		references, updatedColumns, err = loadForeignKeysPostgreSQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
 	case MySQL:
-		references, updatedColumns, err2 = loadForeignKeysMySQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
+		references, updatedColumns, err = loadForeignKeysMySQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
 	}
-	if err2 == nil {
+	if err == nil {
 		relation.References = references
 		relation.Columns = updatedColumns
 	}
