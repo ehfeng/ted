@@ -125,7 +125,7 @@ type TableView struct {
 	headerBgColor tcell.Color
 	separatorChar rune
 	bottom        bool
-	insertRow      []any // if non-empty, render as insert mode row with special styling
+	insertRow     []any // if non-empty, render as insert mode row with special styling
 
 	// Selection state
 	selectedRow int
@@ -579,7 +579,11 @@ func (tv *TableView) drawHeaderRow(x, y int) {
 	for i, header := range tv.headers {
 		// Padding before content
 		for j := 0; j < tv.cellPadding; j++ {
-			tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+			if header.IsKey {
+				tv.viewport.SetContent(pos+j, y, '✦', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+			} else {
+				tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+			}
 		}
 		pos += tv.cellPadding
 

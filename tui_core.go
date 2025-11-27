@@ -174,8 +174,15 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 		// Build headers in database schema order
 		headers = make([]dblib.DisplayColumn, 0, len(relation.Columns))
-		for _, col := range relation.Columns {
-			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
+		for i, col := range relation.Columns {
+			isKey := false
+			for _, keyIdx := range relation.Key {
+				if keyIdx == i {
+					isKey = true
+					break
+				}
+			}
+			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey})
 		}
 	} else {
 		// No table specified - create empty state

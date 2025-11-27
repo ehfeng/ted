@@ -289,8 +289,15 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	// Build table headers in database schema order
 	fmt.Fprintf(os.Stderr, "[DEBUG] Building table headers\n")
 	headers := make([]dblib.DisplayColumn, 0, len(e.relation.Columns))
-	for _, col := range e.relation.Columns {
-		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
+	for i, col := range e.relation.Columns {
+		isKey := false
+		for _, keyIdx := range e.relation.Key {
+			if keyIdx == i {
+				isKey = true
+				break
+			}
+		}
+		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey})
 	}
 	e.table.SetHeaders(headers).SetTableName(tableName).SetVimMode(e.vimMode)
 

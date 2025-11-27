@@ -136,4 +136,5 @@ func (sc SortColumn) String(scrollDown bool) string {
 type DisplayColumn struct {
 	Name  string
 	Width int
+	IsKey bool
 }
