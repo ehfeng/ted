@@ -216,12 +216,8 @@ func runEditor(config *Config, dbname, tablename string) error {
 		editor.setCursorStyle(0)         // Reset to default cursor style
 	})
 
-	// No visual separator for key columns
-	keyColumnCount := 0
-
 	editor.table = NewTableView(tableDataHeight+1, &TableViewConfig{
-		Headers:        headers,
-		KeyColumnCount: keyColumnCount,
+		Headers: headers,
 		DoubleClickFunc: func(row, col int) {
 			editor.enterEditMode(row, col)
 		},

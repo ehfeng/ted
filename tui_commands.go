@@ -292,7 +292,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	for _, col := range e.relation.Columns {
 		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
 	}
-	e.table.SetHeaders(headers).SetKeyColumnCount(0).SetTableName(tableName).SetVimMode(e.vimMode)
+	e.table.SetHeaders(headers).SetTableName(tableName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
 	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")

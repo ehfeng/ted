@@ -119,13 +119,12 @@ type TableView struct {
 	tableName string // Name of the current table to display in header
 
 	// Display configuration
-	cellPadding    int
-	borderColor    tcell.Color
-	headerColor    tcell.Color
-	headerBgColor  tcell.Color
-	separatorChar  rune
-	keyColumnCount int // Number of key columns (for special separator rendering)
-	bottom         bool
+	cellPadding   int
+	borderColor   tcell.Color
+	headerColor   tcell.Color
+	headerBgColor tcell.Color
+	separatorChar rune
+	bottom        bool
 	insertRow      []any // if non-empty, render as insert mode row with special styling
 
 	// Selection state
@@ -162,7 +161,6 @@ type TableView struct {
 // TableViewConfig holds configuration for creating a TableView
 type TableViewConfig struct {
 	Headers            []dblib.DisplayColumn
-	KeyColumnCount     int
 	DoubleClickFunc    func(row, col int)
 	SingleClickFunc    func(row, col int)
 	MouseScrollFunc    func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse)
@@ -195,9 +193,6 @@ func NewTableView(height int, config *TableViewConfig) *TableView {
 		if len(config.Headers) > 0 {
 			tv.SetHeaders(config.Headers)
 		}
-		if config.KeyColumnCount > 0 {
-			tv.SetKeyColumnCount(config.KeyColumnCount)
-		}
 		if config.DoubleClickFunc != nil {
 			tv.SetDoubleClickFunc(config.DoubleClickFunc)
 		}
@@ -219,12 +214,6 @@ func NewTableView(height int, config *TableViewConfig) *TableView {
 func (tv *TableView) SetHeaders(headers []dblib.DisplayColumn) *TableView {
 	tv.headers = make([]dblib.DisplayColumn, len(headers))
 	copy(tv.headers, headers)
-	return tv
-}
-
-// SetKeyColumnCount sets the number of key columns (for special separator rendering)
-func (tv *TableView) SetKeyColumnCount(count int) *TableView {
-	tv.keyColumnCount = count
 	return tv
 }
 
@@ -636,12 +625,7 @@ func (tv *TableView) drawHeaderSeparator(x, y, tableWidth int) {
 
 		// Junction or right junction
 		if i < len(tv.headers)-1 {
-			// Use special junction after last key column
-			junction := '┿'
-			if tv.keyColumnCount > 0 && i == tv.keyColumnCount-1 {
-				junction = '╈' // Heavy cross junction
-			}
-			tv.viewport.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, '┿', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 			pos++
 		} else {
 			tv.viewport.SetContent(pos, y, '┥', nil, tcell.StyleDefault.Foreground(tv.borderColor))
@@ -773,12 +757,7 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 			} else if rowState == RowStateDeleted {
 				sepStyle = sepStyle.Background(tcell.ColorDarkRed)
 			}
-			// Use thicker separator after last key column
-			separator := '│'
-			if tv.keyColumnCount > 0 && i == tv.keyColumnCount-1 {
-				separator = '┃' // Heavy vertical line
-			}
-			tv.viewport.SetContent(pos, y, separator, nil, sepStyle)
+			tv.viewport.SetContent(pos, y, '│', nil, sepStyle)
 			pos++
 		}
 	}
@@ -815,12 +794,7 @@ func (tv *TableView) drawBottomBorder(x, y, tableWidth int) {
 
 		// Junction or corner
 		if i < len(tv.headers)-1 {
-			// Use special junction after last key column
-			junction := '┴'
-			if tv.keyColumnCount > 0 && i == tv.keyColumnCount-1 {
-				junction = '┸' // Heavy vertical junction
-			}
-			tv.viewport.SetContent(pos, y, junction, nil, tcell.StyleDefault.Foreground(tv.borderColor))
+			tv.viewport.SetContent(pos, y, '┴', nil, tcell.StyleDefault.Foreground(tv.borderColor))
 			pos++
 		} else {
 			tv.viewport.SetContent(pos, y, '┘', nil, tcell.StyleDefault.Foreground(tv.borderColor))
