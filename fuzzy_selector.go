@@ -70,11 +70,11 @@ func cleanTableNames(tables []string) []string {
 	return cleaned
 }
 
-// FuzzySelector manages the table selection UI component at the top of the editor.
-// It displays a searchable dropdown for table selection.
+// FuzzySelector manages the table/view selection UI component at the top of the editor.
+// It displays a searchable dropdown for table and view selection.
 type FuzzySelector struct {
 	*tview.Box
-	items         []string          // All available tables
+	items         []string          // All available tables and views
 	searchText    string            // Current search text
 	selectedIndex int               // Highlighted item in dropdown
 	dropdownList  *tview.List       // Dropdown list for showing filtered tables
@@ -84,11 +84,11 @@ type FuzzySelector struct {
 	dropdownFlex  *tview.Flex       // Flex container for dropdown (to allow resizing)
 
 	// Callbacks
-	onSelect func(tableName string) // Called when a table is selected
+	onSelect func(tableName string) // Called when a table or view is selected
 	onClose  func()                 // Called when the selector should be closed
 }
 
-// NewFuzzySelector creates a new table picker bar component.
+// NewFuzzySelector creates a new table/view picker bar component.
 func NewFuzzySelector(tables []string, initialTable string, onSelect func(string), onClose func()) *FuzzySelector {
 	cleaned := cleanTableNames(tables)
 	fs := &FuzzySelector{
@@ -301,7 +301,7 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 	inputField := tview.NewInputField().
 		SetLabel("").
 		SetText(tp.searchText).
-		SetPlaceholder("Search for tables...").
+		SetPlaceholder("Search for tables/views...").
 		SetFieldWidth(0)
 
 	// Store reference to the input field

@@ -112,54 +112,52 @@ func getShortestLookupKeyMySQL(db *sql.DB, tableName string, sizeOf func(string,
 	return candidates[0].cols, nil
 }
 
-// loadAttributesMySQL loads column attributes for a MySQL table.
-func loadAttributesMySQL(db *sql.DB, tableName string) (map[string]Attribute, []string, map[string]int, error) {
+// loadColumnsMySQL loads columns for a MySQL table.
+func loadColumnsMySQL(db *sql.DB, tableName string) ([]Column, map[string]int, error) {
 	query := `SELECT column_name, data_type, is_nullable
 			FROM information_schema.columns
-			WHERE table_name = ?
+			WHERE table_name = ? AND table_schema = DATABASE()
 			ORDER BY ordinal_position`
 	rows, err := db.Query(query, tableName)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	attributes := make(map[string]Attribute)
-	var attributeOrder []string
-	attributeIndex := make(map[string]int)
+	var columns []Column
+	columnIndex := make(map[string]int)
 
 	for rows.Next() {
-		var attr Attribute
-		attr.Reference = -1 // Initialize to -1 (not a foreign key)
+		var col Column
+		col.Reference = -1 // Initialize to -1 (not a foreign key)
 		var nullable string
 
-		err = rows.Scan(&attr.Name, &attr.Type, &nullable)
+		err = rows.Scan(&col.Name, &col.Type, &nullable)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 
-		attr.Nullable = strings.ToLower(nullable) == "yes"
+		col.Nullable = strings.ToLower(nullable) == "yes"
+		col.Table = tableName // For tables, Table is the table name itself
+		col.BaseColumn = col.Name // For tables, BaseColumn is the same as Name
 
-		idx := len(attributeOrder)
-		attributeOrder = append(attributeOrder, attr.Name)
-		attributes[attr.Name] = attr
-		attributeIndex[attr.Name] = idx
+		idx := len(columns)
+		columns = append(columns, col)
+		columnIndex[col.Name] = idx
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	return attributes, attributeOrder, attributeIndex, nil
+	return columns, columnIndex, nil
 }
 
 // loadForeignKeysMySQL loads foreign key constraints for a MySQL table.
-func loadForeignKeysMySQL(db *sql.DB, dbType DatabaseType, tableName string, attrIndex map[string]int, attributes map[string]Attribute) ([]Reference, map[string]Attribute, error) {
+func loadForeignKeysMySQL(db *sql.DB, dbType DatabaseType, tableName string, columnIndex map[string]int, columns []Column) ([]Reference, []Column, error) {
 	var references []Reference
-	updatedAttrs := make(map[string]Attribute)
-	for k, v := range attributes {
-		updatedAttrs[k] = v
-	}
+	updatedColumns := make([]Column, len(columns))
+	copy(updatedColumns, columns)
 
 	// Use information_schema to identify FK columns with ordering
 	fkQuery := `
@@ -170,7 +168,7 @@ func loadForeignKeysMySQL(db *sql.DB, dbType DatabaseType, tableName string, att
             ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`
 	fkRows, err := db.Query(fkQuery, tableName)
 	if err != nil {
-		return references, updatedAttrs, nil
+		return references, updatedColumns, nil
 	}
 	defer fkRows.Close()
 
@@ -196,7 +194,7 @@ func loadForeignKeysMySQL(db *sql.DB, dbType DatabaseType, tableName string, att
 			continue
 		}
 		refTableName := cols[0].refTable
-		// Load the foreign table metadata
+		// Load the foreign table metadata to get key column names if needed
 		foreignRel, err := NewRelation(db, dbType, refTableName)
 		if err != nil {
 			// If we can't load the foreign table, skip this reference
@@ -205,36 +203,39 @@ func loadForeignKeysMySQL(db *sql.DB, dbType DatabaseType, tableName string, att
 		}
 		// Create a new Reference entry
 		ref := Reference{
-			ForeignTable:   foreignRel,
-			ForeignColumns: make(map[int]string),
+			Table:   refTableName,
+			Columns: make(map[string]string),
 		}
 		for i, c := range cols {
-			if idx, ok := attrIndex[c.col]; ok {
+			if idx, ok := columnIndex[c.col]; ok {
 				foreignCol := c.refCol
 				// If refCol is empty, it references the foreign table's primary key
-				if foreignCol == "" && i < len(foreignRel.Key) {
-					foreignCol = foreignRel.Key[i]
+				if foreignCol == "" {
+					// Get key column name from foreign relation
+					if i < len(foreignRel.Key) {
+						keyIdx := foreignRel.Key[i]
+						if keyIdx < len(foreignRel.Columns) {
+							foreignCol = foreignRel.Columns[keyIdx].Name
+						}
+					}
 				}
-				ref.ForeignColumns[idx] = foreignCol
-				// Update attribute with reference index
-				if attr, exists := updatedAttrs[c.col]; exists {
-					attr.Reference = len(references)
-					updatedAttrs[c.col] = attr
+				ref.Columns[c.col] = foreignCol
+				// Update column with reference index
+				if idx < len(updatedColumns) {
+					updatedColumns[idx].Reference = len(references)
 				}
 			}
 		}
 		references = append(references, ref)
 	}
 
-	return references, updatedAttrs, nil
+	return references, updatedColumns, nil
 }
 
 // loadEnumAndCustomTypesMySQL fetches enum values for MySQL columns.
-func loadEnumAndCustomTypesMySQL(db *sql.DB, tableName string, attributes map[string]Attribute) (map[string]Attribute, error) {
-	updatedAttrs := make(map[string]Attribute)
-	for k, v := range attributes {
-		updatedAttrs[k] = v
-	}
+func loadEnumAndCustomTypesMySQL(db *sql.DB, tableName string, columns []Column) ([]Column, error) {
+	updatedColumns := make([]Column, len(columns))
+	copy(updatedColumns, columns)
 
 	// MySQL ENUM types are stored in information_schema.columns.column_type
 	query := `SELECT column_name, column_type
@@ -243,7 +244,7 @@ func loadEnumAndCustomTypesMySQL(db *sql.DB, tableName string, attributes map[st
 		          AND data_type = 'enum'`
 	rows, err := db.Query(query, tableName)
 	if err != nil {
-		return updatedAttrs, err
+		return updatedColumns, err
 	}
 	defer rows.Close()
 
@@ -255,13 +256,16 @@ func loadEnumAndCustomTypesMySQL(db *sql.DB, tableName string, attributes map[st
 
 		// Parse ENUM values from column_type like "enum('value1','value2','value3')"
 		enumValues := parseEnumValues(colType)
-		if attr, ok := updatedAttrs[colName]; ok {
-			attr.EnumValues = enumValues
-			updatedAttrs[colName] = attr
+		// Find column by name and update it
+		for i := range updatedColumns {
+			if updatedColumns[i].Name == colName {
+				updatedColumns[i].EnumValues = enumValues
+				break
+			}
 		}
 	}
 
-	return updatedAttrs, nil
+	return updatedColumns, nil
 }
 
 // getBestKeyMySQL identifies the best key for a MySQL table using information_schema.
@@ -480,4 +484,17 @@ func parseEnumValues(colType string) []string {
 	}
 
 	return values
+}
+
+// getViewDefinitionMySQL retrieves the SQL definition of a view in MySQL
+func getViewDefinitionMySQL(db *sql.DB, viewName string) (string, error) {
+	var sqlDef string
+	err := db.QueryRow(`
+		SELECT view_definition 
+		FROM information_schema.views 
+		WHERE table_schema = DATABASE() AND table_name = ?`, viewName).Scan(&sqlDef)
+	if err != nil {
+		return "", fmt.Errorf("failed to get view definition: %w", err)
+	}
+	return sqlDef, nil
 }

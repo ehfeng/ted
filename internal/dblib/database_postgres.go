@@ -113,54 +113,60 @@ func getShortestLookupKeyPostgreSQL(db *sql.DB, tableName string, sizeOf func(st
 	return candidates[0].cols, nil
 }
 
-// loadAttributesPostgreSQL loads column attributes for a PostgreSQL table.
-func loadAttributesPostgreSQL(db *sql.DB, tableName string) (map[string]Attribute, []string, map[string]int, error) {
+// loadColumnsPostgreSQL loads columns for a PostgreSQL table.
+func loadColumnsPostgreSQL(db *sql.DB, tableName string) ([]Column, map[string]int, error) {
+	// Extract schema and relation name
+	schema := "public"
+	rel := tableName
+	if dot := strings.IndexByte(rel, '.'); dot != -1 {
+		schema = rel[:dot]
+		rel = rel[dot+1:]
+	}
+	
 	query := `SELECT column_name, data_type, is_nullable
 			FROM information_schema.columns
-			WHERE table_name = $1
+			WHERE table_schema = $1 AND table_name = $2
 			ORDER BY ordinal_position`
-	rows, err := db.Query(query, tableName)
+	rows, err := db.Query(query, schema, rel)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	attributes := make(map[string]Attribute)
-	var attributeOrder []string
-	attributeIndex := make(map[string]int)
+	var columns []Column
+	columnIndex := make(map[string]int)
 
 	for rows.Next() {
-		var attr Attribute
-		attr.Reference = -1 // Initialize to -1 (not a foreign key)
+		var col Column
+		col.Reference = -1 // Initialize to -1 (not a foreign key)
 		var nullable string
 
-		err = rows.Scan(&attr.Name, &attr.Type, &nullable)
+		err = rows.Scan(&col.Name, &col.Type, &nullable)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 
-		attr.Nullable = strings.ToLower(nullable) == "yes"
+		col.Nullable = strings.ToLower(nullable) == "yes"
+		col.Table = tableName // For tables, Table is the table name itself
+		col.BaseColumn = col.Name // For tables, BaseColumn is the same as Name
 
-		idx := len(attributeOrder)
-		attributeOrder = append(attributeOrder, attr.Name)
-		attributes[attr.Name] = attr
-		attributeIndex[attr.Name] = idx
+		idx := len(columns)
+		columns = append(columns, col)
+		columnIndex[col.Name] = idx
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	return attributes, attributeOrder, attributeIndex, nil
+	return columns, columnIndex, nil
 }
 
 // loadForeignKeysPostgreSQL loads foreign key constraints for a PostgreSQL table.
-func loadForeignKeysPostgreSQL(db *sql.DB, dbType DatabaseType, tableName string, attrIndex map[string]int, attributes map[string]Attribute) ([]Reference, map[string]Attribute, error) {
+func loadForeignKeysPostgreSQL(db *sql.DB, dbType DatabaseType, tableName string, columnIndex map[string]int, columns []Column) ([]Reference, []Column, error) {
 	var references []Reference
-	updatedAttrs := make(map[string]Attribute)
-	for k, v := range attributes {
-		updatedAttrs[k] = v
-	}
+	updatedColumns := make([]Column, len(columns))
+	copy(updatedColumns, columns)
 
 	// Use pg_catalog to get correct column order within FK
 	schema := "public"
@@ -184,7 +190,7 @@ func loadForeignKeysPostgreSQL(db *sql.DB, dbType DatabaseType, tableName string
             ORDER BY con.oid, u.ord`
 	fkRows, err := db.Query(fkQuery, rel, schema)
 	if err != nil {
-		return references, updatedAttrs, nil
+		return references, updatedColumns, nil
 	}
 	defer fkRows.Close()
 
@@ -210,7 +216,7 @@ func loadForeignKeysPostgreSQL(db *sql.DB, dbType DatabaseType, tableName string
 			continue
 		}
 		refTableName := cols[0].refTable
-		// Load the foreign table metadata
+		// Load the foreign table metadata to get key column names if needed
 		foreignRel, err := NewRelation(db, dbType, refTableName)
 		if err != nil {
 			// If we can't load the foreign table, skip this reference
@@ -219,28 +225,33 @@ func loadForeignKeysPostgreSQL(db *sql.DB, dbType DatabaseType, tableName string
 		}
 		// Create a new Reference entry
 		ref := Reference{
-			ForeignTable:   foreignRel,
-			ForeignColumns: make(map[int]string),
+			Table:   refTableName,
+			Columns: make(map[string]string),
 		}
 		for i, c := range cols {
-			if idx, ok := attrIndex[c.col]; ok {
+			if idx, ok := columnIndex[c.col]; ok {
 				foreignCol := c.refCol
 				// If refCol is empty, it references the foreign table's primary key
-				if foreignCol == "" && i < len(foreignRel.Key) {
-					foreignCol = foreignRel.Key[i]
+				if foreignCol == "" {
+					// Get key column name from foreign relation
+					if i < len(foreignRel.Key) {
+						keyIdx := foreignRel.Key[i]
+						if keyIdx < len(foreignRel.Columns) {
+							foreignCol = foreignRel.Columns[keyIdx].Name
+						}
+					}
 				}
-				ref.ForeignColumns[idx] = foreignCol
-				// Update attribute with reference index
-				if attr, exists := updatedAttrs[c.col]; exists {
-					attr.Reference = len(references)
-					updatedAttrs[c.col] = attr
+				ref.Columns[c.col] = foreignCol
+				// Update column with reference index
+				if idx < len(updatedColumns) {
+					updatedColumns[idx].Reference = len(references)
 				}
 			}
 		}
 		references = append(references, ref)
 	}
 
-	return references, updatedAttrs, nil
+	return references, updatedColumns, nil
 }
 
 // getBestKeyPostgreSQL identifies the best key for a PostgreSQL table using system catalogs.
@@ -429,21 +440,27 @@ func getBestKeyPostgreSQL(db *sql.DB, tableName string) ([]string, error) {
 }
 
 // loadEnumAndCustomTypesPostgreSQL fetches enum values and custom type information for PostgreSQL columns.
-func loadEnumAndCustomTypesPostgreSQL(db *sql.DB, tableName string, attributes map[string]Attribute) (map[string]Attribute, error) {
-	updatedAttrs := make(map[string]Attribute)
-	for k, v := range attributes {
-		updatedAttrs[k] = v
+func loadEnumAndCustomTypesPostgreSQL(db *sql.DB, tableName string, columns []Column) ([]Column, error) {
+	updatedColumns := make([]Column, len(columns))
+	copy(updatedColumns, columns)
+
+	// Extract schema and relation name
+	schema := "public"
+	rel := tableName
+	if dot := strings.IndexByte(rel, '.'); dot != -1 {
+		schema = rel[:dot]
+		rel = rel[dot+1:]
 	}
 
 	// PostgreSQL: Fetch custom types and enum types
 	// First, get UDT (user-defined types) information
 	query := `SELECT c.column_name, c.udt_name, c.data_type
 		          FROM information_schema.columns c
-		          WHERE c.table_name = $1
+		          WHERE c.table_schema = $1 AND c.table_name = $2
 		          AND (c.data_type = 'USER-DEFINED' OR c.udt_name NOT IN ('int4', 'int8', 'varchar', 'text', 'bool', 'timestamp', 'timestamptz', 'date', 'numeric', 'float8', 'bytea'))`
-	rows, err := db.Query(query, tableName)
+	rows, err := db.Query(query, schema, rel)
 	if err != nil {
-		return updatedAttrs, err
+		return updatedColumns, err
 	}
 	defer rows.Close()
 
@@ -480,17 +497,36 @@ func loadEnumAndCustomTypesPostgreSQL(db *sql.DB, tableName string, attributes m
 		}
 		enumRows.Close()
 
-		if attr, ok := updatedAttrs[colName]; ok {
-			if len(enumValues) > 0 {
-				attr.EnumValues = enumValues
-				attr.CustomTypeName = udtName
-			} else {
-				// Not an enum, but still a custom type
-				attr.CustomTypeName = udtName
+		// Find column by name and update it
+		for i := range updatedColumns {
+			if updatedColumns[i].Name == colName {
+				if len(enumValues) > 0 {
+					updatedColumns[i].EnumValues = enumValues
+					updatedColumns[i].CustomTypeName = udtName
+				} else {
+					// Not an enum, but still a custom type
+					updatedColumns[i].CustomTypeName = udtName
+				}
+				break
 			}
-			updatedAttrs[colName] = attr
 		}
 	}
 
-	return updatedAttrs, nil
+	return updatedColumns, nil
+}
+
+// getViewDefinitionPostgreSQL retrieves the SQL definition of a view in PostgreSQL
+func getViewDefinitionPostgreSQL(db *sql.DB, viewName string) (string, error) {
+	// Extract schema and relation name
+	rel := viewName
+	if dot := strings.IndexByte(rel, '.'); dot != -1 {
+		rel = rel[dot+1:]
+	}
+	
+	var sqlDef string
+	err := db.QueryRow("SELECT pg_get_viewdef($1::regclass, true)", rel).Scan(&sqlDef)
+	if err != nil {
+		return "", fmt.Errorf("failed to get view definition: %w", err)
+	}
+	return sqlDef, nil
 }
