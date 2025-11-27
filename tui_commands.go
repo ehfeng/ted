@@ -286,22 +286,13 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	fmt.Fprintf(os.Stderr, "[DEBUG] Relation created successfully\n")
 	e.relation = relation
 
-	// Build table headers directly
+	// Build table headers in database schema order
 	fmt.Fprintf(os.Stderr, "[DEBUG] Building table headers\n")
 	headers := make([]dblib.DisplayColumn, 0, len(e.relation.Columns))
-	keyColNames := make(map[string]bool)
-	for _, keyIdx := range e.relation.Key {
-		if keyIdx < len(e.relation.Columns) {
-			keyColNames[e.relation.Columns[keyIdx].Name] = true
-			headers = append(headers, dblib.DisplayColumn{Name: e.relation.Columns[keyIdx].Name, Width: 4})
-		}
-	}
 	for _, col := range e.relation.Columns {
-		if !keyColNames[col.Name] {
-			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: 8})
-		}
+		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
 	}
-	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.Key)).SetTableName(tableName).SetVimMode(e.vimMode)
+	e.table.SetHeaders(headers).SetKeyColumnCount(0).SetTableName(tableName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
 	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")

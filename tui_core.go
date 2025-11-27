@@ -172,19 +172,10 @@ func runEditor(config *Config, dbname, tablename string) error {
 			return fmt.Errorf("relation %s has no keyable columns and cannot be viewed", tablename)
 		}
 
-		// force key to be first column(s)
+		// Build headers in database schema order
 		headers = make([]dblib.DisplayColumn, 0, len(relation.Columns))
-		keyColNames := make(map[string]bool)
-		for _, keyIdx := range relation.Key {
-			if keyIdx < len(relation.Columns) {
-				keyColNames[relation.Columns[keyIdx].Name] = true
-				headers = append(headers, dblib.DisplayColumn{Name: relation.Columns[keyIdx].Name, Width: 4})
-			}
-		}
 		for _, col := range relation.Columns {
-			if !keyColNames[col.Name] {
-				headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
-			}
+			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
 		}
 	} else {
 		// No table specified - create empty state
@@ -225,10 +216,8 @@ func runEditor(config *Config, dbname, tablename string) error {
 		editor.setCursorStyle(0)         // Reset to default cursor style
 	})
 
+	// No visual separator for key columns
 	keyColumnCount := 0
-	if editor.relation != nil {
-		keyColumnCount = len(editor.relation.Key)
-	}
 
 	editor.table = NewTableView(tableDataHeight+1, &TableViewConfig{
 		Headers:        headers,
