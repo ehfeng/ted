@@ -11,44 +11,38 @@ import (
 )
 
 func (e *Editor) moveColumn(col, direction int) {
-	if col < 0 || col >= len(e.columns) {
+	headers := e.table.GetHeaders()
+	if col < 0 || col >= len(headers) {
 		return
 	}
 
 	newIdx := col + direction
-	if newIdx < 0 || newIdx >= len(e.columns) {
+	if newIdx < 0 || newIdx >= len(headers) {
 		return
 	}
 
-	e.columns[col], e.columns[newIdx] = e.columns[newIdx], e.columns[col]
+	// Swap headers
+	headers[col], headers[newIdx] = headers[newIdx], headers[col]
+	e.table.SetHeaders(headers)
 
+	// Swap buffer data
 	for i := range e.buffer {
 		e.buffer[i].data[col], e.buffer[i].data[newIdx] = e.buffer[i].data[newIdx], e.buffer[i].data[col]
 	}
-
-	// Update table headers to reflect column reordering
-	headers := make([]HeaderColumn, len(e.columns))
-	for i, col := range e.columns {
-		headers[i] = HeaderColumn{
-			Name:  col.Name,
-			Width: col.Width,
-		}
-	}
-	e.table.SetHeaders(headers)
 
 	row, _ := e.table.GetSelection()
 	e.table.Select(row, col+direction)
 }
 
 func (e *Editor) adjustColumnWidth(col, delta int) {
-	if col < 0 || col >= len(e.columns) {
+	headers := e.table.GetHeaders()
+	if col < 0 || col >= len(headers) {
 		return
 	}
 
-	newWidth := max(3, e.columns[col].Width+delta)
-	e.columns[col].Width = newWidth
+	newWidth := max(3, headers[col].Width+delta)
 
-	// Update the table column width and re-render
+	// Update the table column width (this updates the internal headers)
 	e.table.SetColumnWidth(col, newWidth)
 }
 

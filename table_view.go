@@ -109,18 +109,12 @@ func (v *Viewport) EnsureColumnVisible(startX, endX, screenWidth int) {
 	}
 }
 
-// HeaderColumn represents a table column with header information
-type HeaderColumn struct {
-	Name  string
-	Width int
-}
-
 // TableView is a custom table component with proper header separator rendering
 type TableView struct {
 	*tview.Box
 
 	// Table data
-	headers   []HeaderColumn
+	headers   []dblib.DisplayColumn
 	data      []Row
 	tableName string // Name of the current table to display in header
 
@@ -167,7 +161,7 @@ type TableView struct {
 
 // TableViewConfig holds configuration for creating a TableView
 type TableViewConfig struct {
-	Headers            []HeaderColumn
+	Headers            []dblib.DisplayColumn
 	KeyColumnCount     int
 	DoubleClickFunc    func(row, col int)
 	SingleClickFunc    func(row, col int)
@@ -222,8 +216,8 @@ func NewTableView(height int, config *TableViewConfig) *TableView {
 }
 
 // SetHeaders sets the table headers
-func (tv *TableView) SetHeaders(headers []HeaderColumn) *TableView {
-	tv.headers = make([]HeaderColumn, len(headers))
+func (tv *TableView) SetHeaders(headers []dblib.DisplayColumn) *TableView {
+	tv.headers = make([]dblib.DisplayColumn, len(headers))
 	copy(tv.headers, headers)
 	return tv
 }
@@ -992,6 +986,11 @@ func (tv *TableView) SetColumnWidth(col int, width int) *TableView {
 		tv.headers[col].Width = max(3, width) // Minimum width of 3
 	}
 	return tv
+}
+
+// GetHeaders returns the table headers
+func (tv *TableView) GetHeaders() []dblib.DisplayColumn {
+	return tv.headers
 }
 
 // GetColumnPosition returns the start and end x positions of a column relative to the table

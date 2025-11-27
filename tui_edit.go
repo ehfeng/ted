@@ -13,7 +13,7 @@ import (
 func (e *Editor) enterEditMode(row, col int) {
 	// Check if column is editable (for views)
 	if e.relation != nil && e.relation.IsView {
-		colIdx, ok := e.relation.ColumnIndex[e.columns[col].Name]
+		colIdx, ok := e.relation.ColumnIndex[e.table.GetHeaders()[col].Name]
 		if !ok || !e.relation.IsColumnEditable(colIdx) {
 			e.SetStatusMessage("Column is not editable")
 			return
@@ -108,7 +108,7 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 			newText := textArea.GetText()
 			e.updateCell(row, col, newText)
 			// Move selection right
-			if col < len(e.columns)-1 {
+			if col < len(e.table.GetHeaders())-1 {
 				e.table.Select(row, col+1)
 			} else if row < len(e.buffer)-1 {
 				e.table.Select(row+1, 0)
@@ -153,7 +153,7 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
 	// Check if column is editable (for views)
 	if e.relation != nil && e.relation.IsView {
-		colIdx, ok := e.relation.ColumnIndex[e.columns[col].Name]
+		colIdx, ok := e.relation.ColumnIndex[e.table.GetHeaders()[col].Name]
 		if !ok || !e.relation.IsColumnEditable(colIdx) {
 			e.SetStatusMessage("Column is not editable")
 			return
@@ -246,7 +246,7 @@ func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
 			newText := textArea.GetText()
 			e.updateCell(row, col, newText)
 			// Move selection right
-			if col < len(e.columns)-1 {
+			if col < len(e.table.GetHeaders())-1 {
 				e.table.Select(row, col+1)
 			} else if row < len(e.buffer)-1 {
 				e.table.Select(row+1, 0)
@@ -327,11 +327,11 @@ func (e *Editor) createCellEditOverlay(textArea *tview.TextArea, row, col int,
 
 	// Calculate total table width for maximum textarea width
 	totalTableWidth := 0
-	for i := 0; i < len(e.columns); i++ {
+	for i := 0; i < len(e.table.GetHeaders()); i++ {
 		totalTableWidth += e.table.GetColumnWidth(i)
 	}
 	// Add space for borders and separators: left border + (n-1 separators * 3) + right border
-	totalTableWidth += 1 + (len(e.columns)-1)*3 + 1
+	totalTableWidth += 1 + (len(e.table.GetHeaders())-1)*3 + 1
 
 	// Calculate the maximum available width for the textarea
 	maxAvailableWidth := totalTableWidth - leftOffset + 1 // Account for right border
@@ -390,7 +390,7 @@ func (e *Editor) exitEditMode() {
 				e.table.selectionChangeFunc(row, col)
 			}
 		} else {
-			preview := e.relation.BuildInsertPreview(e.table.insertRow, e.columns)
+			preview := e.relation.BuildInsertPreview(e.table.insertRow, e.table.GetHeaders())
 			e.commandPalette.SetPlaceholder(preview)
 			e.updateStatusForInsertMode()
 		}
@@ -412,14 +412,14 @@ func (e *Editor) updateEditPreview(newText string) {
 	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
 
 	var preview string
-	colName := e.columns[col].Name
+	colName := e.table.GetHeaders()[col].Name
 	if isNewRecordRow {
 		// Show INSERT preview and set palette mode to Insert
 		e.setPaletteMode(PaletteModeInsert, false)
 		newRecordRow := make([]any, len(e.table.insertRow))
 		copy(newRecordRow, e.table.insertRow)
 		newRecordRow[col] = newText
-		preview = e.relation.BuildInsertPreview(newRecordRow, e.columns)
+		preview = e.relation.BuildInsertPreview(newRecordRow, e.table.GetHeaders())
 	} else {
 		// Show UPDATE preview and set palette mode to Update
 		e.setPaletteMode(PaletteModeUpdate, false)
@@ -471,7 +471,7 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 	for i := range e.buffer {
 		recordsData[i] = e.buffer[i].data
 	}
-	updated, err := e.relation.UpdateDBValue(recordsData, row, e.columns[col].Name, newValue)
+	updated, err := e.relation.UpdateDBValue(recordsData, row, e.table.GetHeaders()[col].Name, newValue)
 	if err != nil {
 		e.exitEditMode()
 		return
@@ -670,11 +670,11 @@ func (e *Editor) hasKeyOrSortChanged(oldRow, newRow []any, sortCol *dblib.SortCo
 }
 
 func (e *Editor) isMultilineColumnType(col int) bool {
-	if e.relation == nil || col < 0 || col >= len(e.columns) {
+	if e.relation == nil || col < 0 || col >= len(e.table.GetHeaders()) {
 		return false
 	}
 
-	column := e.columns[col]
+	column := e.table.GetHeaders()[col]
 	attrType := ""
 	if colIdx, ok := e.relation.ColumnIndex[column.Name]; ok && colIdx < len(e.relation.Columns) {
 		attrType = e.relation.Columns[colIdx].Type

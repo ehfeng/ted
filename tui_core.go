@@ -36,14 +36,13 @@ type Row struct {
 	modified []int // indices of columns that were modified in the last refresh
 }
 
-// columns are display, relation.attributes stores the database attributes
+// relation.attributes stores the database attributes
 // lookup key is unique: it's always selected
 // if a multicolumn reference is selected, all columns in the reference are selected
 type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
 	table    *TableView
-	columns  []dblib.DisplayColumn // TODO move this into Config
 	relation *dblib.Relation
 	config   *Config
 	vimMode  bool
@@ -71,7 +70,7 @@ type Editor struct {
 	scrollDown bool       // direction of current query: true = next/forward, false = prev/backward
 	queryMu    sync.Mutex // protects query and scrollDown from concurrent access
 	pointer    int        // pointer to the current record
-	buffer     []Row      // columns are keyed off e.columns
+	buffer     []Row      // circular buffer of rows
 
 	// change tracking for refresh
 	previousRows []Row // snapshot of rows from last refresh
@@ -156,7 +155,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	tableDataHeight := terminalHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
 
 	var relation *dblib.Relation
-	var columns []dblib.DisplayColumn
+	var headers []dblib.DisplayColumn
 
 	// Only load table if tablename is provided
 	if tablename != "" {
@@ -174,22 +173,22 @@ func runEditor(config *Config, dbname, tablename string) error {
 		}
 
 		// force key to be first column(s)
-		columns = make([]dblib.DisplayColumn, 0, len(relation.Columns))
+		headers = make([]dblib.DisplayColumn, 0, len(relation.Columns))
 		keyColNames := make(map[string]bool)
 		for _, keyIdx := range relation.Key {
 			if keyIdx < len(relation.Columns) {
 				keyColNames[relation.Columns[keyIdx].Name] = true
-				columns = append(columns, dblib.DisplayColumn{Name: relation.Columns[keyIdx].Name, Width: 4})
+				headers = append(headers, dblib.DisplayColumn{Name: relation.Columns[keyIdx].Name, Width: 4})
 			}
 		}
 		for _, col := range relation.Columns {
 			if !keyColNames[col.Name] {
-				columns = append(columns, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
+				headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth})
 			}
 		}
 	} else {
 		// No table specified - create empty state
-		columns = []dblib.DisplayColumn{}
+		headers = []dblib.DisplayColumn{}
 	}
 
 	// Get available tables for the picker
@@ -206,7 +205,6 @@ func runEditor(config *Config, dbname, tablename string) error {
 		app:         app,
 		pages:       tview.NewPages(),
 		table:       nil, // Will be initialized after we have access to all editor fields
-		columns:     columns,
 		relation:    relation,
 		config:      config,
 		vimMode:     config.VimMode,
@@ -226,15 +224,6 @@ func runEditor(config *Config, dbname, tablename string) error {
 		editor.app.SetAfterDrawFunc(nil) // Clear cursor style function
 		editor.setCursorStyle(0)         // Reset to default cursor style
 	})
-
-	// Initialize table with configuration
-	headers := make([]HeaderColumn, len(editor.columns))
-	for i, col := range editor.columns {
-		headers[i] = HeaderColumn{
-			Name:  col.Name,
-			Width: col.Width,
-		}
-	}
 
 	keyColumnCount := 0
 	if editor.relation != nil {

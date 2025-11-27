@@ -416,12 +416,13 @@ func (e *Editor) refresh() error {
 	e.stopRefreshTimer()
 
 	// Prepare query
-	selectCols := make([]string, len(e.columns))
-	for i, col := range e.columns {
+	headers := e.table.GetHeaders()
+	selectCols := make([]string, len(headers))
+	for i, col := range headers {
 		selectCols[i] = col.Name
 	}
 
-	colCount := len(e.columns)
+	colCount := len(headers)
 	if colCount == 0 {
 		return nil
 	}
@@ -494,12 +495,13 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	// Stop refresh timer when starting a new query
 	e.stopRefreshTimer()
 
-	selectCols := make([]string, len(e.columns))
-	for i, col := range e.columns {
+	headers := e.table.GetHeaders()
+	selectCols := make([]string, len(headers))
+	for i, col := range headers {
 		selectCols[i] = col.Name
 	}
 
-	colCount := len(e.columns)
+	colCount := len(headers)
 	if colCount == 0 {
 		return nil
 	}
@@ -647,8 +649,9 @@ func (e *Editor) nextRows(i int) (bool, error) {
 				params[i] = e.buffer[lastRecordIdx].data[keyIdx]
 			}
 		}
-		selectCols := make([]string, len(e.columns))
-		for i, col := range e.columns {
+		headers := e.table.GetHeaders()
+		selectCols := make([]string, len(headers))
+		for i, col := range headers {
 			selectCols[i] = col.Name
 		}
 		newQuery, err := e.relation.QueryRows(selectCols, nil, params, false, true)
@@ -670,7 +673,7 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		}
 	}
 
-	colCount := len(e.columns)
+	colCount := len(e.table.GetHeaders())
 	if colCount == 0 {
 		return false, nil
 	}
@@ -758,8 +761,9 @@ func (e *Editor) prevRows(i int) (bool, error) {
 				params[i] = e.buffer[e.pointer].data[keyIdx]
 			}
 		}
-		selectCols := make([]string, len(e.columns))
-		for i, col := range e.columns {
+		headers := e.table.GetHeaders()
+		selectCols := make([]string, len(headers))
+		for i, col := range headers {
 			selectCols[i] = col.Name
 		}
 		newQuery, err := e.relation.QueryRows(selectCols, nil, params, false, false)
@@ -781,7 +785,7 @@ func (e *Editor) prevRows(i int) (bool, error) {
 		}
 	}
 
-	colCount := len(e.columns)
+	colCount := len(e.table.GetHeaders())
 	if colCount == 0 {
 		return false, nil
 	}

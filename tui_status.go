@@ -11,12 +11,12 @@ import (
 
 // updateStatusForEditMode sets helpful status bar text based on column type and constraints
 func (e *Editor) updateStatusForEditMode(col int) {
-	if e.relation == nil || col < 0 || col >= len(e.columns) {
+	if e.relation == nil || col < 0 || col >= len(e.table.GetHeaders()) {
 		e.SetStatusMessage("Editing...")
 		return
 	}
 
-	colName := e.columns[col].Name
+	colName := e.table.GetHeaders()[col].Name
 	colIdx, ok := e.relation.ColumnIndex[colName]
 	if !ok || colIdx >= len(e.relation.Columns) {
 		return
@@ -76,11 +76,11 @@ func (e *Editor) updateStatusForEditMode(col int) {
 
 // updateForeignKeyPreview updates the status bar with a preview of the referenced row
 func (e *Editor) updateForeignKeyPreview(row, col int, newText string) {
-	if e.relation == nil || col < 0 || col >= len(e.columns) {
+	if e.relation == nil || col < 0 || col >= len(e.table.GetHeaders()) {
 		return
 	}
 
-	colName := e.columns[col].Name
+	colName := e.table.GetHeaders()[col].Name
 	colIdx, ok := e.relation.ColumnIndex[colName]
 	if !ok || colIdx >= len(e.relation.Columns) {
 		return
@@ -455,7 +455,7 @@ func (e *Editor) updateStatusWithCellContent() {
 	row, col := e.table.GetSelection()
 
 	// Validate bounds
-	if row < 0 || row >= len(e.buffer) || col < 0 || col >= len(e.columns) {
+	if row < 0 || row >= len(e.buffer) || col < 0 || col >= len(e.table.GetHeaders()) {
 		return
 	}
 
@@ -469,7 +469,7 @@ func (e *Editor) updateStatusWithCellContent() {
 	cellText, _ := formatCellValue(cellValue, tcell.StyleDefault)
 
 	// Get column name and type info
-	colName := e.columns[col].Name
+	colName := e.table.GetHeaders()[col].Name
 	var colType string
 	if e.relation != nil {
 		if colIdx, ok := e.relation.ColumnIndex[colName]; ok && colIdx < len(e.relation.Columns) {

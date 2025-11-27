@@ -188,7 +188,7 @@ func (e *Editor) executeFind(findValue string) {
 
 	// Find the column index in relation.Columns
 	findCol := -1
-	colName := e.columns[col].Name
+	colName := e.table.GetHeaders()[col].Name
 	if colIdx, ok := e.relation.ColumnIndex[colName]; ok {
 		findCol = colIdx
 	}
@@ -286,29 +286,19 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	fmt.Fprintf(os.Stderr, "[DEBUG] Relation created successfully\n")
 	e.relation = relation
 
-	// Reset columns
-	fmt.Fprintf(os.Stderr, "[DEBUG] Resetting columns\n")
-	e.columns = make([]dblib.DisplayColumn, 0, len(e.relation.Columns))
+	// Build table headers directly
+	fmt.Fprintf(os.Stderr, "[DEBUG] Building table headers\n")
+	headers := make([]dblib.DisplayColumn, 0, len(e.relation.Columns))
 	keyColNames := make(map[string]bool)
 	for _, keyIdx := range e.relation.Key {
 		if keyIdx < len(e.relation.Columns) {
 			keyColNames[e.relation.Columns[keyIdx].Name] = true
-			e.columns = append(e.columns, dblib.DisplayColumn{Name: e.relation.Columns[keyIdx].Name, Width: 4})
+			headers = append(headers, dblib.DisplayColumn{Name: e.relation.Columns[keyIdx].Name, Width: 4})
 		}
 	}
 	for _, col := range e.relation.Columns {
 		if !keyColNames[col.Name] {
-			e.columns = append(e.columns, dblib.DisplayColumn{Name: col.Name, Width: 8})
-		}
-	}
-
-	// Update table headers
-	fmt.Fprintf(os.Stderr, "[DEBUG] Updating table headers\n")
-	headers := make([]HeaderColumn, len(e.columns))
-	for i, col := range e.columns {
-		headers[i] = HeaderColumn{
-			Name:  col.Name,
-			Width: col.Width,
+			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: 8})
 		}
 	}
 	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.Key)).SetTableName(tableName).SetVimMode(e.vimMode)
