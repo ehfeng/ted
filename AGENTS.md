@@ -1,12 +1,10 @@
 # Agents
 
+BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions
+
 ## Architecture
 
 See ARCHITECTURE.md
-
-## Event Handling
-
-Use `tview.MouseConsumed` to indicate mouse event is handled
 
 ## Debug
 

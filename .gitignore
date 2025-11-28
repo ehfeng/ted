@@ -3,3 +3,9 @@ ted
 test.db*
 .cache
 .DS_Store
+.beads/beads.db
+.beads/beads.db-*
+.beads/bd.sock
+.beads/bd.pipe
+.beads/.exclusive-lock
+.git/beads-worktrees/
