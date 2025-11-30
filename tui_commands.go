@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"ted/internal/dblib"
@@ -262,16 +261,13 @@ func (e *Editor) executeFind(findValue string) {
 
 // selectTableFromPicker handles selecting a table or view from the picker
 func (e *Editor) selectTableFromPicker(tableName string) {
-	fmt.Fprintf(os.Stderr, "[DEBUG] selectTableFromPicker: %s\n", tableName)
 	e.pages.HidePage(pagePicker)
 	e.app.SetAfterDrawFunc(nil) // Clear cursor style function
 	e.setCursorStyle(0)         // Reset to default cursor style
-	fmt.Fprintf(os.Stderr, "[DEBUG] Picker closed\n")
 
 	// Reload the relation (table or view) data using the current database connection
 	relation, err := dblib.NewRelation(e.db, e.dbType, tableName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating relation: %v\n", err)
 		e.SetStatusErrorWithSentry(err)
 		return
 	}
@@ -283,11 +279,9 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	}
 
 	// Update the relation
-	fmt.Fprintf(os.Stderr, "[DEBUG] Relation created successfully\n")
 	e.relation = relation
 
 	// Build table headers in database schema order
-	fmt.Fprintf(os.Stderr, "[DEBUG] Building table headers\n")
 	headers := make([]dblib.DisplayColumn, 0, len(e.relation.Columns))
 	for i, col := range e.relation.Columns {
 		isKey := false
@@ -297,24 +291,21 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 				break
 			}
 		}
-		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey})
+		editable := e.relation.IsColumnEditable(i)
+		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey, Editable: editable})
 	}
 	e.table.SetHeaders(headers).SetTableName(tableName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
-	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")
 	e.pointer = 0
 	e.buffer = make([]Row, e.table.rowsHeight)
 	e.loadFromRowId(nil, true, 0)
 	e.renderData()
 	e.table.Select(0, 0)
-	fmt.Fprintf(os.Stderr, "[DEBUG] Data loaded and rendered\n")
 
 	// Update title
-	fmt.Fprintf(os.Stderr, "[DEBUG] Updating title\n")
 	e.app.SetTitle(fmt.Sprintf("ted %s/%s %s", e.config.Database, tableName, databaseIcons[e.relation.DBType]))
 
 	// Set focus back to table
-	fmt.Fprintf(os.Stderr, "[DEBUG] Setting focus to table\n")
 	e.app.SetFocus(e.table)
 }

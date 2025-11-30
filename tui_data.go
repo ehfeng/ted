@@ -10,20 +10,21 @@ import (
 
 // e.table.SetData based on e.records and e.pointer
 func (e *Editor) renderData() {
+	// number of rows to send to TableView
+	rowCount := len(e.buffer)
+	// Count actual data rows (excluding nil sentinels)
+	atBottom := e.buffer[e.lastRowIdx()].data == nil
+	if atBottom {
+		rowCount--
+	}
 	// When in insert mode, we need to reserve one slot for the insert mode row
 	// that will be rendered by TableView
-	dataCount := len(e.buffer)
 	if len(e.table.insertRow) > 0 {
-		// Find the last non-nil record
-		lastIdx := len(e.buffer) - 1
-		for lastIdx >= 0 && e.buffer[lastIdx].data == nil {
-			lastIdx--
-		}
-		dataCount = lastIdx + 1 // Only pass real data, TableView will add insert mode row
+		rowCount--
 	}
 
-	normalizedRows := make([]Row, dataCount)
-	for i := 0; i < dataCount; i++ {
+	normalizedRows := make([]Row, rowCount)
+	for i := 0; i < rowCount; i++ {
 		ptr := (i + e.pointer) % len(e.buffer)
 		// insert mode row needs "space" at the top to still be able to render
 		// the last db row
@@ -32,8 +33,9 @@ func (e *Editor) renderData() {
 		}
 		normalizedRows[i] = e.buffer[ptr] // Reference to Row, not a copy
 	}
-	if len(e.table.insertRow) > 0 {
-		normalizedRows = slices.Delete(normalizedRows, 0, 1)
+	// Add the nil sentinel row at the end if we're at the bottom
+	if atBottom {
+		normalizedRows = append(normalizedRows, Row{}) // nil sentinel
 	}
 	e.table.SetDataReferences(normalizedRows)
 }
@@ -402,8 +404,12 @@ func (e *Editor) refresh() error {
 	if len(e.buffer) == 0 || e.buffer[e.pointer].data == nil {
 		return nil // Nothing to refresh
 	}
-	id := e.buffer[e.pointer].data[:len(e.relation.Key)]
 
+	// Extract key values from the row using the key column indices
+	id := make([]any, len(e.relation.Key))
+	for i, keyIdx := range e.relation.Key {
+		id[i] = e.buffer[e.pointer].data[keyIdx]
+	}
 	// Close existing query before refresh
 	e.queryMu.Lock()
 	if e.query != nil {
@@ -472,12 +478,6 @@ func (e *Editor) refresh() error {
 	// Clone currentRows to previousRows for next refresh
 	e.previousRows = make([]Row, len(currentRows))
 	copy(e.previousRows, currentRows)
-
-	// Set up new query for scrolling
-	e.queryMu.Lock()
-	e.query = nil // Will be created on first scroll
-	e.scrollDown = true
-	e.queryMu.Unlock()
 
 	e.renderData()
 	e.table.Select(e.table.selectedRow, e.table.selectedCol)
@@ -548,7 +548,6 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		// Mark end with empty row if we didn't fill the buffer
 		if len(currentRows) < len(e.buffer) {
 			e.buffer[len(currentRows)] = Row{}
-			e.buffer = e.buffer[:len(currentRows)+1]
 		}
 
 		// Set previousRows to currentRows
@@ -596,11 +595,14 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
 			e.buffer[i] = currentRows[i]
 		}
+		// Mark end with empty row if we didn't fill the buffer
+		if len(currentRows) < len(e.buffer) {
+			e.buffer[len(currentRows)] = Row{}
+		}
 
 		// Set previousRows to currentRows
 		e.previousRows = currentRows
 
-		e.buffer[len(e.buffer)-1] = Row{}
 		e.pointer = 0
 	}
 	e.renderData()
@@ -619,21 +621,21 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 // when there are no more rows, adds a nil sentinel to mark the end
 // returns bool, err. bool if the edge of table is reached
 func (e *Editor) nextRows(i int) (bool, error) {
-	debugLog("nextRows: starting, i=%d, e.query nil=%v\n", i, e.query == nil)
+	// Only reuse query if it's in the correct direction (scrollDown)
 	// Check if we're already at the end (last record is nil)
 	if e.isAtBottom() {
 		return true, nil // No-op, already at end of data
 	}
+	// this is a problem
 
-	// Only reuse query if it's in the correct direction (scrollDown)
-	e.queryMu.Lock()
 	needNewQuery := e.query == nil || !e.scrollDown
 	if needNewQuery && e.query != nil {
 		// Close existing query if it's in the wrong direction
+		e.queryMu.Lock()
 		e.query.Close()
 		e.query = nil
+		e.queryMu.Unlock()
 	}
-	e.queryMu.Unlock()
 
 	if needNewQuery {
 		// Stop refresh timer when starting a new query
@@ -658,10 +660,8 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		e.queryMu.Lock()
 		e.query = newQuery
 		e.scrollDown = true
-		e.queryMu.Unlock()
 		e.startRowsTimer()
 	}
 
@@ -729,7 +729,7 @@ func (e *Editor) lastRowIdx() int {
 // isAtBottom returns true if the table is currently at the bottom of the data
 // (i.e., the last row in the buffer is nil, indicating we've reached the end)
 func (e *Editor) isAtBottom() bool {
-	return len(e.buffer) == 0 || e.buffer[e.lastRowIdx()].data == nil
+	return e.buffer[e.lastRowIdx()].data == nil
 }
 
 func (e *Editor) incrPtr(n int) {
@@ -948,12 +948,4 @@ func (e *Editor) stopRefreshTimer() {
 		close(e.refreshTimerStop)
 		e.refreshTimerStop = nil
 	}
-	e.queryMu.Lock()
-	if e.query != nil {
-		if err := e.query.Close(); err != nil {
-			panic(err)
-		}
-		e.query = nil
-	}
-	e.queryMu.Unlock()
 }

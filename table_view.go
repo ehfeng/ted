@@ -119,13 +119,14 @@ type TableView struct {
 	tableName string // Name of the current table to display in header
 
 	// Display configuration
-	cellPadding   int
-	borderColor   tcell.Color
-	headerColor   tcell.Color
-	headerBgColor tcell.Color
-	separatorChar rune
-	bottom        bool
-	insertRow     []any // if non-empty, render as insert mode row with special styling
+	cellPadding     int
+	borderColor     tcell.Color
+	headerColor     tcell.Color
+	headerBgColor   tcell.Color
+	readOnlyBgColor tcell.Color
+	separatorChar   rune
+	bottom          bool
+	insertRow       []any // if non-empty, render as insert mode row with special styling
 
 	// Selection state
 	selectedRow int
@@ -170,20 +171,21 @@ type TableViewConfig struct {
 // NewTableView creates a new table view component with the given configuration
 func NewTableView(height int, config *TableViewConfig) *TableView {
 	tv := &TableView{
-		Box:            tview.NewBox(),
-		cellPadding:    1,
-		borderColor:    tcell.ColorWhite,
-		headerColor:    tcell.ColorWhite,
-		headerBgColor:  tcell.ColorDarkSlateGray,
-		separatorChar:  '│',
-		selectedRow:    0,
-		selectedCol:    0,
-		selectable:     true,
-		lastClickRow:   -1,
-		lastClickCol:   -1,
-		resizingColumn: -1,
-		viewport:       NewViewport(),
-		rowsHeight:     height,
+		Box:               tview.NewBox(),
+		cellPadding:       1,
+		borderColor:       tcell.ColorWhite,
+		headerColor:       tcell.ColorWhite,
+		headerBgColor:     tcell.ColorDarkSlateGray,
+		readOnlyBgColor:   tcell.ColorDarkGray,
+		separatorChar:     '│',
+		selectedRow:       0,
+		selectedCol:       0,
+		selectable:        true,
+		lastClickRow:      -1,
+		lastClickCol:      -1,
+		resizingColumn:    -1,
+		viewport:          NewViewport(),
+		rowsHeight:        height,
 	}
 
 	tv.SetBorder(false) // We'll draw our own borders
@@ -577,12 +579,18 @@ func (tv *TableView) drawHeaderRow(x, y int) {
 
 	// Header cells
 	for i, header := range tv.headers {
+		// Determine background color based on editability
+		bgColor := tv.headerBgColor
+		if !header.Editable {
+			bgColor = tv.readOnlyBgColor
+		}
+
 		// Padding before content
 		for j := 0; j < tv.cellPadding; j++ {
 			if header.IsKey {
-				tv.viewport.SetContent(pos+j, y, '✦', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+				tv.viewport.SetContent(pos+j, y, '✦', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(bgColor))
 			} else {
-				tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+				tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(bgColor))
 			}
 		}
 		pos += tv.cellPadding
@@ -590,13 +598,13 @@ func (tv *TableView) drawHeaderRow(x, y int) {
 		// Header text
 		headerText := padCellToWidth(header.Name, header.Width)
 		for j, ch := range headerText {
-			tv.viewport.SetContent(pos+j, y, ch, nil, tcell.StyleDefault.Bold(true).Foreground(tv.headerColor).Background(tv.headerBgColor))
+			tv.viewport.SetContent(pos+j, y, ch, nil, tcell.StyleDefault.Bold(true).Foreground(tv.headerColor).Background(bgColor))
 		}
 		pos += header.Width
 
 		// Padding after content
 		for j := 0; j < tv.cellPadding; j++ {
-			tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(tv.headerBgColor))
+			tv.viewport.SetContent(pos+j, y, ' ', nil, tcell.StyleDefault.Foreground(tv.headerColor).Background(bgColor))
 		}
 		pos += tv.cellPadding
 
@@ -687,6 +695,9 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 		} else if isCellModified {
 			// Modified cell - use dark green background
 			baseCellStyle = baseCellStyle.Background(tcell.ColorDarkGreen)
+		} else if !header.Editable {
+			// Non-editable column - use grey background
+			baseCellStyle = baseCellStyle.Background(tv.readOnlyBgColor)
 		}
 
 		// Apply selection highlight on top of base style

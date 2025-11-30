@@ -87,13 +87,10 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 
 	if isView {
 		// Load view columns and metadata
-		os.Stderr.WriteString(fmt.Sprintf("loading view columns for %s\n", tableName))
 		columns, columnIndex, err = loadViewColumns(db, dbType, tableName)
 		if err != nil {
 			return wrapErr(err)
 		}
-		os.Stderr.WriteString(fmt.Sprintf("columns: %+v\n", columns))
-		os.Stderr.WriteString(fmt.Sprintf("columnIndex: %+v\n", columnIndex))
 		relation.Columns = columns
 		relation.ColumnIndex = columnIndex
 
@@ -242,7 +239,6 @@ func loadViewColumns(db *sql.DB, dbType DatabaseType, viewName string) ([]Column
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get view definition: %w", err)
 	}
-	os.Stderr.WriteString(fmt.Sprintf("viewDef: %s\n", viewDef))
 	// Parse view definition - handle both CREATE VIEW and plain SELECT
 	// Try parsing as SELECT first, if that fails, try to extract SELECT from CREATE VIEW
 	analysis, err := ParseViewDefinition(viewDef, dbType, db)
@@ -268,7 +264,6 @@ func loadViewColumns(db *sql.DB, dbType DatabaseType, viewName string) ([]Column
 			return nil, nil, fmt.Errorf("failed to parse view definition: %w", err)
 		}
 	}
-	os.Stderr.WriteString(fmt.Sprintf("analysis: %+v\n", analysis))
 
 	// Get actual column names from the view by querying it
 	// Use SELECT * LIMIT 0 to get column metadata without fetching data
@@ -286,7 +281,8 @@ func loadViewColumns(db *sql.DB, dbType DatabaseType, viewName string) ([]Column
 
 	// Verify we have the same number of columns as in the analysis
 	if len(columnNames) != len(analysis.Columns) {
-		return nil, nil, fmt.Errorf("column count mismatch: analysis has %d columns, query returned %d", len(analysis.Columns), len(columnNames))
+		return nil, nil, fmt.Errorf("column count mismatch: analysis has %d columns, query returned %d",
+			len(analysis.Columns), len(columnNames))
 	}
 
 	// Convert analysis to columns, mapping positionally
@@ -595,7 +591,8 @@ func (rel *Relation) updateViewColumn(records [][]any, rowIdx int, colName strin
 				return v
 			}
 			return raw
-		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") ||
+			strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
 			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
 				return v
 			}
@@ -788,7 +785,8 @@ func (rel *Relation) formatLiteral(val any, attrType string) string {
 			return "NULL"
 		}
 		// For non-numeric types, quote and escape
-		if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") || strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
+		if strings.Contains(at, "int") || strings.Contains(at, "real") || strings.Contains(at, "double") ||
+			strings.Contains(at, "float") || strings.Contains(at, "numeric") || strings.Contains(at, "decimal") {
 			return v
 		}
 		s := strings.ReplaceAll(v, "'", "''")
@@ -888,7 +886,8 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 				return v
 			}
 			return raw
-		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") ||
+			strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
 			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
 				return v
 			}
@@ -946,7 +945,8 @@ func (rel *Relation) BuildUpdatePreview(records [][]any, rowIdx int, colName str
 	quotedTable := quoteQualified(rel.DBType, rel.Name)
 	useReturning := databaseFeatures[rel.DBType].returning
 	if useReturning {
-		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s", quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
+		return fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s",
+			quotedTable, setClause, strings.Join(whereParts, " AND "), returning)
 	}
 	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotedTable, setClause, strings.Join(whereParts, " AND "))
 }
@@ -1023,12 +1023,109 @@ func (rel *Relation) DeleteDBRecord(records [][]any, rowIdx int) error {
 	return nil
 }
 
+// selectInsertedRowByKeys selects a row from the database using key values from newRecordRow.
+// This is used when RETURNING is not supported or LastInsertId is unavailable.
+// Key values are type-converted before being used in the WHERE clause.
+func (rel *Relation) selectInsertedRowByKeys(tx *sql.Tx, newRecordRow []any, returningCols []string,
+	placeholder func(int) string, quotedTable string) ([]any, error) {
+	// Type conversion helper (matches toDBValue in InsertDBRecord)
+	toDBValue := func(colIdx int, raw any) any {
+		// If already not a string, return as-is
+		strVal, ok := raw.(string)
+		if !ok {
+			return raw
+		}
+
+		attrType := ""
+		if colIdx < len(rel.Columns) {
+			attrType = strings.ToLower(rel.Columns[colIdx].Type)
+		}
+		if strVal == NullGlyph || strVal == "" {
+			return nil
+		}
+		t := attrType
+		switch {
+		case strings.Contains(t, "bool"):
+			lower := strings.ToLower(strings.TrimSpace(strVal))
+			if lower == "1" || lower == "true" || lower == "t" {
+				return true
+			}
+			if lower == "0" || lower == "false" || lower == "f" {
+				return false
+			}
+			return strVal
+		case strings.Contains(t, "int"):
+			if v, err := strconv.ParseInt(strings.TrimSpace(strVal), 10, 64); err == nil {
+				return v
+			}
+			return strVal
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") ||
+			strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(strVal), 64); err == nil {
+				return v
+			}
+			return strVal
+		default:
+			return strVal
+		}
+	}
+
+	// Build WHERE clause using key values
+	whereParts := make([]string, 0, len(rel.Key))
+	whereParams := make([]any, 0, len(rel.Key))
+	paramIdx := 1
+
+	for _, keyIdx := range rel.Key {
+		if keyIdx >= len(rel.Columns) {
+			return nil, fmt.Errorf("key column index %d out of range", keyIdx)
+		}
+		keyColName := rel.Columns[keyIdx].Name
+		whereParts = append(whereParts, fmt.Sprintf("%s = %s", quoteIdent(rel.DBType, keyColName), placeholder(paramIdx)))
+
+		// Apply type conversion to key value
+		keyVal := newRecordRow[keyIdx]
+		whereParams = append(whereParams, toDBValue(keyIdx, keyVal))
+		paramIdx++
+	}
+
+	// Execute SELECT
+	selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
+		strings.Join(returningCols, ", "), quotedTable, strings.Join(whereParts, " AND "))
+
+	row := tx.QueryRow(selQuery, whereParams...)
+	rowVals := make([]any, len(returningCols))
+	scanArgs := make([]any, len(rowVals))
+	for i := range rowVals {
+		scanArgs[i] = &rowVals[i]
+	}
+
+	if err := row.Scan(scanArgs...); err != nil {
+		return nil, fmt.Errorf("scan failed: %w", err)
+	}
+
+	return rowVals, nil
+}
+
 // InsertDBRecord inserts a new record into the database. It returns the inserted
 // row values ordered by relation.Columns. The newRecordRow should contain
 // values for all columns (or nil/NullGlyph for NULL values).
 func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 	if len(newRecordRow) != len(rel.Columns) {
 		return nil, fmt.Errorf("newRecordRow length mismatch: expected %d, got %d", len(rel.Columns), len(newRecordRow))
+	}
+
+	// For multi-column keys, validate that all key values are present
+	// (multi-column keys cannot use LastInsertId since only single auto-increment columns can be auto-generated)
+	if len(rel.Key) > 1 {
+		for _, keyIdx := range rel.Key {
+			if keyIdx >= len(newRecordRow) {
+				return nil, fmt.Errorf("multi-column key requires all key values to be provided")
+			}
+			keyVal := newRecordRow[keyIdx]
+			if keyVal == nil || keyVal == "" || keyVal == NullGlyph || keyVal == EmptyCellValue {
+				return nil, fmt.Errorf("multi-column key requires all key values to be provided (key column %s is missing)", rel.Columns[keyIdx].Name)
+			}
+		}
 	}
 
 	// Convert string values to appropriate DB values
@@ -1153,41 +1250,50 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 			return nil, fmt.Errorf("insert failed: %w", err)
 		}
 
-		// Get last insert ID if available
-		lastID, err := result.LastInsertId()
-		if err == nil && lastID > 0 && len(rel.Key) == 1 {
-			// Select the inserted row by last insert ID
-			keyIdx := rel.Key[0]
-			if keyIdx >= len(rel.Columns) {
-				return nil, fmt.Errorf("key column index out of range")
-			}
-			keyColName := rel.Columns[keyIdx].Name
-			selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
-				returning, quotedTable, quoteIdent(rel.DBType, keyColName), placeholder(1))
-			row := tx.QueryRow(selQuery, lastID)
+		// Retrieve the inserted row
+		var rowVals []any
+		var selectErr error
 
-			rowVals := make([]any, len(returningCols))
-			scanArgs := make([]any, len(rowVals))
-			for i := range rowVals {
-				scanArgs[i] = &rowVals[i]
-			}
+		if len(rel.Key) == 1 {
+			// For single-column keys, try LastInsertId first
+			lastID, err := result.LastInsertId()
+			if err == nil && lastID > 0 {
+				// Select the inserted row by last insert ID
+				keyIdx := rel.Key[0]
+				if keyIdx >= len(rel.Columns) {
+					_ = tx.Rollback()
+					return nil, fmt.Errorf("key column index out of range")
+				}
+				keyColName := rel.Columns[keyIdx].Name
+				selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
+					returning, quotedTable, quoteIdent(rel.DBType, keyColName), placeholder(1))
+				row := tx.QueryRow(selQuery, lastID)
 
-			if err := row.Scan(scanArgs...); err != nil {
-				_ = tx.Rollback()
-				return nil, fmt.Errorf("scan failed: %w", err)
-			}
+				rowVals = make([]any, len(returningCols))
+				scanArgs := make([]any, len(rowVals))
+				for i := range rowVals {
+					scanArgs[i] = &rowVals[i]
+				}
 
-			if err := tx.Commit(); err != nil {
-				return nil, fmt.Errorf("commit failed: %w", err)
+				selectErr = row.Scan(scanArgs...)
+			} else {
+				// LastInsertId unavailable, use helper
+				rowVals, selectErr = rel.selectInsertedRowByKeys(tx, newRecordRow, returningCols, placeholder, quotedTable)
 			}
-			return rowVals, nil
+		} else {
+			// For multi-column keys, skip LastInsertId and use helper directly
+			rowVals, selectErr = rel.selectInsertedRowByKeys(tx, newRecordRow, returningCols, placeholder, quotedTable)
 		}
 
-		// Fallback: commit and return nil (caller should refresh manually)
+		if selectErr != nil {
+			_ = tx.Rollback()
+			return nil, selectErr
+		}
+
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit failed: %w", err)
 		}
-		return nil, nil
+		return rowVals, nil
 	}
 
 	if useReturning {
@@ -1222,41 +1328,50 @@ func (rel *Relation) InsertDBRecord(newRecordRow []any) ([]any, error) {
 		return nil, fmt.Errorf("insert failed: %w", err)
 	}
 
-	// Get last insert ID if available
-	lastID, err := result.LastInsertId()
-	if err == nil && lastID > 0 && len(rel.Key) == 1 {
-		// Select the inserted row by last insert ID
-		keyIdx := rel.Key[0]
-		if keyIdx >= len(rel.Columns) {
-			return nil, fmt.Errorf("key column index out of range")
-		}
-		keyColName := rel.Columns[keyIdx].Name
-		selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
-			returning, quotedTable, quoteIdent(rel.DBType, keyColName), placeholder(1))
-		row := tx.QueryRow(selQuery, lastID)
+	// Retrieve the inserted row
+	var rowVals []any
+	var selectErr error
 
-		rowVals := make([]any, len(returningCols))
-		scanArgs := make([]any, len(rowVals))
-		for i := range rowVals {
-			scanArgs[i] = &rowVals[i]
-		}
+	if len(rel.Key) == 1 {
+		// For single-column keys, try LastInsertId first
+		lastID, err := result.LastInsertId()
+		if err == nil && lastID > 0 {
+			// Select the inserted row by last insert ID
+			keyIdx := rel.Key[0]
+			if keyIdx >= len(rel.Columns) {
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("key column index out of range")
+			}
+			keyColName := rel.Columns[keyIdx].Name
+			selQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
+				returning, quotedTable, quoteIdent(rel.DBType, keyColName), placeholder(1))
+			row := tx.QueryRow(selQuery, lastID)
 
-		if err := row.Scan(scanArgs...); err != nil {
-			_ = tx.Rollback()
-			return nil, fmt.Errorf("scan failed: %w", err)
-		}
+			rowVals = make([]any, len(returningCols))
+			scanArgs := make([]any, len(rowVals))
+			for i := range rowVals {
+				scanArgs[i] = &rowVals[i]
+			}
 
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit failed: %w", err)
+			selectErr = row.Scan(scanArgs...)
+		} else {
+			// LastInsertId unavailable, use helper
+			rowVals, selectErr = rel.selectInsertedRowByKeys(tx, newRecordRow, returningCols, placeholder, quotedTable)
 		}
-		return rowVals, nil
+	} else {
+		// For multi-column keys, skip LastInsertId and use helper directly
+		rowVals, selectErr = rel.selectInsertedRowByKeys(tx, newRecordRow, returningCols, placeholder, quotedTable)
 	}
 
-	// Fallback: commit and return nil (caller should refresh manually)
+	if selectErr != nil {
+		_ = tx.Rollback()
+		return nil, selectErr
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
-	return nil, nil
+	return rowVals, nil
 }
 
 // UpdateDBValue updates a single cell in the underlying database using the
@@ -1302,7 +1417,8 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 				return v
 			}
 			return raw
-		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+		case strings.Contains(t, "real") || strings.Contains(t, "double") || strings.Contains(t, "float") ||
+			strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
 			if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
 				return v
 			}
@@ -1453,9 +1569,7 @@ func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []a
 	// Convert key indices to column names
 	keyColNames := make([]string, len(rel.Key))
 	for i, keyIdx := range rel.Key {
-		if keyIdx < len(rel.Columns) {
-			keyColNames[i] = rel.Columns[keyIdx].Name
-		}
+		keyColNames[i] = rel.Columns[keyIdx].Name
 	}
 	query, err := selectQuery(rel.DBType, rel.Name, columns, sortCol, keyColNames, len(params) > 0, inclusive, scrollDown)
 	if err != nil {

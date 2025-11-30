@@ -135,7 +135,6 @@ func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]i
 // Draw implements tview.Primitive and renders the fuzzy selector.
 // It calculates filtered results and match positions on each frame.
 func (fs *FuzzySelector) Draw(screen tcell.Screen) {
-	debugLog("Drawing fuzzy selector\n")
 	fs.Box.DrawForSubclass(screen, fs)
 
 	// Calculate filtered results and match positions on each draw
@@ -314,7 +313,6 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 
 	// Handle keyboard navigation and selection
 	inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		debugLog("Input field capture: %v\n", event.Key())
 		filtered, _ := tp.calculateFiltered(tp.searchText)
 
 		switch event.Key() {

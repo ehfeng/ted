@@ -161,7 +161,6 @@ func runEditor(config *Config, dbname, tablename string) error {
 	if tablename != "" {
 		var err error
 		relation, err = dblib.NewRelation(db, dbType, tablename)
-		debugLog(fmt.Sprintf("relation: %+v\n", relation))
 		if err != nil {
 			CaptureError(err)
 			return err
@@ -182,7 +181,8 @@ func runEditor(config *Config, dbname, tablename string) error {
 					break
 				}
 			}
-			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey})
+			editable := relation.IsColumnEditable(i)
+			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey, Editable: editable})
 		}
 	} else {
 		// No table specified - create empty state

@@ -533,7 +533,6 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 			e.exitEditMode()
 			return
 		}
-		debugLog("firstKeys: %v, lastKeys: %v\n", firstKeys, lastKeys)
 
 		// Query database to compare row positions
 		isAbove, isBelow, err := dblib.CompareRowPosition(e.db, e.relation, nil, updatedKeys, firstKeys, lastKeys)

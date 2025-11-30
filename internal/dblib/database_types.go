@@ -134,7 +134,8 @@ func (sc SortColumn) String(scrollDown bool) string {
 
 // DisplayColumn represents a display column with name and width (for UI)
 type DisplayColumn struct {
-	Name  string
-	Width int
-	IsKey bool
+	Name     string
+	Width    int
+	IsKey    bool
+	Editable bool
 }
