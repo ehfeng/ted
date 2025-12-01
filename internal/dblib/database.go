@@ -1566,28 +1566,21 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
 func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
-	debugLog("QueryRows: START table=%s, inclusive=%v, scrollDown=%v, params=%v\n", rel.Name, inclusive, scrollDown, params)
-
 	// Convert key indices to column names
 	keyColNames := make([]string, len(rel.Key))
 	for i, keyIdx := range rel.Key {
 		keyColNames[i] = rel.Columns[keyIdx].Name
 	}
-	debugLog("QueryRows: keyColNames=%v (from indices %v)\n", keyColNames, rel.Key)
 
 	query, err := selectQuery(rel.DBType, rel.Name, columns, sortCol, keyColNames, len(params) > 0, inclusive, scrollDown)
 	if err != nil {
-		debugLog("QueryRows: selectQuery ERROR: %v\n", err)
 		return nil, err
 	}
-	debugLog("QueryRows: executing query: %s with params %v\n", query, params)
 
 	rows, err := rel.DB.Query(query, params...)
 	if err != nil {
-		debugLog("QueryRows: DB.Query ERROR: %v\n", err)
 		return nil, err
 	}
-	debugLog("QueryRows: SUCCESS\n")
 	return rows, nil
 }
 

@@ -14,6 +14,7 @@ func (e *Editor) renderData() {
 	rowCount := len(e.buffer)
 	// Count actual data rows (excluding nil sentinels)
 	atBottom := e.buffer[e.lastRowIdx()].data == nil
+
 	if atBottom {
 		rowCount--
 	}
@@ -410,6 +411,7 @@ func (e *Editor) refresh() error {
 	for i, keyIdx := range e.relation.Key {
 		id[i] = e.buffer[e.pointer].data[keyIdx]
 	}
+
 	// Close existing query before refresh
 	e.queryMu.Lock()
 	if e.query != nil {
@@ -461,19 +463,19 @@ func (e *Editor) refresh() error {
 	rows.Close()
 
 	// Apply diff tracking if previous data exists and differs
-	if e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
-		e.diffAndPopulateBuffer(currentRows)
-	} else {
-		// No diffing needed - just populate buffer normally
-		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
-			e.buffer[i] = currentRows[i]
-		}
-		// Mark end with empty row if we didn't fill the buffer
-		if len(currentRows) < len(e.buffer) {
-			e.buffer[len(currentRows)] = Row{}
-			e.buffer = e.buffer[:len(currentRows)+1]
-		}
+	// if e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
+	// 	e.diffAndPopulateBuffer(currentRows)
+	// } else {
+	// No diffing needed - just populate buffer normally
+	for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+		e.buffer[i] = currentRows[i]
 	}
+	// Mark end with empty row if we didn't fill the buffer
+	if len(currentRows) < len(e.buffer) {
+		e.buffer[len(currentRows)] = Row{}
+		e.buffer = e.buffer[:len(currentRows)+1]
+	}
+	// }
 
 	// Clone currentRows to previousRows for next refresh
 	e.previousRows = make([]Row, len(currentRows))
@@ -698,7 +700,8 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if err := query.Scan(scanTargets...); err != nil {
 			return false, err
 		}
-		e.buffer[(e.pointer+rowsFetched)%len(e.buffer)] = Row{state: RowStateNormal, data: row}
+		bufferIdx := (e.pointer + rowsFetched) % len(e.buffer)
+		e.buffer[bufferIdx] = Row{state: RowStateNormal, data: row}
 	}
 	// new pointer position
 	e.incrPtr(rowsFetched)

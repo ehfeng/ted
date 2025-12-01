@@ -11,9 +11,6 @@ import (
 // `select col, ... from tbl where col > ?, ... order by sortCol, keyCol, ...`
 // for initial load, params are nil
 func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCol *SortColumn, keyCols []string, hasParams, inclusive, scrollDown bool) (string, error) {
-	debugLog("selectQuery: START table=%s, keyCols=%v, hasParams=%v, inclusive=%v, scrollDown=%v\n",
-		tableName, keyCols, hasParams, inclusive, scrollDown)
-
 	if len(keyCols) == 0 {
 		panic("keyCols is empty")
 	}
@@ -67,19 +64,16 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 			}
 		}
 
-		debugLog("selectQuery: WHERE %s %s %s\n", colExpr, operator, placeholderExpr)
 		builder.WriteString(colExpr)
 		builder.WriteString(operator)
 		builder.WriteString(placeholderExpr)
 	}
 	builder.WriteString(" ORDER BY ")
 	if sortCol != nil {
-		debugLog("selectQuery: ORDER BY sortCol=%s (asc=%v)\n", sortCol.Name, sortCol.Asc)
 		builder.WriteString(sortColString)
 		builder.WriteString(", ")
 	}
 	for i, col := range keyCols {
-		debugLog("selectQuery: ORDER BY keyCols[%d]=%s (scrollDown=%v)\n", i, col, scrollDown)
 		sc := SortColumn{Name: quoteIdent(dbType, col), Asc: scrollDown}
 		builder.WriteString(sc.String(scrollDown))
 		if i < len(keyCols)-1 {
@@ -87,7 +81,6 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 		}
 	}
 	query := builder.String()
-	debugLog("selectQuery: RESULT query=%s\n", query)
 	return query, nil
 }
 
