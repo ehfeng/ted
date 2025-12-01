@@ -98,8 +98,8 @@ func (e *Editor) setupKeyBindings() {
 			})
 			return nil
 		}
-		// Ctrl+R: Insert mode
-		if (rune == 'r' || rune == 18) && mod&tcell.ModCtrl != 0 {
+		// Ctrl+N: New row
+		if (rune == 'n' || rune == 14) && mod&tcell.ModCtrl != 0 {
 			// Ctrl+I: Jump to end and enable insert mode
 			e.loadFromRowId(nil, false, 0)
 			go func() {

@@ -8,6 +8,7 @@ ted displays database tables as markdown table and provides spreadsheet-like edi
 ted [dbname] [tbl]
 ted test users
 ted --pg test users
+ted --pg test --sql "select * from users"
 ```
 
 `dbname` can either be a database file (sqlite or duckdb) or a database name.
