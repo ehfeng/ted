@@ -31,7 +31,7 @@ func (e *Editor) executeSQL(query string) {
 		strings.HasPrefix(queryUpper, "START TRANSACTION") ||
 		strings.HasPrefix(queryUpper, "BEGIN WORK") ||
 		strings.HasPrefix(queryUpper, "BEGIN TRANSACTION") {
-		e.SetStatusError("Transaction statements are not allowed in SQL mode")
+		e.SetStatusError("Transactions are not supported")
 		e.startRefreshTimer()
 		return
 	}
