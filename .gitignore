@@ -3,3 +3,22 @@ ted
 test.db*
 .cache
 .DS_Store
+
+# Daemon runtime files
+
+.beads/daemon.log
+.beads/daemon.pid
+.beads/daemon.lock
+.beads/bd.sock
+.beads/.exclusive-lock
+
+# 3-way merge snapshot files (local-only, for deletion tracking)
+.beads/beads.base.jsonl
+.beads/beads.left.jsonl
+.beads/beads.base.meta.json
+.beads/beads.left.meta.json
+
+# .beads directory files (keep JSONL only)
+.beads/beads.db
+.beads/beads.db-*
+.git/beads-worktrees/
