@@ -64,9 +64,17 @@ var databaseFeatures = map[DatabaseType]databaseFeature{
 	},
 }
 
+// Table represents a base table referenced by a relation
+type Table struct {
+	Name       string
+	Key        []int // index into Relation.Columns for key columns
+	References []Reference
+}
+
+// Reference represents a foreign key relationship
 type Reference struct {
-	ForeignTable   *Relation
-	ForeignColumns map[int]string // attr index -> foreign column
+	Table   string            // foreign table name
+	Columns map[string]string // local column name -> foreign column name
 }
 
 // database: table, attribute, record
@@ -77,23 +85,31 @@ type Relation struct {
 	DBType DatabaseType
 
 	// Name metadata - exported for access from main package
-	Name           string
-	Key            []string
-	Attributes     map[string]Attribute // attribute name -> attribute
-	AttributeOrder []string             // attribute name order
-	AttributeIndex map[string]int       // attribute name -> attribute index
-	References     []Reference          // references
+	Name        string
+	IsView      bool              // true if this is a view, false if table
+	Tables      map[string]*Table // base tables referenced (for views)
+	Columns     []Column          // ordered columns (renamed from Attribute)
+	ColumnIndex map[string]int    // column name -> column index
+	Key         []int             // index into Columns for key columns
+	References  []Reference       // references
 }
 
-type Attribute struct {
+// Column represents a column in a relation (renamed from Attribute)
+type Column struct {
 	Name           string
 	Type           string
 	Nullable       bool
-	Reference      int      // reference index, -1 if not a foreign key column
-	Generated      bool     // TODO if computed column, read-only
+	Table          string   // blank if derived/computed, base table name if passthrough
+	BaseColumn     string   // original column name in base table (if passthrough)
+	Reference      int      // index into Table.References, -1 if not a foreign key column
+	Generated      bool     // if computed column, read-only
 	EnumValues     []string // for ENUM types, stores allowed values
 	CustomTypeName string   // for custom types (PostgreSQL), stores the type name
 }
+
+// Attribute is deprecated - use Column instead
+// Kept for backward compatibility during migration
+type Attribute = Column
 
 type SortColumn struct {
 	Name string
@@ -116,8 +132,10 @@ func (sc SortColumn) String(scrollDown bool) string {
 	}
 }
 
-// Column represents a display column with name and width
-type Column struct {
-	Name  string
-	Width int
+// DisplayColumn represents a display column with name and width (for UI)
+type DisplayColumn struct {
+	Name     string
+	Width    int
+	IsKey    bool
+	Editable bool
 }

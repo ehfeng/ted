@@ -117,10 +117,13 @@ func (e *Editor) setupKeyBindings() {
 		if rune == '0' && mod&tcell.ModAlt != 0 {
 			if len(e.table.insertRow) > 0 && !e.editing && e.relation != nil {
 				// Check if the selected column is nullable
-				colName := e.columns[col].Name
-				if attr, ok := e.relation.Attributes[colName]; ok && attr.Nullable {
-					e.table.insertRow[col] = nil
-					e.renderData()
+				colName := e.table.GetHeaders()[col].Name
+				if colIdx, ok := e.relation.ColumnIndex[colName]; ok && colIdx < len(e.relation.Columns) {
+					attr := e.relation.Columns[colIdx]
+					if attr.Nullable {
+						e.table.insertRow[col] = nil
+						e.renderData()
+					}
 				}
 				return nil
 			}
@@ -219,7 +222,7 @@ func (e *Editor) setupKeyBindings() {
 				e.table.Select(e.lastRowIdx()-1, col) // -1 because the last row is the bottom border
 				return nil
 			}
-			e.table.Select(row, len(e.columns)-1)
+			e.table.Select(row, len(e.table.GetHeaders())-1)
 			return nil
 		case key == tcell.KeyPgUp:
 			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
@@ -307,7 +310,7 @@ func (e *Editor) setupKeyBindings() {
 			if e.paletteMode == PaletteModeDelete {
 				return nil
 			}
-			e.table.Select(row, len(e.columns)-1)
+			e.table.Select(row, len(e.table.GetHeaders())-1)
 			return nil
 		case key == tcell.KeyLeft:
 			// Disable in delete mode
@@ -401,7 +404,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 			// l: move right
-			if col < len(e.columns)-1 {
+			if col < len(e.table.GetHeaders())-1 {
 				e.table.Select(row, col+1)
 			}
 			return nil
@@ -474,7 +477,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 			// $: jump to last column
-			e.table.Select(row, len(e.columns)-1)
+			e.table.Select(row, len(e.table.GetHeaders())-1)
 			return nil
 		case e.vimMode && key == tcell.KeyRune && rune == 'i' && mod == 0:
 			// Disable in delete mode
@@ -583,10 +586,10 @@ func (e *Editor) navigateTab(reverse bool) {
 		if col > 0 {
 			e.table.Select(row, col-1)
 		} else if row > 0 {
-			e.table.Select(row-1, len(e.columns)-1)
+			e.table.Select(row-1, len(e.table.GetHeaders())-1)
 		}
 	} else {
-		if col < len(e.columns)-1 {
+		if col < len(e.table.GetHeaders())-1 {
 			e.table.Select(row, col+1)
 		} else if row < len(e.buffer)-1 {
 			e.table.Select(row+1, 0)

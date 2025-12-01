@@ -150,7 +150,7 @@ func (c *Config) connect() (*sql.DB, dblib.DatabaseType, error) {
 	return db, dbType, nil
 }
 
-// GetTables retrieves a list of table names from the database.
+// GetTables retrieves a list of table and view names from the database.
 func (c *Config) GetTables() ([]string, error) {
 	db, dbType, err := c.connect()
 	if err != nil {
@@ -161,11 +161,11 @@ func (c *Config) GetTables() ([]string, error) {
 	var query string
 	switch dbType {
 	case dblib.PostgreSQL:
-		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type IN ('BASE TABLE', 'VIEW')"
 	case dblib.MySQL:
-		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = ?"
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW')"
 	case dblib.SQLite:
-		query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+		query = "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'"
 	default:
 		return nil, fmt.Errorf("unsupported database type for GetTables")
 	}

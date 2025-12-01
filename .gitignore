@@ -21,4 +21,5 @@ test.db*
 # .beads directory files (keep JSONL only)
 .beads/beads.db
 .beads/beads.db-*
+
 .git/beads-worktrees/

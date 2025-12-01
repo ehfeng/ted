@@ -3,7 +3,6 @@ package dblib
 import (
 	"database/sql"
 	"fmt"
-	"slices"
 	"strings"
 )
 
@@ -44,32 +43,30 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 
 	if hasParams {
 		builder.WriteString(" WHERE ")
-		nextPlaceholder := func(pos int) string {
-			if databaseFeatures[dbType].positionalPlaceholder {
-				return fmt.Sprintf("$%d", pos)
-			}
-			return "?"
-		}
-		for i, col := range keyCols {
-			if i > 0 {
-				builder.WriteString(" AND ")
-			}
-			builder.WriteString(quoteIdent(dbType, col))
-			if scrollDown {
-				if inclusive {
-					builder.WriteString(" >= ")
-				} else {
-					builder.WriteString(" > ")
-				}
+
+		// Build row value comparison for key columns
+		colExpr, placeholders := buildRowValueExpression(dbType, keyCols, 1)
+		placeholderExpr := buildPlaceholderExpression(placeholders)
+
+		// Determine operator based on direction and inclusivity
+		var operator string
+		if scrollDown {
+			if inclusive {
+				operator = " >= "
 			} else {
-				if inclusive {
-					builder.WriteString(" <= ")
-				} else {
-					builder.WriteString(" < ")
-				}
+				operator = " > "
 			}
-			builder.WriteString(nextPlaceholder(i + 1))
+		} else {
+			if inclusive {
+				operator = " <= "
+			} else {
+				operator = " < "
+			}
 		}
+
+		builder.WriteString(colExpr)
+		builder.WriteString(operator)
+		builder.WriteString(placeholderExpr)
 	}
 	builder.WriteString(" ORDER BY ")
 	if sortCol != nil {
@@ -83,7 +80,8 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 			builder.WriteString(", ")
 		}
 	}
-	return builder.String(), nil
+	query := builder.String()
+	return query, nil
 }
 
 // quoteIdent safely quotes an identifier (table/column) for the target DB.
@@ -165,31 +163,29 @@ var commonReservedIdents = map[string]struct{}{
 	"as": {}, "on": {},
 }
 
-func GetForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []string) (map[string]any, error) {
-	if len(columns) == 0 {
-		// choose non-key columns
-		columns = make([]string, 0, len(table.AttributeOrder))
-		for _, col := range table.AttributeOrder {
-			if !slices.Contains(table.Key, col) {
-				columns = append(columns, col)
-			}
-		}
+// columns is the list of columns to display in the preview based on configs
+func GetForeignRow(db *sql.DB, table *Relation, foreignKey map[string]any, columns []string) (map[string]any, error) {
+	// choose non-key columns
+	columnNames := make([]string, 0, len(columns))
+	for _, col := range columns {
+		columnNames = append(columnNames, col)
 	}
-	whereParts := make([]string, 0, len(key))
-	args := make([]any, 0, len(key))
+
+	whereParts := make([]string, 0, len(foreignKey))
+	args := make([]any, 0, len(foreignKey))
 	placeholderPos := 1
-	for col := range key {
+	for col := range foreignKey {
 		whereParts = append(whereParts, fmt.Sprintf("%s = %s", quoteIdent(table.DBType, col), table.placeholder(placeholderPos)))
-		args = append(args, key[col])
+		args = append(args, foreignKey[col])
 		placeholderPos++
 	}
-	quotedColumns := make([]string, len(columns))
-	for i, col := range columns {
+	quotedColumns := make([]string, len(columnNames))
+	for i, col := range columnNames {
 		quotedColumns[i] = quoteIdent(table.DBType, col)
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", strings.Join(quotedColumns, ", "), quoteQualified(table.DBType, table.Name), strings.Join(whereParts, " AND "))
 	row := db.QueryRow(query, args...)
-	values := make([]any, len(columns))
+	values := make([]any, len(columnNames))
 	// scan into pointers
 	scanArgs := make([]any, len(values))
 	for i := range values {
@@ -198,8 +194,8 @@ func GetForeignRow(db *sql.DB, table *Relation, key map[string]any, columns []st
 	if err := row.Scan(scanArgs...); err != nil {
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
-	result := make(map[string]any, len(columns))
-	for i, col := range columns {
+	result := make(map[string]any, len(columnNames))
+	for i, col := range columnNames {
 		result[col] = *scanArgs[i].(*any)
 	}
 	return result, nil
@@ -272,4 +268,53 @@ func CompareRowPosition(db *sql.DB, table *Relation, sortCol *SortColumn, update
 	}
 
 	return isAbove, isBelow, nil
+}
+
+// buildRowValueExpression builds column and placeholder expressions for row value comparison.
+// For single column keys: returns "key1", []string{"?"} (or "$1" for positional placeholders)
+// For multi-column keys: returns "(key1, key2)", []string{"?", "?"} (or "$1", "$2" for positional)
+//
+// This enables correct lexicographic ordering comparison in WHERE clauses using row value syntax:
+//   Single: WHERE key1 > ?
+//   Multi:  WHERE (key1, key2) > (?, ?)
+func buildRowValueExpression(dbType DatabaseType, keyCols []string, startPos int) (columnExpr string, placeholders []string) {
+	// Generate placeholders with positions
+	nextPlaceholder := func(pos int) string {
+		if databaseFeatures[dbType].positionalPlaceholder {
+			return fmt.Sprintf("$%d", pos)
+		}
+		return "?"
+	}
+
+	placeholders = make([]string, len(keyCols))
+	for i := 0; i < len(keyCols); i++ {
+		placeholders[i] = nextPlaceholder(startPos + i)
+	}
+
+	// Quote column names
+	quotedCols := make([]string, len(keyCols))
+	for i, col := range keyCols {
+		quotedCols[i] = quoteIdent(dbType, col)
+	}
+
+	// Build expression
+	if len(keyCols) == 1 {
+		// Scalar: just the column name
+		columnExpr = quotedCols[0]
+	} else {
+		// Tuple: (col1, col2, col3)
+		columnExpr = "(" + strings.Join(quotedCols, ", ") + ")"
+	}
+
+	return columnExpr, placeholders
+}
+
+// buildPlaceholderExpression builds the placeholder side of a row value comparison.
+// For single value: returns "?" or "$1"
+// For multiple values: returns "(?, ?, ?)" or "($1, $2, $3)"
+func buildPlaceholderExpression(placeholders []string) string {
+	if len(placeholders) == 1 {
+		return placeholders[0]
+	}
+	return "(" + strings.Join(placeholders, ", ") + ")"
 }

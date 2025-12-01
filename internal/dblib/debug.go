@@ -1,6 +1,6 @@
 //go:build debug
 
-package main
+package dblib
 
 import (
 	"fmt"
@@ -30,26 +30,4 @@ func debugLog(format string, args ...interface{}) {
 
 	timestamp := time.Now().Format("15:04:05.000")
 	fmt.Fprintf(debugFile, "[%s] "+format, append([]interface{}{timestamp}, args...)...)
-}
-
-// debugLogKeys formats and logs multi-column keys
-func debugLogKeys(prefix string, keys []any) {
-	if keys == nil {
-		debugLog("%s: nil\n", prefix)
-		return
-	}
-	debugLog("%s: %v (len=%d)\n", prefix, keys, len(keys))
-}
-
-// debugLogRow formats and logs row data (first few columns only to avoid spam)
-func debugLogRow(prefix string, row []any) {
-	if row == nil {
-		debugLog("%s: nil\n", prefix)
-		return
-	}
-	if len(row) <= 5 {
-		debugLog("%s: %v\n", prefix, row)
-	} else {
-		debugLog("%s: %v... (len=%d)\n", prefix, row[:5], len(row))
-	}
 }

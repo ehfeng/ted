@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -37,14 +36,13 @@ type Row struct {
 	modified []int // indices of columns that were modified in the last refresh
 }
 
-// columns are display, relation.attributes stores the database attributes
+// relation.attributes stores the database attributes
 // lookup key is unique: it's always selected
 // if a multicolumn reference is selected, all columns in the reference are selected
 type Editor struct {
 	app      *tview.Application
 	pages    *tview.Pages
 	table    *TableView
-	columns  []dblib.Column // TODO move this into Config
 	relation *dblib.Relation
 	config   *Config
 	vimMode  bool
@@ -72,7 +70,7 @@ type Editor struct {
 	scrollDown bool       // direction of current query: true = next/forward, false = prev/backward
 	queryMu    sync.Mutex // protects query and scrollDown from concurrent access
 	pointer    int        // pointer to the current record
-	buffer     []Row      // columns are keyed off e.columns
+	buffer     []Row      // circular buffer of rows
 
 	// change tracking for refresh
 	previousRows []Row // snapshot of rows from last refresh
@@ -157,7 +155,7 @@ func runEditor(config *Config, dbname, tablename string) error {
 	tableDataHeight := terminalHeight - chromeHeight // 3 lines for picker bar, status bar, command palette
 
 	var relation *dblib.Relation
-	var columns []dblib.Column
+	var headers []dblib.DisplayColumn
 
 	// Only load table if tablename is provided
 	if tablename != "" {
@@ -168,19 +166,27 @@ func runEditor(config *Config, dbname, tablename string) error {
 			return err
 		}
 
-		// force key to be first column(s)
-		columns = make([]dblib.Column, 0, len(relation.AttributeOrder))
-		for _, name := range relation.Key {
-			columns = append(columns, dblib.Column{Name: name, Width: 4})
+		// Check if relation is keyable (has keys)
+		if len(relation.Key) == 0 {
+			return fmt.Errorf("relation %s has no keyable columns and cannot be viewed", tablename)
 		}
-		for _, name := range relation.AttributeOrder {
-			if !slices.Contains(relation.Key, name) {
-				columns = append(columns, dblib.Column{Name: name, Width: DefaultColumnWidth})
+
+		// Build headers in database schema order
+		headers = make([]dblib.DisplayColumn, 0, len(relation.Columns))
+		for i, col := range relation.Columns {
+			isKey := false
+			for _, keyIdx := range relation.Key {
+				if keyIdx == i {
+					isKey = true
+					break
+				}
 			}
+			editable := relation.IsColumnEditable(i)
+			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey, Editable: editable})
 		}
 	} else {
 		// No table specified - create empty state
-		columns = []dblib.Column{}
+		headers = []dblib.DisplayColumn{}
 	}
 
 	// Get available tables for the picker
@@ -197,7 +203,6 @@ func runEditor(config *Config, dbname, tablename string) error {
 		app:         app,
 		pages:       tview.NewPages(),
 		table:       nil, // Will be initialized after we have access to all editor fields
-		columns:     columns,
 		relation:    relation,
 		config:      config,
 		vimMode:     config.VimMode,
@@ -218,23 +223,8 @@ func runEditor(config *Config, dbname, tablename string) error {
 		editor.setCursorStyle(0)         // Reset to default cursor style
 	})
 
-	// Initialize table with configuration
-	headers := make([]HeaderColumn, len(editor.columns))
-	for i, col := range editor.columns {
-		headers[i] = HeaderColumn{
-			Name:  col.Name,
-			Width: col.Width,
-		}
-	}
-
-	keyColumnCount := 0
-	if editor.relation != nil {
-		keyColumnCount = len(editor.relation.Key)
-	}
-
 	editor.table = NewTableView(tableDataHeight+1, &TableViewConfig{
-		Headers:        headers,
-		KeyColumnCount: keyColumnCount,
+		Headers: headers,
 		DoubleClickFunc: func(row, col int) {
 			editor.enterEditMode(row, col)
 		},

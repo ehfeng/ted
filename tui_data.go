@@ -10,20 +10,22 @@ import (
 
 // e.table.SetData based on e.records and e.pointer
 func (e *Editor) renderData() {
+	// number of rows to send to TableView
+	rowCount := len(e.buffer)
+	// Count actual data rows (excluding nil sentinels)
+	atBottom := e.buffer[e.lastRowIdx()].data == nil
+
+	if atBottom {
+		rowCount--
+	}
 	// When in insert mode, we need to reserve one slot for the insert mode row
 	// that will be rendered by TableView
-	dataCount := len(e.buffer)
 	if len(e.table.insertRow) > 0 {
-		// Find the last non-nil record
-		lastIdx := len(e.buffer) - 1
-		for lastIdx >= 0 && e.buffer[lastIdx].data == nil {
-			lastIdx--
-		}
-		dataCount = lastIdx + 1 // Only pass real data, TableView will add insert mode row
+		rowCount--
 	}
 
-	normalizedRows := make([]Row, dataCount)
-	for i := 0; i < dataCount; i++ {
+	normalizedRows := make([]Row, rowCount)
+	for i := 0; i < rowCount; i++ {
 		ptr := (i + e.pointer) % len(e.buffer)
 		// insert mode row needs "space" at the top to still be able to render
 		// the last db row
@@ -32,19 +34,24 @@ func (e *Editor) renderData() {
 		}
 		normalizedRows[i] = e.buffer[ptr] // Reference to Row, not a copy
 	}
-	if len(e.table.insertRow) > 0 {
-		normalizedRows = slices.Delete(normalizedRows, 0, 1)
+	// Add the nil sentinel row at the end if we're at the bottom
+	if atBottom {
+		normalizedRows = append(normalizedRows, Row{}) // nil sentinel
 	}
 	e.table.SetDataReferences(normalizedRows)
 }
 
 // extractKeys returns a copy of the key values from a row
 func (e *Editor) extractKeys(row []any) []any {
-	if row == nil || len(row) < len(e.relation.Key) {
+	if row == nil || len(e.relation.Key) == 0 {
 		return nil
 	}
 	keys := make([]any, len(e.relation.Key))
-	copy(keys, row[0:len(e.relation.Key)])
+	for i, keyIdx := range e.relation.Key {
+		if keyIdx < len(row) {
+			keys[i] = row[keyIdx]
+		}
+	}
 	return keys
 }
 
@@ -165,6 +172,14 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 		return nil, fmt.Errorf("no primary key defined for relation")
 	}
 
+	// Get key column names
+	keyColNames := make([]string, len(e.relation.Key))
+	for i, keyIdx := range e.relation.Key {
+		if keyIdx < len(e.relation.Columns) {
+			keyColNames[i] = e.relation.Columns[keyIdx].Name
+		}
+	}
+
 	// For single-column keys, we can use a simple IN clause
 	// For multi-column keys, we need to use OR conditions
 	var query string
@@ -172,8 +187,9 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 
 	if keyColCount == 1 {
 		// Simple case: single column key
+		keyColName := keyColNames[0]
 		query = fmt.Sprintf("SELECT %s FROM %s WHERE %s IN (",
-			e.relation.Key[0], e.relation.Name, e.relation.Key[0])
+			keyColName, e.relation.Name, keyColName)
 		placeholders := make([]string, len(keys))
 		for i, key := range keys {
 			placeholders[i] = "?"
@@ -183,12 +199,12 @@ func (e *Editor) checkRowsExistInDB(keys [][]any) ([]bool, error) {
 	} else {
 		// Complex case: multi-column key
 		query = fmt.Sprintf("SELECT %s FROM %s WHERE ",
-			strings.Join(e.relation.Key, ", "), e.relation.Name)
+			strings.Join(keyColNames, ", "), e.relation.Name)
 		conditions := make([]string, len(keys))
 		for i, key := range keys {
 			keyConditions := make([]string, keyColCount)
 			for j := 0; j < keyColCount; j++ {
-				keyConditions[j] = fmt.Sprintf("%s = ?", e.relation.Key[j])
+				keyConditions[j] = fmt.Sprintf("%s = ?", keyColNames[j])
 				args = append(args, key[j])
 			}
 			conditions[i] = fmt.Sprintf("(%s)", strings.Join(keyConditions, " AND "))
@@ -389,7 +405,12 @@ func (e *Editor) refresh() error {
 	if len(e.buffer) == 0 || e.buffer[e.pointer].data == nil {
 		return nil // Nothing to refresh
 	}
-	id := e.buffer[e.pointer].data[:len(e.relation.Key)]
+
+	// Extract key values from the row using the key column indices
+	id := make([]any, len(e.relation.Key))
+	for i, keyIdx := range e.relation.Key {
+		id[i] = e.buffer[e.pointer].data[keyIdx]
+	}
 
 	// Close existing query before refresh
 	e.queryMu.Lock()
@@ -403,12 +424,13 @@ func (e *Editor) refresh() error {
 	e.stopRefreshTimer()
 
 	// Prepare query
-	selectCols := make([]string, len(e.columns))
-	for i, col := range e.columns {
+	headers := e.table.GetHeaders()
+	selectCols := make([]string, len(headers))
+	for i, col := range headers {
 		selectCols[i] = col.Name
 	}
 
-	colCount := len(e.columns)
+	colCount := len(headers)
 	if colCount == 0 {
 		return nil
 	}
@@ -441,29 +463,23 @@ func (e *Editor) refresh() error {
 	rows.Close()
 
 	// Apply diff tracking if previous data exists and differs
-	if e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
-		e.diffAndPopulateBuffer(currentRows)
-	} else {
-		// No diffing needed - just populate buffer normally
-		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
-			e.buffer[i] = currentRows[i]
-		}
-		// Mark end with empty row if we didn't fill the buffer
-		if len(currentRows) < len(e.buffer) {
-			e.buffer[len(currentRows)] = Row{}
-			e.buffer = e.buffer[:len(currentRows)+1]
-		}
+	// if e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
+	// 	e.diffAndPopulateBuffer(currentRows)
+	// } else {
+	// No diffing needed - just populate buffer normally
+	for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+		e.buffer[i] = currentRows[i]
 	}
+	// Mark end with empty row if we didn't fill the buffer
+	if len(currentRows) < len(e.buffer) {
+		e.buffer[len(currentRows)] = Row{}
+		e.buffer = e.buffer[:len(currentRows)+1]
+	}
+	// }
 
 	// Clone currentRows to previousRows for next refresh
 	e.previousRows = make([]Row, len(currentRows))
 	copy(e.previousRows, currentRows)
-
-	// Set up new query for scrolling
-	e.queryMu.Lock()
-	e.query = nil // Will be created on first scroll
-	e.scrollDown = true
-	e.queryMu.Unlock()
 
 	e.renderData()
 	e.table.Select(e.table.selectedRow, e.table.selectedCol)
@@ -481,12 +497,13 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	// Stop refresh timer when starting a new query
 	e.stopRefreshTimer()
 
-	selectCols := make([]string, len(e.columns))
-	for i, col := range e.columns {
+	headers := e.table.GetHeaders()
+	selectCols := make([]string, len(headers))
+	for i, col := range headers {
 		selectCols[i] = col.Name
 	}
 
-	colCount := len(e.columns)
+	colCount := len(headers)
 	if colCount == 0 {
 		return nil
 	}
@@ -533,7 +550,6 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		// Mark end with empty row if we didn't fill the buffer
 		if len(currentRows) < len(e.buffer) {
 			e.buffer[len(currentRows)] = Row{}
-			e.buffer = e.buffer[:len(currentRows)+1]
 		}
 
 		// Set previousRows to currentRows
@@ -581,11 +597,14 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
 			e.buffer[i] = currentRows[i]
 		}
+		// Mark end with empty row if we didn't fill the buffer
+		if len(currentRows) < len(e.buffer) {
+			e.buffer[len(currentRows)] = Row{}
+		}
 
 		// Set previousRows to currentRows
 		e.previousRows = currentRows
 
-		e.buffer[len(e.buffer)-1] = Row{}
 		e.pointer = 0
 	}
 	e.renderData()
@@ -604,21 +623,21 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 // when there are no more rows, adds a nil sentinel to mark the end
 // returns bool, err. bool if the edge of table is reached
 func (e *Editor) nextRows(i int) (bool, error) {
-	debugLog("nextRows: starting, i=%d, e.query nil=%v\n", i, e.query == nil)
+	// Only reuse query if it's in the correct direction (scrollDown)
 	// Check if we're already at the end (last record is nil)
 	if e.isAtBottom() {
 		return true, nil // No-op, already at end of data
 	}
+	// this is a problem
 
-	// Only reuse query if it's in the correct direction (scrollDown)
-	e.queryMu.Lock()
 	needNewQuery := e.query == nil || !e.scrollDown
 	if needNewQuery && e.query != nil {
 		// Close existing query if it's in the wrong direction
+		e.queryMu.Lock()
 		e.query.Close()
 		e.query = nil
+		e.queryMu.Unlock()
 	}
-	e.queryMu.Unlock()
 
 	if needNewQuery {
 		// Stop refresh timer when starting a new query
@@ -629,21 +648,22 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if e.buffer[lastRecordIdx].data == nil {
 			return false, nil // Can't query from nil record
 		}
-		for i := range e.relation.Key {
-			params[i] = e.buffer[lastRecordIdx].data[i]
+		for i, keyIdx := range e.relation.Key {
+			if keyIdx < len(e.buffer[lastRecordIdx].data) {
+				params[i] = e.buffer[lastRecordIdx].data[keyIdx]
+			}
 		}
-		selectCols := make([]string, len(e.columns))
-		for i, col := range e.columns {
+		headers := e.table.GetHeaders()
+		selectCols := make([]string, len(headers))
+		for i, col := range headers {
 			selectCols[i] = col.Name
 		}
 		newQuery, err := e.relation.QueryRows(selectCols, nil, params, false, true)
 		if err != nil {
 			return false, err
 		}
-		e.queryMu.Lock()
 		e.query = newQuery
 		e.scrollDown = true
-		e.queryMu.Unlock()
 		e.startRowsTimer()
 	}
 
@@ -655,7 +675,7 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		}
 	}
 
-	colCount := len(e.columns)
+	colCount := len(e.table.GetHeaders())
 	if colCount == 0 {
 		return false, nil
 	}
@@ -680,7 +700,8 @@ func (e *Editor) nextRows(i int) (bool, error) {
 		if err := query.Scan(scanTargets...); err != nil {
 			return false, err
 		}
-		e.buffer[(e.pointer+rowsFetched)%len(e.buffer)] = Row{state: RowStateNormal, data: row}
+		bufferIdx := (e.pointer + rowsFetched) % len(e.buffer)
+		e.buffer[bufferIdx] = Row{state: RowStateNormal, data: row}
 	}
 	// new pointer position
 	e.incrPtr(rowsFetched)
@@ -711,7 +732,7 @@ func (e *Editor) lastRowIdx() int {
 // isAtBottom returns true if the table is currently at the bottom of the data
 // (i.e., the last row in the buffer is nil, indicating we've reached the end)
 func (e *Editor) isAtBottom() bool {
-	return len(e.buffer) == 0 || e.buffer[e.lastRowIdx()].data == nil
+	return e.buffer[e.lastRowIdx()].data == nil
 }
 
 func (e *Editor) incrPtr(n int) {
@@ -738,11 +759,14 @@ func (e *Editor) prevRows(i int) (bool, error) {
 			return false, nil // Can't query from nil or empty records
 		}
 		params := make([]any, len(e.relation.Key))
-		for i := range e.relation.Key {
-			params[i] = e.buffer[e.pointer].data[i]
+		for i, keyIdx := range e.relation.Key {
+			if keyIdx < len(e.buffer[e.pointer].data) {
+				params[i] = e.buffer[e.pointer].data[keyIdx]
+			}
 		}
-		selectCols := make([]string, len(e.columns))
-		for i, col := range e.columns {
+		headers := e.table.GetHeaders()
+		selectCols := make([]string, len(headers))
+		for i, col := range headers {
 			selectCols[i] = col.Name
 		}
 		newQuery, err := e.relation.QueryRows(selectCols, nil, params, false, false)
@@ -764,7 +788,7 @@ func (e *Editor) prevRows(i int) (bool, error) {
 		}
 	}
 
-	colCount := len(e.columns)
+	colCount := len(e.table.GetHeaders())
 	if colCount == 0 {
 		return false, nil
 	}
@@ -927,12 +951,4 @@ func (e *Editor) stopRefreshTimer() {
 		close(e.refreshTimerStop)
 		e.refreshTimerStop = nil
 	}
-	e.queryMu.Lock()
-	if e.query != nil {
-		if err := e.query.Close(); err != nil {
-			panic(err)
-		}
-		e.query = nil
-	}
-	e.queryMu.Unlock()
 }

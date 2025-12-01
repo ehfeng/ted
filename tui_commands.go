@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"slices"
 	"strings"
 
 	"ted/internal/dblib"
@@ -181,17 +179,17 @@ func (e *Editor) executeFind(findValue string) {
 
 	// Get current row's key values
 	currentKeys := make([]any, len(e.relation.Key))
-	for i := range e.relation.Key {
-		currentKeys[i] = e.buffer[row].data[i]
+	for i, keyIdx := range e.relation.Key {
+		if keyIdx < len(e.buffer[row].data) {
+			currentKeys[i] = e.buffer[row].data[keyIdx]
+		}
 	}
 
-	// Find the column index in relation.attributeOrder
+	// Find the column index in relation.Columns
 	findCol := -1
-	for i, name := range e.relation.AttributeOrder {
-		if name == e.columns[col].Name {
-			findCol = i
-			break
-		}
+	colName := e.table.GetHeaders()[col].Name
+	if colIdx, ok := e.relation.ColumnIndex[colName]; ok {
+		findCol = colIdx
 	}
 
 	if findCol == -1 {
@@ -221,8 +219,12 @@ func (e *Editor) executeFind(findValue string) {
 		}
 		// Compare key values
 		match := true
-		for j := range e.relation.Key {
-			if e.buffer[i].data[j] != foundKeys[j] {
+		for j, keyIdx := range e.relation.Key {
+			if keyIdx >= len(e.buffer[i].data) || keyIdx >= len(foundKeys) {
+				match = false
+				break
+			}
+			if e.buffer[i].data[keyIdx] != foundKeys[j] {
 				match = false
 				break
 			}
@@ -257,63 +259,53 @@ func (e *Editor) executeFind(findValue string) {
 	}
 }
 
-// selectTableFromPicker handles selecting a table from the picker
+// selectTableFromPicker handles selecting a table or view from the picker
 func (e *Editor) selectTableFromPicker(tableName string) {
-	fmt.Fprintf(os.Stderr, "[DEBUG] selectTableFromPicker: %s\n", tableName)
 	e.pages.HidePage(pagePicker)
 	e.app.SetAfterDrawFunc(nil) // Clear cursor style function
 	e.setCursorStyle(0)         // Reset to default cursor style
-	fmt.Fprintf(os.Stderr, "[DEBUG] Picker closed\n")
 
-	// Reload the table data using the current database connection
+	// Reload the relation (table or view) data using the current database connection
 	relation, err := dblib.NewRelation(e.db, e.dbType, tableName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating relation: %v\n", err)
 		e.SetStatusErrorWithSentry(err)
 		return
 	}
 
+	// Check if relation is keyable (has keys) - required for viewing
+	if len(relation.Key) == 0 {
+		e.SetStatusError(fmt.Sprintf("Relation %s has no keyable columns and cannot be viewed", tableName))
+		return
+	}
+
 	// Update the relation
-	fmt.Fprintf(os.Stderr, "[DEBUG] Relation created successfully\n")
 	e.relation = relation
 
-	// Reset columns
-	fmt.Fprintf(os.Stderr, "[DEBUG] Resetting columns\n")
-	e.columns = make([]dblib.Column, 0, len(e.relation.AttributeOrder))
-	for _, name := range e.relation.Key {
-		e.columns = append(e.columns, dblib.Column{Name: name, Width: 4})
-	}
-	for _, name := range e.relation.AttributeOrder {
-		if !slices.Contains(e.relation.Key, name) {
-			e.columns = append(e.columns, dblib.Column{Name: name, Width: 8})
+	// Build table headers in database schema order
+	headers := make([]dblib.DisplayColumn, 0, len(e.relation.Columns))
+	for i, col := range e.relation.Columns {
+		isKey := false
+		for _, keyIdx := range e.relation.Key {
+			if keyIdx == i {
+				isKey = true
+				break
+			}
 		}
+		editable := e.relation.IsColumnEditable(i)
+		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey, Editable: editable})
 	}
-
-	// Update table headers
-	fmt.Fprintf(os.Stderr, "[DEBUG] Updating table headers\n")
-	headers := make([]HeaderColumn, len(e.columns))
-	for i, col := range e.columns {
-		headers[i] = HeaderColumn{
-			Name:  col.Name,
-			Width: col.Width,
-		}
-	}
-	e.table.SetHeaders(headers).SetKeyColumnCount(len(e.relation.Key)).SetTableName(tableName).SetVimMode(e.vimMode)
+	e.table.SetHeaders(headers).SetTableName(tableName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
-	fmt.Fprintf(os.Stderr, "[DEBUG] Loading data from beginning\n")
 	e.pointer = 0
 	e.buffer = make([]Row, e.table.rowsHeight)
 	e.loadFromRowId(nil, true, 0)
 	e.renderData()
 	e.table.Select(0, 0)
-	fmt.Fprintf(os.Stderr, "[DEBUG] Data loaded and rendered\n")
 
 	// Update title
-	fmt.Fprintf(os.Stderr, "[DEBUG] Updating title\n")
 	e.app.SetTitle(fmt.Sprintf("ted %s/%s %s", e.config.Database, tableName, databaseIcons[e.relation.DBType]))
 
 	// Set focus back to table
-	fmt.Fprintf(os.Stderr, "[DEBUG] Setting focus to table\n")
 	e.app.SetFocus(e.table)
 }
