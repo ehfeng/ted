@@ -54,6 +54,183 @@ func GetBestKey(db *sql.DB, dbType DatabaseType, tableName string) ([]string, er
 	}
 }
 
+// buildColumnsFromAnalysis creates Column structs from SQL analysis and column metadata.
+// For passthrough columns (non-derived), it queries the base table to get accurate type information.
+func buildColumnsFromAnalysis(db *sql.DB, dbType DatabaseType, analysis *ViewAnalysis,
+	columnNames []string, columnTypes []*sql.ColumnType) ([]Column, map[string]int, error) {
+
+	if len(columnNames) != len(analysis.Columns) {
+		return nil, nil, fmt.Errorf("column count mismatch: analysis has %d columns, query returned %d",
+			len(analysis.Columns), len(columnNames))
+	}
+
+	columns := make([]Column, 0, len(columnNames))
+	columnIndex := make(map[string]int)
+
+	for i, colName := range columnNames {
+		lineage := analysis.Columns[i]
+
+		col := Column{
+			Name:       colName,
+			Table:      lineage.SourceTable,
+			BaseColumn: lineage.SourceColumn,
+			Generated:  lineage.IsDerived,
+			Reference:  -1,
+			Nullable:   true, // Default to nullable
+		}
+
+		// Get type from column metadata if available
+		if i < len(columnTypes) {
+			col.Type = columnTypes[i].DatabaseTypeName()
+			if nullable, ok := columnTypes[i].Nullable(); ok {
+				col.Nullable = nullable
+			}
+		} else {
+			col.Type = "text"
+		}
+
+		// For passthrough columns, try to get more accurate type from base table
+		if !lineage.IsDerived && lineage.SourceTable != "" && lineage.SourceColumn != "" {
+			baseRel, err := NewRelation(db, dbType, lineage.SourceTable)
+			if err == nil {
+				if baseColIdx, ok := baseRel.ColumnIndex[lineage.SourceColumn]; ok && baseColIdx < len(baseRel.Columns) {
+					baseCol := baseRel.Columns[baseColIdx]
+					col.Type = baseCol.Type
+					col.Nullable = baseCol.Nullable
+					col.EnumValues = baseCol.EnumValues
+					col.CustomTypeName = baseCol.CustomTypeName
+				}
+			}
+		}
+
+		columns = append(columns, col)
+		columnIndex[col.Name] = i
+	}
+
+	return columns, columnIndex, nil
+}
+
+// buildTablesMap creates the Tables map by loading base tables and mapping their keys
+// to result column indices.
+func buildTablesMap(db *sql.DB, dbType DatabaseType, baseTables []string,
+	resultColumns []Column) (map[string]*Table, error) {
+
+	tables := make(map[string]*Table)
+
+	for _, tableName := range baseTables {
+		baseRel, err := NewRelation(db, dbType, tableName)
+		if err != nil {
+			continue // Skip if we can't load the base table
+		}
+
+		table := &Table{
+			Name: tableName,
+			Key:  []int{},
+		}
+
+		// Map base table key columns to result column indices
+		for _, keyIdx := range baseRel.Key {
+			if keyIdx < len(baseRel.Columns) {
+				baseKeyCol := baseRel.Columns[keyIdx]
+				// Find this column in the result columns
+				for resultColIdx, resultCol := range resultColumns {
+					if resultCol.Table == tableName && resultCol.BaseColumn == baseKeyCol.Name {
+						table.Key = append(table.Key, resultColIdx)
+						break
+					}
+				}
+			}
+		}
+
+		tables[tableName] = table
+	}
+
+	return tables, nil
+}
+
+// determineKeysFromAnalysis determines the key columns for a relation based on SQL analysis.
+// Returns deduplicated key column indices.
+func determineKeysFromAnalysis(analysis *ViewAnalysis, columns []Column,
+	columnIndex map[string]int, tables map[string]*Table) ([]int, error) {
+
+	var keys []int
+
+	if analysis.HasGroupBy {
+		// If GROUP BY present, check if it includes all base table keys
+		groupByCols := make(map[string]bool)
+		for _, expr := range analysis.GroupByExprs {
+			// Try to match GROUP BY expressions to columns
+			for _, col := range columns {
+				if expr == col.Name || expr == col.BaseColumn {
+					groupByCols[col.Name] = true
+					break
+				}
+			}
+		}
+
+		// Check if all base table keys are in GROUP BY
+		allKeysInGroupBy := true
+		for _, table := range tables {
+			if len(table.Key) == 0 {
+				continue
+			}
+			for _, keyIdx := range table.Key {
+				if keyIdx < len(columns) {
+					keyCol := columns[keyIdx]
+					if !groupByCols[keyCol.Name] {
+						allKeysInGroupBy = false
+						break
+					}
+				}
+			}
+			if !allKeysInGroupBy {
+				break
+			}
+		}
+
+		if allKeysInGroupBy {
+			// GROUP BY includes all keys, so use base table keys
+			for _, table := range tables {
+				keys = append(keys, table.Key...)
+			}
+		} else {
+			// GROUP BY doesn't include all keys, use GROUP BY columns as keys
+			for _, expr := range analysis.GroupByExprs {
+				if colIdx, ok := columnIndex[expr]; ok {
+					keys = append(keys, colIdx)
+				}
+			}
+		}
+	} else if analysis.HasDistinct {
+		// SELECT DISTINCT - all columns form the key
+		for i := range columns {
+			keys = append(keys, i)
+		}
+	} else if len(tables) == 1 {
+		// Simple query from single table - use base table keys
+		for _, table := range tables {
+			keys = append(keys, table.Key...)
+		}
+	} else {
+		// Complex query or joins - use all columns as composite key
+		for i := range columns {
+			keys = append(keys, i)
+		}
+	}
+
+	// Remove duplicates
+	keyMap := make(map[int]bool)
+	var uniqueKeys []int
+	for _, keyIdx := range keys {
+		if !keyMap[keyIdx] {
+			keyMap[keyIdx] = true
+			uniqueKeys = append(uniqueKeys, keyIdx)
+		}
+	}
+
+	return uniqueKeys, nil
+}
+
 func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, error) {
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
@@ -244,7 +421,12 @@ func NewRelationFromSQL(db *sql.DB, dbType DatabaseType, sqlStr string) (*Relati
 		return nil, fmt.Errorf("failed to get column types: %w", err)
 	}
 
-	// 4. Build Columns array
+	// 4. Build Columns array using helper
+	columns, columnIndex, err := buildColumnsFromAnalysis(db, dbType, analysis, columnNames, columnTypes)
+	if err != nil {
+		return nil, err
+	}
+
 	relation := &Relation{
 		DB:           db,
 		DBType:       dbType,
@@ -253,125 +435,24 @@ func NewRelationFromSQL(db *sql.DB, dbType DatabaseType, sqlStr string) (*Relati
 		IsCustomSQL:  true,
 		SQLStatement: sqlStr,
 		Tables:       make(map[string]*Table),
-		Columns:      make([]Column, 0, len(columnNames)),
-		ColumnIndex:  make(map[string]int),
+		Columns:      columns,
+		ColumnIndex:  columnIndex,
 		References:   []Reference{},
 	}
 
-	for i, colName := range columnNames {
-		lineage := analysis.Columns[i]
-
-		col := Column{
-			Name:       colName,
-			Table:      lineage.SourceTable,
-			BaseColumn: lineage.SourceColumn,
-			Generated:  lineage.IsDerived,
-			Reference:  -1,
-			Nullable:   true, // Default to nullable for custom SQL
-		}
-
-		// Get type from column metadata
-		if i < len(columnTypes) {
-			col.Type = columnTypes[i].DatabaseTypeName()
-			if nullable, ok := columnTypes[i].Nullable(); ok {
-				col.Nullable = nullable
-			}
-		} else {
-			col.Type = "text"
-		}
-
-		// For passthrough columns, try to get more accurate type from base table
-		if !lineage.IsDerived && lineage.SourceTable != "" && lineage.SourceColumn != "" {
-			baseRel, err := NewRelation(db, dbType, lineage.SourceTable)
-			if err == nil {
-				if baseColIdx, ok := baseRel.ColumnIndex[lineage.SourceColumn]; ok && baseColIdx < len(baseRel.Columns) {
-					baseCol := baseRel.Columns[baseColIdx]
-					col.Type = baseCol.Type
-					col.Nullable = baseCol.Nullable
-					col.EnumValues = baseCol.EnumValues
-					col.CustomTypeName = baseCol.CustomTypeName
-				}
-			}
-		}
-
-		relation.Columns = append(relation.Columns, col)
-		relation.ColumnIndex[col.Name] = i
+	// 5. Build Tables map using helper
+	tables, err := buildTablesMap(db, dbType, analysis.BaseTables, relation.Columns)
+	if err != nil {
+		return nil, err
 	}
+	relation.Tables = tables
 
-	// 5. Build Tables map and determine keys
-	baseTableKeys := make(map[string][]int)
-
-	for _, tableName := range analysis.BaseTables {
-		baseRel, err := NewRelation(db, dbType, tableName)
-		if err != nil {
-			continue // Skip if we can't load the base table
-		}
-
-		table := &Table{
-			Name: tableName,
-			Key:  []int{},
-		}
-
-		// Map base table key columns to custom SQL result column indices
-		for _, keyIdx := range baseRel.Key {
-			if keyIdx < len(baseRel.Columns) {
-				baseKeyCol := baseRel.Columns[keyIdx]
-				// Find this column in the custom SQL results
-				for sqlColIdx, sqlCol := range relation.Columns {
-					if sqlCol.Table == tableName && sqlCol.BaseColumn == baseKeyCol.Name {
-						table.Key = append(table.Key, sqlColIdx)
-						break
-					}
-				}
-			}
-		}
-
-		relation.Tables[tableName] = table
-		baseTableKeys[tableName] = table.Key
+	// 6. Determine custom SQL keys using helper
+	keys, err := determineKeysFromAnalysis(analysis, relation.Columns, relation.ColumnIndex, relation.Tables)
+	if err != nil {
+		return nil, err
 	}
-
-	// 6. Determine custom SQL keys
-	var sqlKeys []int
-
-	if analysis.HasGroupBy {
-		// If GROUP BY present, use GROUP BY columns as keys
-		for _, expr := range analysis.GroupByExprs {
-			// Try to find matching column
-			for colIdx, col := range relation.Columns {
-				if expr == col.Name || expr == col.BaseColumn {
-					sqlKeys = append(sqlKeys, colIdx)
-					break
-				}
-			}
-		}
-	} else if analysis.HasDistinct {
-		// SELECT DISTINCT - all columns form the key
-		for i := range relation.Columns {
-			sqlKeys = append(sqlKeys, i)
-		}
-	} else if len(analysis.BaseTables) == 1 && len(baseTableKeys) == 1 {
-		// Simple query from single table - use base table keys
-		for _, keyIndices := range baseTableKeys {
-			sqlKeys = append(sqlKeys, keyIndices...)
-		}
-	} else {
-		// Complex query or joins - use all columns as composite key
-		for i := range relation.Columns {
-			sqlKeys = append(sqlKeys, i)
-		}
-	}
-
-	// Remove duplicates and sort
-	keyMap := make(map[int]bool)
-	var uniqueKeys []int
-	for _, keyIdx := range sqlKeys {
-		if !keyMap[keyIdx] {
-			keyMap[keyIdx] = true
-			uniqueKeys = append(uniqueKeys, keyIdx)
-		}
-	}
-
-	relation.Key = uniqueKeys
+	relation.Key = keys
 
 	// Validate we have at least one key column
 	if len(relation.Key) == 0 {
@@ -481,46 +562,15 @@ func loadViewColumns(db *sql.DB, dbType DatabaseType, viewName string) ([]Column
 		return nil, nil, fmt.Errorf("failed to get column names from query: %w", err)
 	}
 
-	// Verify we have the same number of columns as in the analysis
-	if len(columnNames) != len(analysis.Columns) {
-		return nil, nil, fmt.Errorf("column count mismatch: analysis has %d columns, query returned %d",
-			len(analysis.Columns), len(columnNames))
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get column types: %w", err)
 	}
 
-	// Convert analysis to columns, mapping positionally
-	columns := make([]Column, 0, len(analysis.Columns))
-	columnIndex := make(map[string]int)
-
-	for i, lineage := range analysis.Columns {
-		// Use column name from query result (positional mapping)
-		colName := columnNames[i]
-
-		col := Column{
-			Name:       colName,
-			Table:      lineage.SourceTable,
-			BaseColumn: lineage.SourceColumn, // Base column name (empty if derived)
-			Reference:  -1,
-		}
-
-		// Get column type from system tables if passthrough
-		if !lineage.IsDerived && lineage.SourceTable != "" && lineage.SourceColumn != "" {
-			// Try to get type from base table
-			baseRel, err := NewRelation(db, dbType, lineage.SourceTable)
-			if err == nil {
-				if baseColIdx, ok := baseRel.ColumnIndex[lineage.SourceColumn]; ok && baseColIdx < len(baseRel.Columns) {
-					baseCol := baseRel.Columns[baseColIdx]
-					col.Type = baseCol.Type
-					col.Nullable = baseCol.Nullable
-				}
-			}
-		} else {
-			// For derived columns, use a generic type
-			col.Type = "text" // Default for derived columns
-			col.Nullable = true
-		}
-
-		columns = append(columns, col)
-		columnIndex[col.Name] = i
+	// Build columns using helper
+	columns, columnIndex, err := buildColumnsFromAnalysis(db, dbType, analysis, columnNames, columnTypes)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	return columns, columnIndex, nil
@@ -569,111 +619,23 @@ func getViewKeys(db *sql.DB, dbType DatabaseType, viewName string, relation *Rel
 		}
 	}
 
-	// Collect base tables and their keys
-	baseTableKeys := make(map[string][]int) // table name -> key column indices in relation
-
-	for _, tableName := range analysis.BaseTables {
-		baseRel, err := NewRelation(db, dbType, tableName)
-		if err != nil {
-			continue // Skip if we can't load the base table
-		}
-
-		// Store the table in relation.Tables
-		table := &Table{
-			Name: tableName,
-			Key:  []int{},
-		}
-
-		// Map base table key columns to view column indices
-		for _, keyIdx := range baseRel.Key {
-			if keyIdx < len(baseRel.Columns) {
-				baseKeyCol := baseRel.Columns[keyIdx]
-				// Find this column in the view
-				for viewColIdx, viewCol := range relation.Columns {
-					if viewCol.Table == tableName && viewCol.BaseColumn == baseKeyCol.Name {
-						table.Key = append(table.Key, viewColIdx)
-						break
-					}
-				}
-			}
-		}
-
+	// Build Tables map using helper
+	tables, err := buildTablesMap(db, dbType, analysis.BaseTables, relation.Columns)
+	if err != nil {
+		return nil, err
+	}
+	// Update relation.Tables with the loaded tables
+	for tableName, table := range tables {
 		relation.Tables[tableName] = table
-		baseTableKeys[tableName] = table.Key
 	}
 
-	// Determine view keys based on GROUP BY or base table keys
-	var viewKeys []int
-
-	if analysis.HasGroupBy {
-		// If GROUP BY is present, check if it includes base table keys
-		groupByCols := make(map[string]bool)
-		for _, expr := range analysis.GroupByExprs {
-			// Try to match GROUP BY expressions to columns
-			for _, col := range relation.Columns {
-				if expr == col.Name || expr == col.BaseColumn {
-					groupByCols[col.Name] = true
-					break
-				}
-			}
-		}
-
-		// Check if all base table keys are in GROUP BY
-		allKeysInGroupBy := true
-		for _, keyIndices := range baseTableKeys {
-			if len(keyIndices) == 0 {
-				continue
-			}
-			for _, keyIdx := range keyIndices {
-				if keyIdx < len(relation.Columns) {
-					keyCol := relation.Columns[keyIdx]
-					if !groupByCols[keyCol.Name] {
-						allKeysInGroupBy = false
-						break
-					}
-				}
-			}
-			if !allKeysInGroupBy {
-				break
-			}
-		}
-
-		if allKeysInGroupBy {
-			// GROUP BY includes all keys, so use base table keys
-			for _, keyIndices := range baseTableKeys {
-				viewKeys = append(viewKeys, keyIndices...)
-			}
-		} else {
-			// GROUP BY doesn't include all keys, use GROUP BY columns as keys
-			for _, expr := range analysis.GroupByExprs {
-				if colIdx, ok := relation.ColumnIndex[expr]; ok {
-					viewKeys = append(viewKeys, colIdx)
-				}
-			}
-		}
-	} else if analysis.HasDistinct {
-		// SELECT DISTINCT - all columns form the key
-		for i := range relation.Columns {
-			viewKeys = append(viewKeys, i)
-		}
-	} else {
-		// No GROUP BY or DISTINCT - combine all base table keys
-		for _, keyIndices := range baseTableKeys {
-			viewKeys = append(viewKeys, keyIndices...)
-		}
+	// Determine view keys using helper
+	viewKeys, err := determineKeysFromAnalysis(analysis, relation.Columns, relation.ColumnIndex, relation.Tables)
+	if err != nil {
+		return nil, err
 	}
 
-	// Remove duplicates and sort
-	keyMap := make(map[int]bool)
-	var uniqueKeys []int
-	for _, keyIdx := range viewKeys {
-		if !keyMap[keyIdx] {
-			keyMap[keyIdx] = true
-			uniqueKeys = append(uniqueKeys, keyIdx)
-		}
-	}
-
-	return uniqueKeys, nil
+	return viewKeys, nil
 }
 
 // IsColumnEditable returns true if a column can be edited
