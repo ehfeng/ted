@@ -1270,3 +1270,286 @@ func toLower(s string) string {
 	}
 	return string(result)
 }
+
+// Tests for row value comparison helpers
+
+func TestBuildRowValueExpression_SingleColumn_NonPositional(t *testing.T) {
+	colExpr, placeholders := buildRowValueExpression(SQLite, []string{"id"}, 1)
+
+	if colExpr != "id" {
+		t.Errorf("Expected colExpr='id', got '%s'", colExpr)
+	}
+	if len(placeholders) != 1 || placeholders[0] != "?" {
+		t.Errorf("Expected placeholders=['?'], got %v", placeholders)
+	}
+}
+
+func TestBuildRowValueExpression_SingleColumn_Positional(t *testing.T) {
+	colExpr, placeholders := buildRowValueExpression(PostgreSQL, []string{"id"}, 1)
+
+	if colExpr != "id" {
+		t.Errorf("Expected colExpr='id', got '%s'", colExpr)
+	}
+	if len(placeholders) != 1 || placeholders[0] != "$1" {
+		t.Errorf("Expected placeholders=['$1'], got %v", placeholders)
+	}
+}
+
+func TestBuildRowValueExpression_MultiColumn_NonPositional(t *testing.T) {
+	colExpr, placeholders := buildRowValueExpression(SQLite, []string{"a", "b", "c"}, 1)
+
+	expectedColExpr := "(a, b, c)"
+	if colExpr != expectedColExpr {
+		t.Errorf("Expected colExpr='%s', got '%s'", expectedColExpr, colExpr)
+	}
+
+	expectedPlaceholders := []string{"?", "?", "?"}
+	if len(placeholders) != 3 {
+		t.Errorf("Expected 3 placeholders, got %d", len(placeholders))
+	}
+	for i, expected := range expectedPlaceholders {
+		if placeholders[i] != expected {
+			t.Errorf("placeholders[%d]: expected '%s', got '%s'", i, expected, placeholders[i])
+		}
+	}
+}
+
+func TestBuildRowValueExpression_MultiColumn_Positional(t *testing.T) {
+	colExpr, placeholders := buildRowValueExpression(PostgreSQL, []string{"a", "b"}, 5)
+
+	expectedColExpr := "(a, b)"
+	if colExpr != expectedColExpr {
+		t.Errorf("Expected colExpr='%s', got '%s'", expectedColExpr, colExpr)
+	}
+
+	expectedPlaceholders := []string{"$5", "$6"}
+	if len(placeholders) != 2 {
+		t.Errorf("Expected 2 placeholders, got %d", len(placeholders))
+	}
+	for i, expected := range expectedPlaceholders {
+		if placeholders[i] != expected {
+			t.Errorf("placeholders[%d]: expected '%s', got '%s'", i, expected, placeholders[i])
+		}
+	}
+}
+
+func TestBuildPlaceholderExpression_Single(t *testing.T) {
+	expr := buildPlaceholderExpression([]string{"?"})
+	if expr != "?" {
+		t.Errorf("Expected '?', got '%s'", expr)
+	}
+}
+
+func TestBuildPlaceholderExpression_Multiple(t *testing.T) {
+	expr := buildPlaceholderExpression([]string{"?", "?", "?"})
+	expected := "(?, ?, ?)"
+	if expr != expected {
+		t.Errorf("Expected '%s', got '%s'", expected, expr)
+	}
+}
+
+func TestBuildPlaceholderExpression_PositionalMultiple(t *testing.T) {
+	expr := buildPlaceholderExpression([]string{"$1", "$2"})
+	expected := "($1, $2)"
+	if expr != expected {
+		t.Errorf("Expected '%s', got '%s'", expected, expr)
+	}
+}
+
+// Integration tests for composite key pagination
+
+func setupCompositeKeyDB(t *testing.T) (*sql.DB, *Relation) {
+	tmpFile, err := os.CreateTemp("", "test-composite-*.db")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+
+	db, err := sql.Open("sqlite3", tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// Create table with composite primary key
+	_, err = db.Exec(`
+		CREATE TABLE orders (
+			dept_id INTEGER NOT NULL,
+			order_id INTEGER NOT NULL,
+			value TEXT,
+			PRIMARY KEY (dept_id, order_id)
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+
+	// Insert test data with lexicographic ordering
+	testData := []struct {
+		deptID  int
+		orderID int
+		value   string
+	}{
+		{1, 1, "one-one"},
+		{1, 2, "one-two"},
+		{1, 3, "one-three"},
+		{2, 1, "two-one"},
+		{2, 2, "two-two"},
+		{3, 1, "three-one"},
+	}
+
+	for _, row := range testData {
+		_, err = db.Exec("INSERT INTO orders VALUES (?, ?, ?)", row.deptID, row.orderID, row.value)
+		if err != nil {
+			t.Fatalf("Failed to insert test data: %v", err)
+		}
+	}
+
+	rel, err := NewRelation(db, SQLite, "orders")
+	if err != nil {
+		t.Fatalf("Failed to create relation: %v", err)
+	}
+
+	return db, rel
+}
+
+func TestSelectQuery_CompositeKey(t *testing.T) {
+	db, _ := setupCompositeKeyDB(t)
+
+	// Get column names for query
+	columns := []string{"dept_id", "order_id", "value"}
+
+	// Test: Query rows > (1, 2) with scrollDown=true, exclusive
+	query, err := selectQuery(SQLite, "orders",
+		columns,
+		nil, // no sortCol
+		[]string{"dept_id", "order_id"}, // composite key
+		true,  // hasParams
+		false, // exclusive (>)
+		true)  // scrollDown
+
+	if err != nil {
+		t.Fatalf("selectQuery failed: %v", err)
+	}
+
+	// Verify query contains row value syntax
+	if !strings.Contains(query, "(dept_id, order_id)") {
+		t.Errorf("Expected row value syntax in query, got: %s", query)
+	}
+
+	// Execute query and verify results
+	rows, err := db.Query(query, 1, 2) // cursor at (1, 2)
+	if err != nil {
+		t.Fatalf("Query execution failed: %v", err)
+	}
+	defer rows.Close()
+
+	// Expected results: (1,3), (2,1), (2,2), (3,1)
+	expected := []struct{ deptID, orderID int }{
+		{1, 3}, // Correct: (1, 3) > (1, 2)
+		{2, 1}, // Correct: (2, 1) > (1, 2)
+		{2, 2},
+		{3, 1},
+	}
+
+	i := 0
+	for rows.Next() {
+		var deptID, orderID int
+		var value string
+		if err := rows.Scan(&deptID, &orderID, &value); err != nil {
+			t.Fatalf("Scan failed: %v", err)
+		}
+		if i >= len(expected) {
+			t.Errorf("Too many rows returned")
+			break
+		}
+		if deptID != expected[i].deptID || orderID != expected[i].orderID {
+			t.Errorf("Row %d: expected (%d, %d), got (%d, %d)",
+				i, expected[i].deptID, expected[i].orderID, deptID, orderID)
+		}
+		i++
+	}
+
+	if i != len(expected) {
+		t.Errorf("Expected %d rows, got %d", len(expected), i)
+	}
+}
+
+func TestSelectQuery_CompositeKey_Inclusive(t *testing.T) {
+	db, _ := setupCompositeKeyDB(t)
+
+	columns := []string{"dept_id", "order_id", "value"}
+
+	// Test: Query rows >= (2, 1) with scrollDown=true, inclusive
+	query, err := selectQuery(SQLite, "orders",
+		columns,
+		nil,
+		[]string{"dept_id", "order_id"},
+		true, // hasParams
+		true, // inclusive (>=)
+		true) // scrollDown
+
+	if err != nil {
+		t.Fatalf("selectQuery failed: %v", err)
+	}
+
+	rows, err := db.Query(query, 2, 1) // cursor at (2, 1)
+	if err != nil {
+		t.Fatalf("Query execution failed: %v", err)
+	}
+	defer rows.Close()
+
+	// Expected: (2,1), (2,2), (3,1) - note (2,1) is included
+	expected := []struct{ deptID, orderID int }{
+		{2, 1}, // Included because inclusive=true
+		{2, 2},
+		{3, 1},
+	}
+
+	i := 0
+	for rows.Next() {
+		var deptID, orderID int
+		var value string
+		rows.Scan(&deptID, &orderID, &value)
+		if i < len(expected) {
+			if deptID != expected[i].deptID || orderID != expected[i].orderID {
+				t.Errorf("Row %d: expected (%d, %d), got (%d, %d)",
+					i, expected[i].deptID, expected[i].orderID, deptID, orderID)
+			}
+		}
+		i++
+	}
+
+	if i != len(expected) {
+		t.Errorf("Expected %d rows, got %d", len(expected), i)
+	}
+}
+
+func TestFindNextRow_CompositeKey(t *testing.T) {
+	_, rel := setupCompositeKeyDB(t)
+
+	// Search for value="two-two" starting from (1, 2)
+	// Should find (2, 2) which is below
+	findCol := 2 // value column
+	findColVal := "two-two"
+	currentKeys := []any{int64(1), int64(2)} // Starting from (1, 2)
+	sortColVal := int64(1)                    // dept_id value of current row
+
+	keys, foundBelow, err := rel.FindNextRow(findCol, findColVal, nil, sortColVal, currentKeys)
+	if err != nil {
+		t.Fatalf("FindNextRow failed: %v", err)
+	}
+
+	if !foundBelow {
+		t.Error("Expected to find row below, but wrapped around")
+	}
+
+	if len(keys) != 2 {
+		t.Fatalf("Expected 2 keys for composite key, got %d", len(keys))
+	}
+
+	if keys[0] != int64(2) || keys[1] != int64(2) {
+		t.Errorf("Expected to find (2, 2), got (%v, %v)", keys[0], keys[1])
+	}
+}

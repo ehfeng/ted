@@ -1566,19 +1566,28 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
 func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
+	debugLog("QueryRows: START table=%s, inclusive=%v, scrollDown=%v, params=%v\n", rel.Name, inclusive, scrollDown, params)
+
 	// Convert key indices to column names
 	keyColNames := make([]string, len(rel.Key))
 	for i, keyIdx := range rel.Key {
 		keyColNames[i] = rel.Columns[keyIdx].Name
 	}
+	debugLog("QueryRows: keyColNames=%v (from indices %v)\n", keyColNames, rel.Key)
+
 	query, err := selectQuery(rel.DBType, rel.Name, columns, sortCol, keyColNames, len(params) > 0, inclusive, scrollDown)
 	if err != nil {
+		debugLog("QueryRows: selectQuery ERROR: %v\n", err)
 		return nil, err
 	}
+	debugLog("QueryRows: executing query: %s with params %v\n", query, params)
+
 	rows, err := rel.DB.Query(query, params...)
 	if err != nil {
+		debugLog("QueryRows: DB.Query ERROR: %v\n", err)
 		return nil, err
 	}
+	debugLog("QueryRows: SUCCESS\n")
 	return rows, nil
 }
 
@@ -1613,30 +1622,29 @@ func (rel *Relation) FindNextRow(findCol int, findColVal any, sortCol *SortColum
 	}
 	selectClause := strings.Join(keyCols, ", ")
 
-	// Helper to build WHERE clause for multi-column key progression
+	// Helper to build WHERE clause for multi-column key progression using row value syntax
 	buildKeyWhere := func(op string, startPos int) (string, []any) {
-		// For multi-column keys, we need: key1 >= ? AND key2 >= ? AND ... AND keyN > ?
-		// The last key uses > (or <), the rest use >= (or <=)
-		var parts []string
-		var args []any
-		lastIdx := len(rel.Key) - 1
+		// Get key column names
+		keyColNames := make([]string, len(rel.Key))
 		for i, keyIdx := range rel.Key {
 			if keyIdx >= len(rel.Columns) {
 				continue
 			}
-			keyColName := rel.Columns[keyIdx].Name
-			quoted := quoteIdent(rel.DBType, keyColName)
-			var cmp string
-			if i < lastIdx {
-				cmp = op + "="
-			} else {
-				cmp = op
-			}
-			parts = append(parts, fmt.Sprintf("%s %s %s", quoted, cmp, rel.placeholder(startPos)))
-			args = append(args, currentKeys[i])
-			startPos++
+			keyColNames[i] = rel.Columns[keyIdx].Name
 		}
-		return strings.Join(parts, " AND "), args
+
+		// Build row value expression
+		colExpr, placeholders := buildRowValueExpression(rel.DBType, keyColNames, startPos)
+		placeholderExpr := buildPlaceholderExpression(placeholders)
+
+		// Build WHERE clause: (key1, key2) > (?, ?)
+		whereClause := fmt.Sprintf("%s %s %s", colExpr, op, placeholderExpr)
+
+		// Build args from currentKeys
+		args := make([]any, len(currentKeys))
+		copy(args, currentKeys)
+
+		return whereClause, args
 	}
 
 	// Search below current position

@@ -11,6 +11,9 @@ import (
 // `select col, ... from tbl where col > ?, ... order by sortCol, keyCol, ...`
 // for initial load, params are nil
 func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCol *SortColumn, keyCols []string, hasParams, inclusive, scrollDown bool) (string, error) {
+	debugLog("selectQuery: START table=%s, keyCols=%v, hasParams=%v, inclusive=%v, scrollDown=%v\n",
+		tableName, keyCols, hasParams, inclusive, scrollDown)
+
 	if len(keyCols) == 0 {
 		panic("keyCols is empty")
 	}
@@ -43,46 +46,49 @@ func selectQuery(dbType DatabaseType, tableName string, columns []string, sortCo
 
 	if hasParams {
 		builder.WriteString(" WHERE ")
-		nextPlaceholder := func(pos int) string {
-			if databaseFeatures[dbType].positionalPlaceholder {
-				return fmt.Sprintf("$%d", pos)
-			}
-			return "?"
-		}
-		for i, col := range keyCols {
-			if i > 0 {
-				builder.WriteString(" AND ")
-			}
-			builder.WriteString(quoteIdent(dbType, col))
-			if scrollDown {
-				if inclusive {
-					builder.WriteString(" >= ")
-				} else {
-					builder.WriteString(" > ")
-				}
+
+		// Build row value comparison for key columns
+		colExpr, placeholders := buildRowValueExpression(dbType, keyCols, 1)
+		placeholderExpr := buildPlaceholderExpression(placeholders)
+
+		// Determine operator based on direction and inclusivity
+		var operator string
+		if scrollDown {
+			if inclusive {
+				operator = " >= "
 			} else {
-				if inclusive {
-					builder.WriteString(" <= ")
-				} else {
-					builder.WriteString(" < ")
-				}
+				operator = " > "
 			}
-			builder.WriteString(nextPlaceholder(i + 1))
+		} else {
+			if inclusive {
+				operator = " <= "
+			} else {
+				operator = " < "
+			}
 		}
+
+		debugLog("selectQuery: WHERE %s %s %s\n", colExpr, operator, placeholderExpr)
+		builder.WriteString(colExpr)
+		builder.WriteString(operator)
+		builder.WriteString(placeholderExpr)
 	}
 	builder.WriteString(" ORDER BY ")
 	if sortCol != nil {
+		debugLog("selectQuery: ORDER BY sortCol=%s (asc=%v)\n", sortCol.Name, sortCol.Asc)
 		builder.WriteString(sortColString)
 		builder.WriteString(", ")
 	}
 	for i, col := range keyCols {
+		debugLog("selectQuery: ORDER BY keyCols[%d]=%s (scrollDown=%v)\n", i, col, scrollDown)
 		sc := SortColumn{Name: quoteIdent(dbType, col), Asc: scrollDown}
 		builder.WriteString(sc.String(scrollDown))
 		if i < len(keyCols)-1 {
 			builder.WriteString(", ")
 		}
 	}
-	return builder.String(), nil
+	query := builder.String()
+	debugLog("selectQuery: RESULT query=%s\n", query)
+	return query, nil
 }
 
 // quoteIdent safely quotes an identifier (table/column) for the target DB.
@@ -269,4 +275,53 @@ func CompareRowPosition(db *sql.DB, table *Relation, sortCol *SortColumn, update
 	}
 
 	return isAbove, isBelow, nil
+}
+
+// buildRowValueExpression builds column and placeholder expressions for row value comparison.
+// For single column keys: returns "key1", []string{"?"} (or "$1" for positional placeholders)
+// For multi-column keys: returns "(key1, key2)", []string{"?", "?"} (or "$1", "$2" for positional)
+//
+// This enables correct lexicographic ordering comparison in WHERE clauses using row value syntax:
+//   Single: WHERE key1 > ?
+//   Multi:  WHERE (key1, key2) > (?, ?)
+func buildRowValueExpression(dbType DatabaseType, keyCols []string, startPos int) (columnExpr string, placeholders []string) {
+	// Generate placeholders with positions
+	nextPlaceholder := func(pos int) string {
+		if databaseFeatures[dbType].positionalPlaceholder {
+			return fmt.Sprintf("$%d", pos)
+		}
+		return "?"
+	}
+
+	placeholders = make([]string, len(keyCols))
+	for i := 0; i < len(keyCols); i++ {
+		placeholders[i] = nextPlaceholder(startPos + i)
+	}
+
+	// Quote column names
+	quotedCols := make([]string, len(keyCols))
+	for i, col := range keyCols {
+		quotedCols[i] = quoteIdent(dbType, col)
+	}
+
+	// Build expression
+	if len(keyCols) == 1 {
+		// Scalar: just the column name
+		columnExpr = quotedCols[0]
+	} else {
+		// Tuple: (col1, col2, col3)
+		columnExpr = "(" + strings.Join(quotedCols, ", ") + ")"
+	}
+
+	return columnExpr, placeholders
+}
+
+// buildPlaceholderExpression builds the placeholder side of a row value comparison.
+// For single value: returns "?" or "$1"
+// For multiple values: returns "(?, ?, ?)" or "($1, $2, $3)"
+func buildPlaceholderExpression(placeholders []string) string {
+	if len(placeholders) == 1 {
+		return placeholders[0]
+	}
+	return "(" + strings.Join(placeholders, ", ") + ")"
 }
