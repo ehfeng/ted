@@ -183,6 +183,208 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	return relation, nil
 }
 
+// NewRelationFromSQL creates a Relation from a custom SQL SELECT statement
+func NewRelationFromSQL(db *sql.DB, dbType DatabaseType, sqlStr string) (*Relation, error) {
+	// 1. Validate SQL
+	trimmedSQL := strings.TrimRight(sqlStr, "; \t\n\r")
+	if strings.Contains(trimmedSQL, ";") {
+		return nil, fmt.Errorf("multiple statements not allowed")
+	}
+
+	upperSQL := strings.ToUpper(strings.TrimSpace(sqlStr))
+
+	// Check it starts with SELECT or WITH
+	if !strings.HasPrefix(upperSQL, "SELECT") && !strings.HasPrefix(upperSQL, "WITH") {
+		return nil, fmt.Errorf("only SELECT or WITH statements allowed")
+	}
+
+	// Check for dangerous keywords
+	dangerousKeywords := []string{
+		"INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+		"TRUNCATE", "GRANT", "REVOKE",
+	}
+	for _, kw := range dangerousKeywords {
+		// Use word boundaries to avoid false positives (e.g., "INSERTED" column name)
+		if strings.Contains(upperSQL, " "+kw+" ") || strings.Contains(upperSQL, " "+kw+"\n") {
+			return nil, fmt.Errorf("keyword %s not allowed in custom SQL", kw)
+		}
+	}
+
+	// 2. Parse SQL using existing ParseViewDefinition
+	analysis, err := ParseViewDefinition(sqlStr, dbType, db)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse SQL: %w", err)
+	}
+
+	// 3. Extract column schema by executing LIMIT 0 query
+	// Wrap in subquery to ensure LIMIT applies to entire query
+	schemaQuery := fmt.Sprintf("SELECT * FROM (%s) AS custom_query LIMIT 0", sqlStr)
+	rows, err := db.Query(schemaQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute query: %w", err)
+	}
+	defer rows.Close()
+
+	columnNames, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get column names: %w", err)
+	}
+
+	if len(columnNames) == 0 {
+		return nil, fmt.Errorf("query must return at least one column")
+	}
+
+	if len(columnNames) != len(analysis.Columns) {
+		return nil, fmt.Errorf("column count mismatch: analysis has %d columns, query returned %d",
+			len(analysis.Columns), len(columnNames))
+	}
+
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get column types: %w", err)
+	}
+
+	// 4. Build Columns array
+	relation := &Relation{
+		DB:           db,
+		DBType:       dbType,
+		Name:         "",
+		IsView:       false,
+		IsCustomSQL:  true,
+		SQLStatement: sqlStr,
+		Tables:       make(map[string]*Table),
+		Columns:      make([]Column, 0, len(columnNames)),
+		ColumnIndex:  make(map[string]int),
+		References:   []Reference{},
+	}
+
+	for i, colName := range columnNames {
+		lineage := analysis.Columns[i]
+
+		col := Column{
+			Name:       colName,
+			Table:      lineage.SourceTable,
+			BaseColumn: lineage.SourceColumn,
+			Generated:  lineage.IsDerived,
+			Reference:  -1,
+			Nullable:   true, // Default to nullable for custom SQL
+		}
+
+		// Get type from column metadata
+		if i < len(columnTypes) {
+			col.Type = columnTypes[i].DatabaseTypeName()
+			if nullable, ok := columnTypes[i].Nullable(); ok {
+				col.Nullable = nullable
+			}
+		} else {
+			col.Type = "text"
+		}
+
+		// For passthrough columns, try to get more accurate type from base table
+		if !lineage.IsDerived && lineage.SourceTable != "" && lineage.SourceColumn != "" {
+			baseRel, err := NewRelation(db, dbType, lineage.SourceTable)
+			if err == nil {
+				if baseColIdx, ok := baseRel.ColumnIndex[lineage.SourceColumn]; ok && baseColIdx < len(baseRel.Columns) {
+					baseCol := baseRel.Columns[baseColIdx]
+					col.Type = baseCol.Type
+					col.Nullable = baseCol.Nullable
+					col.EnumValues = baseCol.EnumValues
+					col.CustomTypeName = baseCol.CustomTypeName
+				}
+			}
+		}
+
+		relation.Columns = append(relation.Columns, col)
+		relation.ColumnIndex[col.Name] = i
+	}
+
+	// 5. Build Tables map and determine keys
+	baseTableKeys := make(map[string][]int)
+
+	for _, tableName := range analysis.BaseTables {
+		baseRel, err := NewRelation(db, dbType, tableName)
+		if err != nil {
+			continue // Skip if we can't load the base table
+		}
+
+		table := &Table{
+			Name: tableName,
+			Key:  []int{},
+		}
+
+		// Map base table key columns to custom SQL result column indices
+		for _, keyIdx := range baseRel.Key {
+			if keyIdx < len(baseRel.Columns) {
+				baseKeyCol := baseRel.Columns[keyIdx]
+				// Find this column in the custom SQL results
+				for sqlColIdx, sqlCol := range relation.Columns {
+					if sqlCol.Table == tableName && sqlCol.BaseColumn == baseKeyCol.Name {
+						table.Key = append(table.Key, sqlColIdx)
+						break
+					}
+				}
+			}
+		}
+
+		relation.Tables[tableName] = table
+		baseTableKeys[tableName] = table.Key
+	}
+
+	// 6. Determine custom SQL keys
+	var sqlKeys []int
+
+	if analysis.HasGroupBy {
+		// If GROUP BY present, use GROUP BY columns as keys
+		for _, expr := range analysis.GroupByExprs {
+			// Try to find matching column
+			for colIdx, col := range relation.Columns {
+				if expr == col.Name || expr == col.BaseColumn {
+					sqlKeys = append(sqlKeys, colIdx)
+					break
+				}
+			}
+		}
+	} else if analysis.HasDistinct {
+		// SELECT DISTINCT - all columns form the key
+		for i := range relation.Columns {
+			sqlKeys = append(sqlKeys, i)
+		}
+	} else if len(analysis.BaseTables) == 1 && len(baseTableKeys) == 1 {
+		// Simple query from single table - use base table keys
+		for _, keyIndices := range baseTableKeys {
+			sqlKeys = append(sqlKeys, keyIndices...)
+		}
+	} else {
+		// Complex query or joins - use all columns as composite key
+		for i := range relation.Columns {
+			sqlKeys = append(sqlKeys, i)
+		}
+	}
+
+	// Remove duplicates and sort
+	keyMap := make(map[int]bool)
+	var uniqueKeys []int
+	for _, keyIdx := range sqlKeys {
+		if !keyMap[keyIdx] {
+			keyMap[keyIdx] = true
+			uniqueKeys = append(uniqueKeys, keyIdx)
+		}
+	}
+
+	relation.Key = uniqueKeys
+
+	// Validate we have at least one key column
+	if len(relation.Key) == 0 {
+		// Fall back to all columns as key
+		relation.Key = make([]int, len(relation.Columns))
+		for i := range relation.Columns {
+			relation.Key[i] = i
+		}
+	}
+
+	return relation, nil
+}
+
 // checkIsView checks if a relation is a view or table
 func checkIsView(db *sql.DB, dbType DatabaseType, relationName string) (bool, error) {
 	switch dbType {
@@ -480,12 +682,44 @@ func (r *Relation) IsColumnEditable(colIdx int) bool {
 		return false
 	}
 
+	col := r.Columns[colIdx]
+
+	// Custom SQL editability
+	if r.IsCustomSQL {
+		// Generated/derived columns are not editable
+		if col.Generated {
+			return false
+		}
+
+		// Must have clear lineage to base table
+		if col.Table == "" || col.BaseColumn == "" {
+			return false
+		}
+
+		// Base table must exist and have keys
+		baseTable, ok := r.Tables[col.Table]
+		if !ok || len(baseTable.Key) == 0 {
+			return false
+		}
+
+		// All base table keys must be present in result set
+		for _, keyIdx := range baseTable.Key {
+			if keyIdx >= len(r.Columns) {
+				return false
+			}
+			keyCol := r.Columns[keyIdx]
+			if keyCol.Table != col.Table {
+				return false
+			}
+		}
+
+		return true
+	}
+
 	// All table columns are editable
 	if !r.IsView {
 		return true
 	}
-
-	col := r.Columns[colIdx]
 
 	// Derived columns are never editable
 	if col.Table == "" {
@@ -1387,8 +1621,8 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 		return nil, fmt.Errorf("no lookup key configured")
 	}
 
-	// For views, update the base table instead
-	if rel.IsView {
+	// For views and custom SQL, update the base table instead
+	if rel.IsView || rel.IsCustomSQL {
 		return rel.updateViewColumn(records, rowIdx, colName, newValue)
 	}
 
@@ -1566,6 +1800,11 @@ func (rel *Relation) UpdateDBValue(records [][]any, rowIdx int, colName string, 
 // QueryRows executes a SELECT for the given columns and clauses, returning the
 // resulting row cursor. Callers are responsible for closing the returned rows.
 func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
+	// Custom SQL uses different query building
+	if rel.IsCustomSQL {
+		return rel.queryRowsCustomSQL(columns, sortCol, params, inclusive, scrollDown)
+	}
+
 	// Convert key indices to column names
 	keyColNames := make([]string, len(rel.Key))
 	for i, keyIdx := range rel.Key {
@@ -1576,6 +1815,85 @@ func (rel *Relation) QueryRows(columns []string, sortCol *SortColumn, params []a
 	if err != nil {
 		return nil, err
 	}
+
+	rows, err := rel.DB.Query(query, params...)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// queryRowsCustomSQL builds and executes a paginated query for custom SQL
+func (rel *Relation) queryRowsCustomSQL(columns []string, sortCol *SortColumn, params []any, inclusive, scrollDown bool) (*sql.Rows, error) {
+	// Convert key indices to column names
+	keyColNames := make([]string, len(rel.Key))
+	for i, keyIdx := range rel.Key {
+		keyColNames[i] = rel.Columns[keyIdx].Name
+	}
+
+	// Build the query by wrapping the custom SQL in a subquery
+	var builder strings.Builder
+
+	// SELECT clause
+	builder.WriteString("SELECT ")
+	quotedColumns := make([]string, len(columns))
+	for i, col := range columns {
+		quotedColumns[i] = quoteIdent(rel.DBType, col)
+	}
+	builder.WriteString(strings.Join(quotedColumns, ", "))
+
+	// FROM clause - wrap custom SQL as subquery
+	builder.WriteString(" FROM (")
+	builder.WriteString(rel.SQLStatement)
+	builder.WriteString(") AS custom_query")
+
+	// WHERE clause for pagination
+	if len(params) > 0 {
+		builder.WriteString(" WHERE ")
+
+		// Build row value comparison for key columns
+		colExpr, placeholders := buildRowValueExpression(rel.DBType, keyColNames, 1)
+		placeholderExpr := buildPlaceholderExpression(placeholders)
+
+		// Determine operator based on direction and inclusivity
+		var operator string
+		if scrollDown {
+			if inclusive {
+				operator = " >= "
+			} else {
+				operator = " > "
+			}
+		} else {
+			if inclusive {
+				operator = " <= "
+			} else {
+				operator = " < "
+			}
+		}
+
+		builder.WriteString(colExpr)
+		builder.WriteString(operator)
+		builder.WriteString(placeholderExpr)
+	}
+
+	// ORDER BY clause
+	builder.WriteString(" ORDER BY ")
+	if sortCol != nil {
+		quotedSortCol := SortColumn{Name: quoteIdent(rel.DBType, sortCol.Name), Asc: sortCol.Asc}
+		sortColString := quotedSortCol.String(scrollDown)
+		builder.WriteString(sortColString)
+		builder.WriteString(", ")
+	}
+	for i, colName := range keyColNames {
+		quotedCol := quoteIdent(rel.DBType, colName)
+		sc := SortColumn{Name: quotedCol, Asc: scrollDown}
+		builder.WriteString(sc.String(scrollDown))
+		if i < len(keyColNames)-1 {
+			builder.WriteString(", ")
+		}
+	}
+
+	query := builder.String()
 
 	rows, err := rel.DB.Query(query, params...)
 	if err != nil {

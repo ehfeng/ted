@@ -112,6 +112,17 @@ func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]i
 	filtered := []string{}
 	matchPositions := make(map[int][]int)
 
+	// Check if input is SQL
+	searchUpper := strings.ToUpper(strings.TrimSpace(search))
+	isSQL := strings.HasPrefix(searchUpper, "SELECT") || strings.HasPrefix(searchUpper, "WITH")
+
+	if isSQL && search != "" {
+		// Show SQL as executable option
+		filtered = []string{"[Execute SQL] " + search}
+		matchPositions[0] = []int{}
+		return filtered, matchPositions
+	}
+
 	if search == "" {
 		// No search, show all tables
 		filtered = tp.items
@@ -300,7 +311,7 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 	inputField := tview.NewInputField().
 		SetLabel("").
 		SetText(tp.searchText).
-		SetPlaceholder("Search for tables/views...").
+		SetPlaceholder("Search for tables/views or write aselect query…").
 		SetFieldWidth(0)
 
 	// Store reference to the input field

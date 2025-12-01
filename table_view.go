@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -505,9 +506,22 @@ func (tv *TableView) drawTableNameHeader(x, y, tableWidth int) {
 		return
 	}
 
-	// Format: " TableName ▾"
-	headerText := fmt.Sprintf(" %s ▾", tv.tableName)
-	style := tcell.StyleDefault.Foreground(tcell.ColorWhite)
+	// Detect if this is SQL
+	upperName := strings.ToUpper(strings.TrimSpace(tv.tableName))
+	isSQL := strings.HasPrefix(upperName, "SELECT") || strings.HasPrefix(upperName, "WITH")
+
+	var headerText string
+	var style tcell.Style
+
+	if isSQL {
+		// SQL: italic, no dropdown arrow
+		headerText = fmt.Sprintf(" %s", tv.tableName)
+		style = tcell.StyleDefault.Foreground(tcell.ColorWhite).Italic(true)
+	} else {
+		// Table/view: normal, with dropdown
+		headerText = fmt.Sprintf(" %s ▾", tv.tableName)
+		style = tcell.StyleDefault.Foreground(tcell.ColorWhite)
+	}
 
 	// Vim mode indicator to display on the right
 	vimModeText := ""

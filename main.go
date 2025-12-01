@@ -31,6 +31,7 @@ var (
 	crashReporting string
 	completion     string
 	vimMode        bool
+	sqlStatement   string
 )
 
 var rootCmd = &cobra.Command{
@@ -114,6 +115,12 @@ Examples:
 			tablename = args[1]
 		}
 
+		// Validate that --sql and table name are mutually exclusive
+		if sqlStatement != "" && tablename != "" {
+			fmt.Fprintln(os.Stderr, "Error: cannot use both --sql and table name argument")
+			os.Exit(1)
+		}
+
 		var dbTypeOverride *dblib.DatabaseType
 		// Validate mutually exclusive flags
 		if usePostgres && useMySQL {
@@ -156,7 +163,7 @@ Examples:
 		}
 
 		// Table/view name is now optional - the picker will be shown in the editor if not provided
-		if err := runEditor(config, dbname, tablename); err != nil {
+		if err := runEditor(config, dbname, tablename, sqlStatement); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -185,6 +192,7 @@ func init() {
 	}
 	rootCmd.Flags().StringVar(&completion, "completion", "", "Generate shell completions (bash, zsh, fish, powershell)")
 	rootCmd.Flags().BoolVar(&vimMode, "vim", false, "Enable vim mode for table navigation")
+	rootCmd.Flags().StringVar(&sqlStatement, "sql", "", "Custom SQL SELECT statement to execute")
 
 	if err := rootCmd.RegisterFlagCompletionFunc("pg", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return []string{"hi", "pg"}, cobra.ShellCompDirectiveNoFileComp
