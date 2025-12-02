@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -171,21 +172,21 @@ type TableViewConfig struct {
 // NewTableView creates a new table view component with the given configuration
 func NewTableView(height int, config *TableViewConfig) *TableView {
 	tv := &TableView{
-		Box:               tview.NewBox(),
-		cellPadding:       1,
-		borderColor:       tcell.ColorWhite,
-		headerColor:       tcell.ColorWhite,
-		headerBgColor:     tcell.ColorDarkSlateGray,
-		readOnlyBgColor:   tcell.ColorDarkGray,
-		separatorChar:     '│',
-		selectedRow:       0,
-		selectedCol:       0,
-		selectable:        true,
-		lastClickRow:      -1,
-		lastClickCol:      -1,
-		resizingColumn:    -1,
-		viewport:          NewViewport(),
-		rowsHeight:        height,
+		Box:             tview.NewBox(),
+		cellPadding:     1,
+		borderColor:     tcell.ColorWhite,
+		headerColor:     tcell.ColorWhite,
+		headerBgColor:   tcell.ColorDarkSlateGray,
+		readOnlyBgColor: tcell.ColorDarkGray,
+		separatorChar:   '│',
+		selectedRow:     0,
+		selectedCol:     0,
+		selectable:      true,
+		lastClickRow:    -1,
+		lastClickCol:    -1,
+		resizingColumn:  -1,
+		viewport:        NewViewport(),
+		rowsHeight:      height,
 	}
 
 	tv.SetBorder(false) // We'll draw our own borders
@@ -505,14 +506,27 @@ func (tv *TableView) drawTableNameHeader(x, y, tableWidth int) {
 		return
 	}
 
-	// Format: " TableName ▾"
-	headerText := fmt.Sprintf(" %s ▾", tv.tableName)
-	style := tcell.StyleDefault.Foreground(tcell.ColorWhite)
+	// Detect if this is SQL
+	upperName := strings.ToUpper(strings.TrimSpace(tv.tableName))
+	isSQL := strings.HasPrefix(upperName, "SELECT") || strings.HasPrefix(upperName, "WITH")
+
+	var headerText string
+	var style tcell.Style
+
+	if isSQL {
+		// SQL: italic, no dropdown arrow
+		headerText = fmt.Sprintf(" %s", tv.tableName)
+		style = tcell.StyleDefault.Foreground(tcell.ColorWhite).Italic(true)
+	} else {
+		// Table/view: normal, with dropdown
+		headerText = fmt.Sprintf(" %s", tv.tableName)
+		style = tcell.StyleDefault.Foreground(tcell.ColorWhite)
+	}
 
 	// Vim mode indicator to display on the right
 	vimModeText := ""
 	if tv.vimMode {
-		vimModeText = "vim mode "
+		vimModeText = " vim mode"
 	}
 
 	// Draw the header text left-aligned
@@ -521,6 +535,10 @@ func (tv *TableView) drawTableNameHeader(x, y, tableWidth int) {
 		tv.viewport.SetContent(pos, y, ch, nil, style)
 		pos++
 	}
+	tv.viewport.SetContent(pos, y, ' ', nil, style)
+	pos++
+	tv.viewport.SetContent(pos, y, '▾', nil, style)
+	pos++
 
 	// Calculate where vim mode text should start (right-aligned)
 	vimModeStartPos := x + tableWidth - len(vimModeText)

@@ -140,7 +140,7 @@ func mouseActionString(action tview.MouseAction) string {
 	}
 }
 
-func runEditor(config *Config, dbname, tablename string) error {
+func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
 
 	db, dbType, err := config.connect()
@@ -156,9 +156,39 @@ func runEditor(config *Config, dbname, tablename string) error {
 
 	var relation *dblib.Relation
 	var headers []dblib.DisplayColumn
+	var displayName string
 
-	// Only load table if tablename is provided
-	if tablename != "" {
+	// Load custom SQL if provided
+	if sqlStatement != "" {
+		var err error
+		relation, err = dblib.NewRelationFromSQL(db, dbType, sqlStatement)
+		if err != nil {
+			CaptureError(err)
+			return err
+		}
+
+		// Check if relation is keyable (has keys)
+		if len(relation.Key) == 0 {
+			return fmt.Errorf("custom SQL has no keyable columns and cannot be viewed")
+		}
+
+		displayName = sqlStatement
+
+		// Build headers in database schema order
+		headers = make([]dblib.DisplayColumn, 0, len(relation.Columns))
+		for i, col := range relation.Columns {
+			isKey := false
+			for _, keyIdx := range relation.Key {
+				if keyIdx == i {
+					isKey = true
+					break
+				}
+			}
+			editable := relation.IsColumnEditable(i)
+			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey, Editable: editable})
+		}
+	} else if tablename != "" {
+		// Load table/view if tablename is provided
 		var err error
 		relation, err = dblib.NewRelation(db, dbType, tablename)
 		if err != nil {
@@ -170,6 +200,8 @@ func runEditor(config *Config, dbname, tablename string) error {
 		if len(relation.Key) == 0 {
 			return fmt.Errorf("relation %s has no keyable columns and cannot be viewed", tablename)
 		}
+
+		displayName = tablename
 
 		// Build headers in database schema order
 		headers = make([]dblib.DisplayColumn, 0, len(relation.Columns))
@@ -185,8 +217,9 @@ func runEditor(config *Config, dbname, tablename string) error {
 			headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey, Editable: editable})
 		}
 	} else {
-		// No table specified - create empty state
+		// No table or SQL specified - create empty state
 		headers = []dblib.DisplayColumn{}
+		displayName = ""
 	}
 
 	// Get available tables for the picker
@@ -285,10 +318,10 @@ func runEditor(config *Config, dbname, tablename string) error {
 		},
 	})
 
-	editor.table.SetTableName(tablename).SetVimMode(editor.vimMode)
+	editor.table.SetTableName(displayName).SetVimMode(editor.vimMode)
 
-	// Only load data if we have a table
-	if tablename != "" {
+	// Only load data if we have a relation
+	if displayName != "" {
 		editor.loadFromRowId(nil, true, 0)
 	}
 	editor.setupKeyBindings()

@@ -266,8 +266,30 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	e.app.SetAfterDrawFunc(nil) // Clear cursor style function
 	e.setCursorStyle(0)         // Reset to default cursor style
 
-	// Reload the relation (table or view) data using the current database connection
-	relation, err := dblib.NewRelation(e.db, e.dbType, tableName)
+	var relation *dblib.Relation
+	var displayName string
+	var err error
+
+	// Check if this is SQL input
+	if strings.HasPrefix(tableName, "[Execute SQL] ") {
+		sqlStr := strings.TrimPrefix(tableName, "[Execute SQL] ")
+		relation, err = dblib.NewRelationFromSQL(e.db, e.dbType, sqlStr)
+		displayName = sqlStr
+	} else {
+		// Check if it's SQL without the prefix
+		searchUpper := strings.ToUpper(strings.TrimSpace(tableName))
+		isSQL := strings.HasPrefix(searchUpper, "SELECT") || strings.HasPrefix(searchUpper, "WITH")
+
+		if isSQL {
+			relation, err = dblib.NewRelationFromSQL(e.db, e.dbType, tableName)
+			displayName = tableName
+		} else {
+			// It's a table/view name
+			relation, err = dblib.NewRelation(e.db, e.dbType, tableName)
+			displayName = tableName
+		}
+	}
+
 	if err != nil {
 		if err == dblib.ErrNoKeyableColumns {
 			e.app.Stop()
@@ -276,6 +298,16 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 			return
 		}
 		e.SetStatusErrorWithSentry(err)
+		return
+	}
+
+	// Check if relation is keyable (has keys) - required for viewing
+	if len(relation.Key) == 0 {
+		if relation.IsCustomSQL {
+			e.SetStatusError("Custom SQL has no keyable columns and cannot be viewed")
+		} else {
+			e.SetStatusError(fmt.Sprintf("Relation %s has no keyable columns and cannot be viewed", displayName))
+		}
 		return
 	}
 
@@ -295,7 +327,7 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 		editable := e.relation.IsColumnEditable(i)
 		headers = append(headers, dblib.DisplayColumn{Name: col.Name, Width: DefaultColumnWidth, IsKey: isKey, Editable: editable})
 	}
-	e.table.SetHeaders(headers).SetTableName(tableName).SetVimMode(e.vimMode)
+	e.table.SetHeaders(headers).SetTableName(displayName).SetVimMode(e.vimMode)
 
 	// Reload data from the beginning
 	e.pointer = 0
@@ -305,7 +337,11 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	e.table.Select(0, 0)
 
 	// Update title
-	e.app.SetTitle(fmt.Sprintf("ted %s/%s %s", e.config.Database, tableName, databaseIcons[e.relation.DBType]))
+	if e.relation.IsCustomSQL {
+		e.app.SetTitle(fmt.Sprintf("ted %s/[SQL Query] %s", e.config.Database, databaseIcons[e.relation.DBType]))
+	} else {
+		e.app.SetTitle(fmt.Sprintf("ted %s/%s %s", e.config.Database, displayName, databaseIcons[e.relation.DBType]))
+	}
 
 	// Set focus back to table
 	e.app.SetFocus(e.table)

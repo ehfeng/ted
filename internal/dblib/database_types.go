@@ -85,13 +85,15 @@ type Relation struct {
 	DBType DatabaseType
 
 	// Name metadata - exported for access from main package
-	Name        string
-	IsView      bool              // true if this is a view, false if table
-	Tables      map[string]*Table // base tables referenced (for views)
-	Columns     []Column          // ordered columns (renamed from Attribute)
-	ColumnIndex map[string]int    // column name -> column index
-	Key         []int             // index into Columns for key columns
-	References  []Reference       // references
+	Name         string
+	IsView       bool              // true if this is a view, false if table
+	IsCustomSQL  bool              // true if this is custom SQL, false if table/view
+	SQLStatement string            // stores original SQL for custom SQL display
+	Tables       map[string]*Table // base tables referenced (for views)
+	Columns      []Column          // ordered columns (renamed from Attribute)
+	ColumnIndex  map[string]int    // column name -> column index
+	Key          []int             // index into Columns for key columns
+	References   []Reference       // references
 }
 
 // Column represents a column in a relation (renamed from Attribute)
