@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"ted/internal/dblib"
@@ -268,13 +269,13 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	// Reload the relation (table or view) data using the current database connection
 	relation, err := dblib.NewRelation(e.db, e.dbType, tableName)
 	if err != nil {
+		if err == dblib.ErrNoKeyableColumns {
+			e.app.Stop()
+			errMsg := fmt.Sprintf("relation '%s' has no keyable columns and cannot be viewed", tableName)
+			fmt.Fprintln(os.Stderr, errMsg)
+			return
+		}
 		e.SetStatusErrorWithSentry(err)
-		return
-	}
-
-	// Check if relation is keyable (has keys) - required for viewing
-	if len(relation.Key) == 0 {
-		e.SetStatusError(fmt.Sprintf("Relation %s has no keyable columns and cannot be viewed", tableName))
 		return
 	}
 
