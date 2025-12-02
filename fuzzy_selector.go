@@ -311,7 +311,7 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 	inputField := tview.NewInputField().
 		SetLabel("").
 		SetText(tp.searchText).
-		SetPlaceholder("Search for tables/views or write aselect query…").
+		SetPlaceholder("Search for tablve/view or enter a SELECT query…").
 		SetFieldWidth(0)
 
 	// Store reference to the input field
