@@ -59,7 +59,7 @@ func getShortestLookupKeyPostgreSQL(db *sql.DB, tableName string, sizeOf func(st
 	candidates := []candidate{}
 
 	// Unique non-primary indexes
-	uRows, err := db.Query(`SELECT i.indexname,
+	uRows, err := db.Query(`SELECT i.relname,
                                        array_agg(a.attname ORDER BY k.ord) as columns
                                  FROM pg_index idx
                                  JOIN pg_class c ON c.oid = idx.indrelid
@@ -67,8 +67,8 @@ func getShortestLookupKeyPostgreSQL(db *sql.DB, tableName string, sizeOf func(st
                                  JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
                                  JOIN pg_attribute a ON a.attrelid = idx.indrelid AND a.attnum = k.attnum
                                  WHERE c.relname = $1 AND idx.indisunique AND NOT idx.indisprimary
-                                 GROUP BY i.indexname, array_length(idx.indkey, 1)
-                                 ORDER BY array_length(idx.indkey, 1), i.indexname`, tableName)
+                                 GROUP BY i.relname, array_length(idx.indkey, 1)
+                                 ORDER BY array_length(idx.indkey, 1), i.relname`, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func loadColumnsPostgreSQL(db *sql.DB, tableName string) ([]Column, map[string]i
 		schema = rel[:dot]
 		rel = rel[dot+1:]
 	}
-	
+
 	query := `SELECT column_name, data_type, is_nullable
 			FROM information_schema.columns
 			WHERE table_schema = $1 AND table_name = $2
@@ -147,7 +147,7 @@ func loadColumnsPostgreSQL(db *sql.DB, tableName string) ([]Column, map[string]i
 		}
 
 		col.Nullable = strings.ToLower(nullable) == "yes"
-		col.Table = tableName // For tables, Table is the table name itself
+		col.Table = tableName     // For tables, Table is the table name itself
 		col.BaseColumn = col.Name // For tables, BaseColumn is the same as Name
 
 		idx := len(columns)
@@ -522,7 +522,7 @@ func getViewDefinitionPostgreSQL(db *sql.DB, viewName string) (string, error) {
 	if dot := strings.IndexByte(rel, '.'); dot != -1 {
 		rel = rel[dot+1:]
 	}
-	
+
 	var sqlDef string
 	err := db.QueryRow("SELECT pg_get_viewdef($1::regclass, true)", rel).Scan(&sqlDef)
 	if err != nil {

@@ -2,6 +2,7 @@ package dblib
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -230,6 +231,7 @@ func determineKeysFromAnalysis(analysis *ViewAnalysis, columns []Column,
 
 	return uniqueKeys, nil
 }
+var ErrNoKeyableColumns = errors.New("no keyable columns found")
 
 func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, error) {
 	if tableName == "" {
@@ -319,7 +321,7 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 
 		// If not nullable unique constraint is found, error
 		if len(lookupCols) == 0 {
-			return wrapErr(fmt.Errorf("no primary key found"))
+			return nil, ErrNoKeyableColumns
 		}
 
 		// Convert key column names to indices

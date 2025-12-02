@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"ted/internal/dblib"
@@ -31,7 +32,7 @@ func (e *Editor) executeSQL(query string) {
 		strings.HasPrefix(queryUpper, "START TRANSACTION") ||
 		strings.HasPrefix(queryUpper, "BEGIN WORK") ||
 		strings.HasPrefix(queryUpper, "BEGIN TRANSACTION") {
-		e.SetStatusError("Transaction statements are not allowed in SQL mode")
+		e.SetStatusError("Transactions are not supported")
 		e.startRefreshTimer()
 		return
 	}
@@ -290,6 +291,12 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	}
 
 	if err != nil {
+		if err == dblib.ErrNoKeyableColumns {
+			e.app.Stop()
+			errMsg := fmt.Sprintf("relation '%s' has no keyable columns and cannot be viewed", tableName)
+			fmt.Fprintln(os.Stderr, errMsg)
+			return
+		}
 		e.SetStatusErrorWithSentry(err)
 		return
 	}

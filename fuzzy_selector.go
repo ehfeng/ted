@@ -2,11 +2,27 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
+
+// MatchType represents the type of match found in fuzzy search.
+type MatchType int
+
+const (
+	MatchTypePrefixExact MatchType = iota // Prefix match
+	MatchTypeFuzzy                        // Fuzzy match
+)
+
+// MatchScore holds match information for sorting search results.
+type MatchScore struct {
+	Table     string
+	Type      MatchType
+	Positions []int // Character positions for highlighting
+}
 
 // fuzzyMatch performs fuzzy matching and returns match status and positions.
 // It matches characters from search in order within text (case-insensitive).
@@ -26,6 +42,13 @@ func fuzzyMatch(search, text string) (bool, []int) {
 	}
 
 	return searchIdx == len(search), positions
+}
+
+// isPrefixMatch checks if search is a case-insensitive prefix of text.
+func isPrefixMatch(search, text string) bool {
+	search = strings.ToLower(search)
+	text = strings.ToLower(text)
+	return strings.HasPrefix(text, search)
 }
 
 // formatTableNameWithColor formats the table name with tview color codes highlighting for matches.
@@ -108,6 +131,7 @@ func NewFuzzySelector(tables []string, initialTable string, onSelect func(string
 }
 
 // calculateFiltered filters the table list based on search text and returns filtered tables and match positions.
+// Results are sorted with prefix matches first, then fuzzy matches.
 func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]int) {
 	filtered := []string{}
 	matchPositions := make(map[int][]int)
@@ -130,13 +154,43 @@ func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]i
 			matchPositions[i] = []int{}
 		}
 	} else {
-		// Fuzzy search
+		// Collect all matches with their type and positions
+		var scores []MatchScore
+
 		for _, table := range tp.items {
-			matches, positions := fuzzyMatch(search, table)
-			if matches {
-				filtered = append(filtered, table)
-				matchPositions[len(filtered)-1] = positions
+			if isPrefixMatch(search, table) {
+				// Prefix match: generate sequential positions
+				positions := make([]int, len(search))
+				for i := range positions {
+					positions[i] = i
+				}
+				scores = append(scores, MatchScore{
+					Table:     table,
+					Type:      MatchTypePrefixExact,
+					Positions: positions,
+				})
+			} else {
+				// Try fuzzy match
+				matches, positions := fuzzyMatch(search, table)
+				if matches {
+					scores = append(scores, MatchScore{
+						Table:     table,
+						Type:      MatchTypeFuzzy,
+						Positions: positions,
+					})
+				}
 			}
+		}
+
+		// Sort by match type (prefix matches first), preserving original order for ties
+		sort.SliceStable(scores, func(i, j int) bool {
+			return scores[i].Type < scores[j].Type
+		})
+
+		// Build filtered results and match positions from sorted scores
+		for i, score := range scores {
+			filtered = append(filtered, score.Table)
+			matchPositions[i] = score.Positions
 		}
 	}
 
