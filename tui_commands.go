@@ -260,6 +260,26 @@ func (e *Editor) executeFind(findValue string) {
 	}
 }
 
+// validateAndCleanSQL validates SQL input, removes trailing semicolons,
+// and checks for multiple statements. Returns empty string if invalid.
+func (e *Editor) validateAndCleanSQL(sqlStr string) string {
+	sqlStr = strings.TrimSpace(sqlStr)
+
+	// Remove trailing semicolon if present
+	sqlStr = strings.TrimSuffix(sqlStr, ";")
+	sqlStr = strings.TrimSpace(sqlStr)
+
+	// Check for multiple statements by looking for semicolons
+	// (after removing the trailing one, any remaining semicolon indicates multiple statements)
+	if strings.Contains(sqlStr, ";") {
+		e.app.Stop()
+		fmt.Fprintln(os.Stderr, "Error: Multiple SQL statements are not supported. Please enter a single SELECT or WITH query.")
+		return ""
+	}
+
+	return sqlStr
+}
+
 // selectTableFromPicker handles selecting a table or view from the picker
 func (e *Editor) selectTableFromPicker(tableName string) {
 	e.pages.HidePage(pagePicker)
@@ -273,6 +293,10 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	// Check if this is SQL input
 	if strings.HasPrefix(tableName, "[Execute SQL] ") {
 		sqlStr := strings.TrimPrefix(tableName, "[Execute SQL] ")
+		sqlStr = e.validateAndCleanSQL(sqlStr)
+		if sqlStr == "" {
+			return // Error already handled
+		}
 		relation, err = dblib.NewRelationFromSQL(e.db, e.dbType, sqlStr)
 		displayName = sqlStr
 	} else {
@@ -281,8 +305,12 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 		isSQL := strings.HasPrefix(searchUpper, "SELECT") || strings.HasPrefix(searchUpper, "WITH")
 
 		if isSQL {
-			relation, err = dblib.NewRelationFromSQL(e.db, e.dbType, tableName)
-			displayName = tableName
+			cleanedSQL := e.validateAndCleanSQL(tableName)
+			if cleanedSQL == "" {
+				return // Error already handled
+			}
+			relation, err = dblib.NewRelationFromSQL(e.db, e.dbType, cleanedSQL)
+			displayName = cleanedSQL
 		} else {
 			// It's a table/view name
 			relation, err = dblib.NewRelation(e.db, e.dbType, tableName)
