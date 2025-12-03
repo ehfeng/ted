@@ -397,8 +397,8 @@ func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 		AddItem(nil, 0, 1, false)                // Spacer takes rest of screen
 	editor.pages.AddPage(pagePicker, pickerOverlay, true, false)
 
-	// If no table was specified, show the picker immediately
-	if tablename == "" {
+	// If no table or SQL was specified, show the picker immediately
+	if tablename == "" && sqlStatement == "" {
 		editor.pages.ShowPage(pagePicker)
 		editor.app.SetFocus(editor.tablePicker)
 		editor.app.SetAfterDrawFunc(func(screen tcell.Screen) {
