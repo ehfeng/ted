@@ -473,7 +473,6 @@ func (e *Editor) refresh() error {
 	// Mark end with empty row if we didn't fill the buffer
 	if len(currentRows) < len(e.buffer) {
 		e.buffer[len(currentRows)] = Row{}
-		e.buffer = e.buffer[:len(currentRows)+1]
 	}
 	// }
 
