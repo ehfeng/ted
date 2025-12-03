@@ -231,6 +231,7 @@ func determineKeysFromAnalysis(analysis *ViewAnalysis, columns []Column,
 
 	return uniqueKeys, nil
 }
+
 var ErrNoKeyableColumns = errors.New("no keyable columns found")
 
 func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, error) {
@@ -1856,7 +1857,6 @@ func (rel *Relation) queryRowsCustomSQL(columns []string, sortCol *SortColumn, p
 			builder.WriteString(", ")
 		}
 	}
-
 	query := builder.String()
 
 	rows, err := rel.DB.Query(query, params...)

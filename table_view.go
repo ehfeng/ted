@@ -715,7 +715,7 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 			baseCellStyle = baseCellStyle.Background(tcell.ColorDarkGreen)
 		} else if !header.Editable {
 			// Non-editable column - use grey background
-			baseCellStyle = baseCellStyle.Background(tv.readOnlyBgColor)
+			baseCellStyle = baseCellStyle.Foreground(tv.readOnlyBgColor)
 		}
 
 		// Apply selection highlight on top of base style

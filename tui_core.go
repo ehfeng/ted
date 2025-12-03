@@ -322,7 +322,10 @@ func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 
 	// Only load data if we have a relation
 	if displayName != "" {
-		editor.loadFromRowId(nil, true, 0)
+		if err := editor.loadFromRowId(nil, true, 0); err != nil {
+			CaptureError(err)
+			return err
+		}
 	}
 	editor.setupKeyBindings()
 	editor.setupStatusBar()
