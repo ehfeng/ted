@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// MySQLHandler implements DatabaseHandler for MySQL databases.
+type MySQLHandler struct{}
+
 // getShortestLookupKeyMySQL returns the best lookup key for a MySQL table.
 func getShortestLookupKeyMySQL(db *sql.DB, tableName string, sizeOf func(string, int) int) ([]string, error) {
 	type candidate struct {
@@ -490,11 +493,71 @@ func parseEnumValues(colType string) []string {
 func getViewDefinitionMySQL(db *sql.DB, viewName string) (string, error) {
 	var sqlDef string
 	err := db.QueryRow(`
-		SELECT view_definition 
-		FROM information_schema.views 
+		SELECT view_definition
+		FROM information_schema.views
 		WHERE table_schema = DATABASE() AND table_name = ?`, viewName).Scan(&sqlDef)
 	if err != nil {
 		return "", fmt.Errorf("failed to get view definition: %w", err)
 	}
 	return sqlDef, nil
+}
+
+// DatabaseHandler interface implementation for MySQLHandler
+
+// CheckIsView returns true if the named relation is a view, false if it's a table.
+func (h *MySQLHandler) CheckIsView(db *sql.DB, relationName string) (bool, error) {
+	var isView bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.views
+			WHERE table_schema = DATABASE() AND table_name = ?
+		)`, relationName).Scan(&isView)
+	return isView, err
+}
+
+// LoadColumns loads column metadata for a MySQL table.
+func (h *MySQLHandler) LoadColumns(db *sql.DB, tableName string) ([]Column, map[string]int, error) {
+	return loadColumnsMySQL(db, tableName)
+}
+
+// LoadForeignKeys loads foreign key constraints for a MySQL table.
+func (h *MySQLHandler) LoadForeignKeys(db *sql.DB, dbType DatabaseType, tableName string,
+	columnIndex map[string]int, columns []Column) ([]Reference, []Column, error) {
+	return loadForeignKeysMySQL(db, dbType, tableName, columnIndex, columns)
+}
+
+// LoadEnumAndCustomTypes fetches enum values for MySQL columns.
+func (h *MySQLHandler) LoadEnumAndCustomTypes(db *sql.DB, tableName string, columns []Column) ([]Column, error) {
+	return loadEnumAndCustomTypesMySQL(db, tableName, columns)
+}
+
+// GetViewDefinition retrieves the SQL definition of a MySQL view.
+func (h *MySQLHandler) GetViewDefinition(db *sql.DB, viewName string) (string, error) {
+	return getViewDefinitionMySQL(db, viewName)
+}
+
+// GetBestKey identifies the best key column(s) for a MySQL table.
+func (h *MySQLHandler) GetBestKey(db *sql.DB, tableName string) ([]string, error) {
+	return getBestKeyMySQL(db, tableName)
+}
+
+// GetShortestLookupKey returns the best lookup key for a MySQL table.
+func (h *MySQLHandler) GetShortestLookupKey(db *sql.DB, tableName string) ([]string, error) {
+	return getShortestLookupKeyMySQL(db, tableName, sizeOf)
+}
+
+// QuoteIdent quotes an identifier (table/column name) for MySQL using backticks.
+func (h *MySQLHandler) QuoteIdent(ident string) string {
+	// Check if safe to leave unquoted
+	if isSafeUnquotedIdent(ident) {
+		return ident
+	}
+	// Escape backticks by doubling them
+	escaped := strings.ReplaceAll(ident, "`", "``")
+	return "`" + escaped + "`"
+}
+
+// Placeholder returns the parameter placeholder for MySQL (always "?").
+func (h *MySQLHandler) Placeholder(position int) string {
+	return "?"
 }

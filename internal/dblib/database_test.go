@@ -1205,7 +1205,12 @@ func TestLoadViewColumns(t *testing.T) {
 	db, _ := setupTestDBWithView(t)
 	defer db.Close()
 
-	columns, columnIndex, err := loadViewColumns(db, SQLite, "product_view")
+	handler, err := NewDatabaseHandler(SQLite)
+	if err != nil {
+		t.Fatalf("NewDatabaseHandler failed: %v", err)
+	}
+
+	columns, columnIndex, err := loadViewColumns(db, SQLite, handler, "product_view")
 	if err != nil {
 		t.Fatalf("loadViewColumns failed: %v", err)
 	}

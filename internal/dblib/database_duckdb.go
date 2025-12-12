@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// DuckDBHandler implements DatabaseHandler for DuckDB databases.
+type DuckDBHandler struct{}
+
 // getBestKeyDuckDB identifies the best key for a DuckDB table.
 // DuckDB supports information_schema similar to PostgreSQL.
 // Ranking: primary key > unique NOT NULL > fewer columns > shorter > earlier.
@@ -167,3 +170,116 @@ func getBestKeyDuckDB(db *sql.DB, tableName string) ([]string, error) {
 
 	return candidates[0].cols, nil
 }
+
+// DatabaseHandler interface implementation for DuckDBHandler
+
+// CheckIsView returns true if the named relation is a view, false if it's a table.
+func (h *DuckDBHandler) CheckIsView(db *sql.DB, relationName string) (bool, error) {
+	var isView bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.views
+			WHERE table_name = ?
+		)`, relationName).Scan(&isView)
+	return isView, err
+}
+
+// LoadColumns loads column metadata for a DuckDB table.
+func (h *DuckDBHandler) LoadColumns(db *sql.DB, tableName string) ([]Column, map[string]int, error) {
+	query := `
+		SELECT column_name, data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_name = ?
+		ORDER BY ordinal_position`
+
+	rows, err := db.Query(query, tableName)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var columns []Column
+	columnIndex := make(map[string]int)
+
+	for rows.Next() {
+		var col Column
+		col.Reference = -1
+		var nullable string
+
+		err = rows.Scan(&col.Name, &col.Type, &nullable)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		col.Nullable = nullable == "YES"
+		col.Table = tableName
+		col.BaseColumn = col.Name
+
+		idx := len(columns)
+		columns = append(columns, col)
+		columnIndex[col.Name] = idx
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	return columns, columnIndex, nil
+}
+
+// LoadForeignKeys loads foreign key constraints for a DuckDB table.
+func (h *DuckDBHandler) LoadForeignKeys(db *sql.DB, dbType DatabaseType, tableName string,
+	columnIndex map[string]int, columns []Column) ([]Reference, []Column, error) {
+	// DuckDB foreign key support is limited - return empty for now
+	updatedColumns := make([]Column, len(columns))
+	copy(updatedColumns, columns)
+	return []Reference{}, updatedColumns, nil
+}
+
+// LoadEnumAndCustomTypes is a no-op for DuckDB (minimal enum support).
+func (h *DuckDBHandler) LoadEnumAndCustomTypes(db *sql.DB, tableName string, columns []Column) ([]Column, error) {
+	// DuckDB has enum support but it's not widely used yet
+	return columns, nil
+}
+
+// GetViewDefinition retrieves the SQL definition of a DuckDB view.
+func (h *DuckDBHandler) GetViewDefinition(db *sql.DB, viewName string) (string, error) {
+	var sqlDef string
+	err := db.QueryRow(`
+		SELECT view_definition
+		FROM information_schema.views
+		WHERE table_name = ?`, viewName).Scan(&sqlDef)
+	if err != nil {
+		return "", fmt.Errorf("failed to get view definition: %w", err)
+	}
+	return sqlDef, nil
+}
+
+// GetBestKey identifies the best key column(s) for a DuckDB table.
+func (h *DuckDBHandler) GetBestKey(db *sql.DB, tableName string) ([]string, error) {
+	return getBestKeyDuckDB(db, tableName)
+}
+
+// GetShortestLookupKey returns the best lookup key for a DuckDB table.
+func (h *DuckDBHandler) GetShortestLookupKey(db *sql.DB, tableName string) ([]string, error) {
+	// For now, delegate to GetBestKey
+	// This could be enhanced with unique constraint analysis similar to PostgreSQL
+	return h.GetBestKey(db, tableName)
+}
+
+// QuoteIdent quotes an identifier (table/column name) for DuckDB using double quotes.
+func (h *DuckDBHandler) QuoteIdent(ident string) string {
+	// Check if safe to leave unquoted
+	if isSafeUnquotedIdent(ident) {
+		return ident
+	}
+	// Escape double quotes by doubling them
+	escaped := strings.ReplaceAll(ident, "\"", "\"\"")
+	return "\"" + escaped + "\""
+}
+
+// Placeholder returns the parameter placeholder for DuckDB (always "?").
+func (h *DuckDBHandler) Placeholder(position int) string {
+	return "?"
+}
+

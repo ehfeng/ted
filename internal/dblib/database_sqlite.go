@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// SQLiteHandler implements DatabaseHandler for SQLite databases.
+// It maintains state for primary key columns to use as fallback in GetShortestLookupKey.
+type SQLiteHandler struct {
+	lastPrimaryKeyCols []string
+}
+
 // getShortestLookupKeySQLite returns the best lookup key for a SQLite table.
 func getShortestLookupKeySQLite(db *sql.DB, tableName string, sizeOf func(string, int) int) ([]string, error) {
 	type candidate struct {
@@ -134,8 +140,10 @@ func getShortestLookupKeySQLite(db *sql.DB, tableName string, sizeOf func(string
 	return candidates[0].cols, nil
 }
 
-// loadColumnsSQLite loads columns for a SQLite table.
-func loadColumnsSQLite(db *sql.DB, tableName string) ([]Column, map[string]int, []string, error) {
+// loadColumnsSQLiteWithPrimaryKeys loads columns for a SQLite table.
+// Returns 4 values including primary key columns for internal use.
+// This is an internal helper used by loadColumnsSQLite and SQLiteHandler.
+func loadColumnsSQLiteWithPrimaryKeys(db *sql.DB, tableName string) ([]Column, map[string]int, []string, error) {
 	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
 	rows, err := db.Query(query)
 	if err != nil {
@@ -517,4 +525,79 @@ func sizeOf(typ string, charLen int) int {
 	default:
 		return 8
 	}
+}
+
+// DatabaseHandler interface implementation for SQLiteHandler
+
+// CheckIsView returns true if the named relation is a view, false if it's a table.
+func (h *SQLiteHandler) CheckIsView(db *sql.DB, relationName string) (bool, error) {
+	var sqlType string
+	err := db.QueryRow("SELECT type FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')", relationName).Scan(&sqlType)
+	if err != nil {
+		return false, err
+	}
+	return sqlType == "view", nil
+}
+
+// LoadColumns loads column metadata for a SQLite table.
+// Caches primary key columns for use as fallback in GetShortestLookupKey.
+func (h *SQLiteHandler) LoadColumns(db *sql.DB, tableName string) ([]Column, map[string]int, error) {
+	columns, columnIndex, primaryKeyCols, err := loadColumnsSQLiteWithPrimaryKeys(db, tableName)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Cache primary keys for fallback use
+	h.lastPrimaryKeyCols = primaryKeyCols
+	return columns, columnIndex, nil
+}
+
+// LoadForeignKeys loads foreign key constraints for a SQLite table.
+func (h *SQLiteHandler) LoadForeignKeys(db *sql.DB, dbType DatabaseType, tableName string,
+	columnIndex map[string]int, columns []Column) ([]Reference, []Column, error) {
+	return loadForeignKeysSQLite(db, dbType, tableName, columnIndex, columns)
+}
+
+// LoadEnumAndCustomTypes is a no-op for SQLite (no native ENUM support).
+func (h *SQLiteHandler) LoadEnumAndCustomTypes(db *sql.DB, tableName string, columns []Column) ([]Column, error) {
+	return loadEnumAndCustomTypesSQLite(db, tableName, columns)
+}
+
+// GetViewDefinition retrieves the SQL definition of a SQLite view.
+func (h *SQLiteHandler) GetViewDefinition(db *sql.DB, viewName string) (string, error) {
+	return getViewDefinitionSQLite(db, viewName)
+}
+
+// GetBestKey identifies the best key column(s) for a SQLite table.
+func (h *SQLiteHandler) GetBestKey(db *sql.DB, tableName string) ([]string, error) {
+	return getBestKeySQLite(db, tableName)
+}
+
+// GetShortestLookupKey returns the best lookup key for a SQLite table.
+// Falls back to cached primary key columns if no unique constraints found.
+func (h *SQLiteHandler) GetShortestLookupKey(db *sql.DB, tableName string) ([]string, error) {
+	cols, err := getShortestLookupKeySQLite(db, tableName, sizeOf)
+	if err != nil {
+		return nil, err
+	}
+	// If no unique constraints found, use cached primary key columns as fallback
+	if len(cols) == 0 && len(h.lastPrimaryKeyCols) > 0 {
+		return h.lastPrimaryKeyCols, nil
+	}
+	return cols, nil
+}
+
+// QuoteIdent quotes an identifier (table/column name) for SQLite using double quotes.
+func (h *SQLiteHandler) QuoteIdent(ident string) string {
+	// Check if safe to leave unquoted
+	if isSafeUnquotedIdent(ident) {
+		return ident
+	}
+	// Escape double quotes by doubling them
+	escaped := strings.ReplaceAll(ident, "\"", "\"\"")
+	return "\"" + escaped + "\""
+}
+
+// Placeholder returns the parameter placeholder for SQLite (always "?").
+func (h *SQLiteHandler) Placeholder(position int) string {
+	return "?"
 }

@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// PostgresHandler implements DatabaseHandler for PostgreSQL databases.
+type PostgresHandler struct{}
+
 // getShortestLookupKeyPostgreSQL returns the best lookup key for a PostgreSQL table.
 func getShortestLookupKeyPostgreSQL(db *sql.DB, tableName string, sizeOf func(string, int) int) ([]string, error) {
 	type candidate struct {
@@ -529,4 +532,71 @@ func getViewDefinitionPostgreSQL(db *sql.DB, viewName string) (string, error) {
 		return "", fmt.Errorf("failed to get view definition: %w", err)
 	}
 	return sqlDef, nil
+}
+
+// DatabaseHandler interface implementation for PostgresHandler
+
+// CheckIsView returns true if the named relation is a view, false if it's a table.
+func (h *PostgresHandler) CheckIsView(db *sql.DB, relationName string) (bool, error) {
+	// Extract schema and relation name
+	schema := "public"
+	rel := relationName
+	if dot := strings.IndexByte(rel, '.'); dot != -1 {
+		schema = rel[:dot]
+		rel = rel[dot+1:]
+	}
+	var isView bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM pg_views
+			WHERE schemaname = $1 AND viewname = $2
+		)`, schema, rel).Scan(&isView)
+	return isView, err
+}
+
+// LoadColumns loads column metadata for a PostgreSQL table.
+func (h *PostgresHandler) LoadColumns(db *sql.DB, tableName string) ([]Column, map[string]int, error) {
+	return loadColumnsPostgreSQL(db, tableName)
+}
+
+// LoadForeignKeys loads foreign key constraints for a PostgreSQL table.
+func (h *PostgresHandler) LoadForeignKeys(db *sql.DB, dbType DatabaseType, tableName string,
+	columnIndex map[string]int, columns []Column) ([]Reference, []Column, error) {
+	return loadForeignKeysPostgreSQL(db, dbType, tableName, columnIndex, columns)
+}
+
+// LoadEnumAndCustomTypes fetches enum values for PostgreSQL columns.
+func (h *PostgresHandler) LoadEnumAndCustomTypes(db *sql.DB, tableName string, columns []Column) ([]Column, error) {
+	return loadEnumAndCustomTypesPostgreSQL(db, tableName, columns)
+}
+
+// GetViewDefinition retrieves the SQL definition of a PostgreSQL view.
+func (h *PostgresHandler) GetViewDefinition(db *sql.DB, viewName string) (string, error) {
+	return getViewDefinitionPostgreSQL(db, viewName)
+}
+
+// GetBestKey identifies the best key column(s) for a PostgreSQL table.
+func (h *PostgresHandler) GetBestKey(db *sql.DB, tableName string) ([]string, error) {
+	return getBestKeyPostgreSQL(db, tableName)
+}
+
+// GetShortestLookupKey returns the best lookup key for a PostgreSQL table.
+func (h *PostgresHandler) GetShortestLookupKey(db *sql.DB, tableName string) ([]string, error) {
+	return getShortestLookupKeyPostgreSQL(db, tableName, sizeOf)
+}
+
+// QuoteIdent quotes an identifier (table/column name) for PostgreSQL using double quotes.
+func (h *PostgresHandler) QuoteIdent(ident string) string {
+	// Check if safe to leave unquoted
+	if isSafeUnquotedIdent(ident) {
+		return ident
+	}
+	// Escape double quotes by doubling them
+	escaped := strings.ReplaceAll(ident, "\"", "\"\"")
+	return "\"" + escaped + "\""
+}
+
+// Placeholder returns the parameter placeholder for PostgreSQL (positional: $1, $2, etc.).
+func (h *PostgresHandler) Placeholder(position int) string {
+	return fmt.Sprintf("$%d", position)
 }

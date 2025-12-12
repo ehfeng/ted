@@ -81,8 +81,9 @@ type Reference struct {
 // sheet: sheet, column, row
 // row id should be file line number, different than lookup key
 type Relation struct {
-	DB     *sql.DB
-	DBType DatabaseType
+	DB      *sql.DB
+	DBType  DatabaseType
+	handler DatabaseHandler // database-specific operations handler
 
 	// Name metadata - exported for access from main package
 	Name         string

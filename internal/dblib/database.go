@@ -13,25 +13,6 @@ import (
 	_ "github.com/pingcap/tidb/parser/test_driver"
 )
 
-// getShortestLookupKey returns the best lookup key for a table by considering
-// the primary key and all suitable unique constraints, ranking by:
-// - fewest columns
-// - smallest estimated total byte width
-// For PostgreSQL, NULLS NOT DISTINCT is supported so nullability is not a filter.
-// For SQLite/MySQL, require all unique index columns to be NOT NULL.
-func getShortestLookupKey(db *sql.DB, dbType DatabaseType, tableName string) ([]string, error) {
-	switch dbType {
-	case SQLite:
-		return getShortestLookupKeySQLite(db, tableName, sizeOf)
-	case PostgreSQL:
-		return getShortestLookupKeyPostgreSQL(db, tableName, sizeOf)
-	case MySQL:
-		return getShortestLookupKeyMySQL(db, tableName, sizeOf)
-	default:
-		return []string{}, nil
-	}
-}
-
 // GetBestKey identifies the best key column(s) for a relation, using system tables
 // when available. The ranking preferences are (in order of priority):
 // 1. Primary keys over unique constraints (with NOT NULL or NULLS NOT DISTINCT)
@@ -243,14 +224,21 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		return nil, fmt.Errorf("failed to load table schema: %w", err)
 	}
 
+	// Create database-specific handler
+	handler, err := NewDatabaseHandler(dbType)
+	if err != nil {
+		return wrapErr(err)
+	}
+
 	// First check if it's a view or table
-	isView, err := checkIsView(db, dbType, tableName)
+	isView, err := handler.CheckIsView(db, tableName)
 	if err != nil {
 		return wrapErr(fmt.Errorf("failed to check if relation is view: %w", err))
 	}
 	relation := &Relation{
 		DB:          db,
 		DBType:      dbType,
+		handler:     handler,
 		Name:        tableName,
 		IsView:      isView,
 		Tables:      make(map[string]*Table),
@@ -260,14 +248,13 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 	}
 
 	var (
-		columns        []Column
-		columnIndex    map[string]int
-		primaryKeyCols []string
+		columns     []Column
+		columnIndex map[string]int
 	)
 
 	if isView {
 		// Load view columns and metadata
-		columns, columnIndex, err = loadViewColumns(db, dbType, tableName)
+		columns, columnIndex, err = loadViewColumns(db, dbType, handler, tableName)
 		if err != nil {
 			return wrapErr(err)
 		}
@@ -284,38 +271,19 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		}
 		relation.Key = viewKeys
 	} else {
-		// Load table columns based on database type
-		switch dbType {
-		case SQLite:
-			columns, columnIndex, primaryKeyCols, err = loadColumnsSQLite(db, tableName)
-			if err != nil {
-				return wrapErr(err)
-			}
-		case PostgreSQL:
-			columns, columnIndex, err = loadColumnsPostgreSQL(db, tableName)
-			if err != nil {
-				return wrapErr(err)
-			}
-		case MySQL:
-			columns, columnIndex, err = loadColumnsMySQL(db, tableName)
-			if err != nil {
-				return wrapErr(err)
-			}
-		default:
-			return wrapErr(fmt.Errorf("unsupported database type: %v", dbType))
+		// Load table columns using handler
+		columns, columnIndex, err = handler.LoadColumns(db, tableName)
+		if err != nil {
+			return wrapErr(err)
 		}
 
 		relation.Columns = columns
 		relation.ColumnIndex = columnIndex
 
 		// Consolidated lookup key selection: choose shortest lookup key
-		lookupCols, err := getShortestLookupKey(db, dbType, relation.Name)
+		lookupCols, err := handler.GetShortestLookupKey(db, relation.Name)
 		if err != nil {
 			return wrapErr(err)
-		}
-		if dbType == SQLite && len(lookupCols) == 0 {
-			// For SQLite, use the primary key columns if no unique constraints found
-			lookupCols = primaryKeyCols
 		}
 
 		// TODO if lookup key not found, use databaseFeature.systemId if available
@@ -344,17 +312,8 @@ func NewRelation(db *sql.DB, dbType DatabaseType, tableName string) (*Relation, 
 		fmt.Fprintf(os.Stderr, "Warning: failed to load enum/custom types: %v\n", err)
 	}
 
-	// Load foreign keys
-	var references []Reference
-	var updatedColumns []Column
-	switch dbType {
-	case SQLite:
-		references, updatedColumns, err = loadForeignKeysSQLite(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
-	case PostgreSQL:
-		references, updatedColumns, err = loadForeignKeysPostgreSQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
-	case MySQL:
-		references, updatedColumns, err = loadForeignKeysMySQL(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
-	}
+	// Load foreign keys using handler
+	references, updatedColumns, err := handler.LoadForeignKeys(db, dbType, tableName, relation.ColumnIndex, relation.Columns)
 	if err == nil {
 		relation.References = references
 		relation.Columns = updatedColumns
@@ -470,58 +429,19 @@ func NewRelationFromSQL(db *sql.DB, dbType DatabaseType, sqlStr string) (*Relati
 }
 
 // checkIsView checks if a relation is a view or table
+// Deprecated: Use DatabaseHandler.CheckIsView instead. This function is kept for backward compatibility.
 func checkIsView(db *sql.DB, dbType DatabaseType, relationName string) (bool, error) {
-	switch dbType {
-	case SQLite:
-		var sqlType string
-		err := db.QueryRow("SELECT type FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')", relationName).Scan(&sqlType)
-		if err != nil {
-			return false, err
-		}
-		return sqlType == "view", nil
-	case PostgreSQL:
-		// Extract schema and relation name
-		schema := "public"
-		rel := relationName
-		if dot := strings.IndexByte(rel, '.'); dot != -1 {
-			schema = rel[:dot]
-			rel = rel[dot+1:]
-		}
-		var isView bool
-		err := db.QueryRow(`
-			SELECT EXISTS (
-				SELECT 1 FROM pg_views 
-				WHERE schemaname = $1 AND viewname = $2
-			)`, schema, rel).Scan(&isView)
-		return isView, err
-	case MySQL:
-		var isView bool
-		err := db.QueryRow(`
-			SELECT EXISTS (
-				SELECT 1 FROM information_schema.views 
-				WHERE table_schema = DATABASE() AND table_name = ?
-			)`, relationName).Scan(&isView)
-		return isView, err
-	default:
-		return false, fmt.Errorf("unsupported database type: %v", dbType)
+	handler, err := NewDatabaseHandler(dbType)
+	if err != nil {
+		return false, err
 	}
+	return handler.CheckIsView(db, relationName)
 }
 
 // loadViewColumns loads columns for a view by parsing its definition
-func loadViewColumns(db *sql.DB, dbType DatabaseType, viewName string) ([]Column, map[string]int, error) {
-	// Get view definition
-	var viewDef string
-	var err error
-	switch dbType {
-	case SQLite:
-		viewDef, err = getViewDefinitionSQLite(db, viewName)
-	case PostgreSQL:
-		viewDef, err = getViewDefinitionPostgreSQL(db, viewName)
-	case MySQL:
-		viewDef, err = getViewDefinitionMySQL(db, viewName)
-	default:
-		return nil, nil, fmt.Errorf("unsupported database type for views: %v", dbType)
-	}
+func loadViewColumns(db *sql.DB, dbType DatabaseType, handler DatabaseHandler, viewName string) ([]Column, map[string]int, error) {
+	// Get view definition using handler
+	viewDef, err := handler.GetViewDefinition(db, viewName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get view definition: %w", err)
 	}
@@ -929,20 +849,7 @@ func (rel *Relation) updateViewColumn(records [][]any, rowIdx int, colName strin
 
 // loadEnumAndCustomTypes fetches enum values and custom type information for columns
 func (rel *Relation) loadEnumAndCustomTypes() error {
-	var updatedColumns []Column
-	var err error
-
-	switch rel.DBType {
-	case MySQL:
-		updatedColumns, err = loadEnumAndCustomTypesMySQL(rel.DB, rel.Name, rel.Columns)
-	case PostgreSQL:
-		updatedColumns, err = loadEnumAndCustomTypesPostgreSQL(rel.DB, rel.Name, rel.Columns)
-	case SQLite:
-		updatedColumns, err = loadEnumAndCustomTypesSQLite(rel.DB, rel.Name, rel.Columns)
-	default:
-		return nil
-	}
-
+	updatedColumns, err := rel.handler.LoadEnumAndCustomTypes(rel.DB, rel.Name, rel.Columns)
 	if err != nil {
 		return err
 	}
