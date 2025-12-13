@@ -281,7 +281,7 @@ func (e *Editor) validateAndCleanSQL(sqlStr string) string {
 }
 
 // selectTableFromPicker handles selecting a table or view from the picker
-func (e *Editor) selectTableFromPicker(tableName string) {
+func (e *Editor) selectTableFromPicker(tableName string, isRelation bool) {
 	e.pages.HidePage(pagePicker)
 	e.app.SetAfterDrawFunc(nil) // Clear cursor style function
 	e.setCursorStyle(0)         // Reset to default cursor style
@@ -290,32 +290,18 @@ func (e *Editor) selectTableFromPicker(tableName string) {
 	var displayName string
 	var err error
 
-	// Check if this is SQL input
-	if strings.HasPrefix(tableName, "[Execute SQL] ") {
-		sqlStr := strings.TrimPrefix(tableName, "[Execute SQL] ")
-		sqlStr = e.validateAndCleanSQL(sqlStr)
+	if isRelation {
+		// It's a table/view name
+		relation, err = dblib.NewRelation(e.db, e.dbType, tableName)
+		displayName = tableName
+	} else {
+		// It's custom SQL
+		sqlStr := e.validateAndCleanSQL(tableName)
 		if sqlStr == "" {
 			return // Error already handled
 		}
 		relation, err = dblib.NewRelationFromSQL(e.db, e.dbType, sqlStr)
 		displayName = sqlStr
-	} else {
-		// Check if it's SQL without the prefix
-		searchUpper := strings.ToUpper(strings.TrimSpace(tableName))
-		isSQL := strings.HasPrefix(searchUpper, "SELECT") || strings.HasPrefix(searchUpper, "WITH")
-
-		if isSQL {
-			cleanedSQL := e.validateAndCleanSQL(tableName)
-			if cleanedSQL == "" {
-				return // Error already handled
-			}
-			relation, err = dblib.NewRelationFromSQL(e.db, e.dbType, cleanedSQL)
-			displayName = cleanedSQL
-		} else {
-			// It's a table/view name
-			relation, err = dblib.NewRelation(e.db, e.dbType, tableName)
-			displayName = tableName
-		}
 	}
 
 	if err != nil {

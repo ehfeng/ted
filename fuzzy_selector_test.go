@@ -38,7 +38,7 @@ func TestPrefixMatchPriority(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.search, func(t *testing.T) {
-			filtered, _ := fs.calculateFiltered(tt.search)
+			filtered, _, _ := fs.calculateFiltered(tt.search)
 
 			if len(filtered) != len(tt.expected) {
 				t.Errorf("search %q: expected %d results, got %d", tt.search, len(tt.expected), len(filtered))

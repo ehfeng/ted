@@ -107,12 +107,12 @@ type FuzzySelector struct {
 	dropdownFlex  *tview.Flex       // Flex container for dropdown (to allow resizing)
 
 	// Callbacks
-	onSelect func(tableName string) // Called when a table or view is selected
-	onClose  func()                 // Called when the selector should be closed
+	onSelect func(tableName string, isRelation bool) // Called when a table or view is selected
+	onClose  func()                                  // Called when the selector should be closed
 }
 
 // NewFuzzySelector creates a new table/view picker bar component.
-func NewFuzzySelector(tables []string, initialTable string, onSelect func(string), onClose func()) *FuzzySelector {
+func NewFuzzySelector(tables []string, initialTable string, onSelect func(string, bool), onClose func()) *FuzzySelector {
 	cleaned := cleanTableNames(tables)
 	fs := &FuzzySelector{
 		Box:           tview.NewBox(),
@@ -124,27 +124,29 @@ func NewFuzzySelector(tables []string, initialTable string, onSelect func(string
 	}
 
 	// Pre-initialize the layout so input field exists immediately
-	filtered, matchPositions := fs.calculateFiltered("")
-	fs.buildInnerLayout(filtered, matchPositions)
+	filtered, matchPositions, isSQL := fs.calculateFiltered("")
+	fs.buildInnerLayout(filtered, matchPositions, isSQL)
 
 	return fs
 }
 
 // calculateFiltered filters the table list based on search text and returns filtered tables and match positions.
 // Results are sorted with prefix matches first, then fuzzy matches.
-func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]int) {
+func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]int, map[int]bool) {
 	filtered := []string{}
 	matchPositions := make(map[int][]int)
+	isSQLMap := make(map[int]bool)
 
 	// Check if input is SQL
 	searchUpper := strings.ToUpper(strings.TrimSpace(search))
 	isSQL := strings.HasPrefix(searchUpper, "SELECT") || strings.HasPrefix(searchUpper, "WITH")
 
 	if isSQL && search != "" {
-		// Show SQL as executable option
-		filtered = []string{"[Execute SQL] " + search}
+		// Show SQL as executable option (without prefix in the data)
+		filtered = []string{search}
 		matchPositions[0] = []int{}
-		return filtered, matchPositions
+		isSQLMap[0] = true
+		return filtered, matchPositions, isSQLMap
 	}
 
 	if search == "" {
@@ -152,6 +154,7 @@ func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]i
 		filtered = tp.items
 		for i := range tp.items {
 			matchPositions[i] = []int{}
+			isSQLMap[i] = false // All are tables/views
 		}
 	} else {
 		// Collect all matches with their type and positions
@@ -191,10 +194,11 @@ func (tp *FuzzySelector) calculateFiltered(search string) ([]string, map[int][]i
 		for i, score := range scores {
 			filtered = append(filtered, score.Table)
 			matchPositions[i] = score.Positions
+			isSQLMap[i] = false // All filtered results are tables/views
 		}
 	}
 
-	return filtered, matchPositions
+	return filtered, matchPositions, isSQLMap
 }
 
 // Draw implements tview.Primitive and renders the fuzzy selector.
@@ -203,14 +207,14 @@ func (fs *FuzzySelector) Draw(screen tcell.Screen) {
 	fs.Box.DrawForSubclass(screen, fs)
 
 	// Calculate filtered results and match positions on each draw
-	filtered, matchPositions := fs.calculateFiltered(fs.searchText)
+	filtered, matchPositions, isSQL := fs.calculateFiltered(fs.searchText)
 
 	// Build or rebuild the inner layout if needed
 	if fs.innerFlex == nil {
-		fs.buildInnerLayout(filtered, matchPositions)
+		fs.buildInnerLayout(filtered, matchPositions, isSQL)
 	} else {
 		// Just update the dropdown list without rebuilding the input field
-		fs.updateDropdownList(filtered, matchPositions)
+		fs.updateDropdownList(filtered, matchPositions, isSQL)
 	}
 
 	// Draw the inner layout
@@ -252,7 +256,7 @@ func (fs *FuzzySelector) MouseHandler() func(action tview.MouseAction, event *tc
 			if mouseX >= listX && mouseX < listX+listWidth &&
 				mouseY >= listY && mouseY < listY+listHeight {
 
-				filtered, _ := fs.calculateFiltered(fs.searchText)
+				filtered, _, isSQL := fs.calculateFiltered(fs.searchText)
 				if len(filtered) == 0 {
 					return false, nil
 				}
@@ -271,7 +275,8 @@ func (fs *FuzzySelector) MouseHandler() func(action tview.MouseAction, event *tc
 						// Click: select the item
 						if fs.onSelect != nil {
 							fs.clearSearchText()
-							fs.onSelect(filtered[itemIndex])
+							isRelation := !isSQL[itemIndex]
+							fs.onSelect(filtered[itemIndex], isRelation)
 						}
 						return true, nil
 					}
@@ -311,9 +316,9 @@ func (fs *FuzzySelector) HasFocus() bool {
 }
 
 // buildInnerLayout builds the internal flex layout with input field and dropdown.
-func (fs *FuzzySelector) buildInnerLayout(filtered []string, matchPositions map[int][]int) {
+func (fs *FuzzySelector) buildInnerLayout(filtered []string, matchPositions map[int][]int, isSQL map[int]bool) {
 	inputField := fs.createInputField()
-	fs.createDropdownListWithData(filtered, matchPositions)
+	fs.createDropdownListWithData(filtered, matchPositions, isSQL)
 
 	// Calculate height for dropdown
 	listHeight := len(filtered)
@@ -336,7 +341,7 @@ func (fs *FuzzySelector) buildInnerLayout(filtered []string, matchPositions map[
 }
 
 // updateDropdownList updates just the dropdown list without rebuilding the input field.
-func (fs *FuzzySelector) updateDropdownList(filtered []string, matchPositions map[int][]int) {
+func (fs *FuzzySelector) updateDropdownList(filtered []string, matchPositions map[int][]int, isSQL map[int]bool) {
 	if fs.dropdownFlex == nil {
 		return
 	}
@@ -345,7 +350,7 @@ func (fs *FuzzySelector) updateDropdownList(filtered []string, matchPositions ma
 	fs.dropdownFlex.RemoveItem(fs.dropdownList)
 
 	// Create new dropdown with updated data
-	fs.createDropdownListWithData(filtered, matchPositions)
+	fs.createDropdownListWithData(filtered, matchPositions, isSQL)
 
 	// Calculate height for dropdown
 	listHeight := len(filtered)
@@ -378,7 +383,7 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 
 	// Handle keyboard navigation and selection
 	inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		filtered, _ := tp.calculateFiltered(tp.searchText)
+		filtered, _, isSQL := tp.calculateFiltered(tp.searchText)
 
 		switch event.Key() {
 		case tcell.KeyEscape:
@@ -409,7 +414,8 @@ func (tp *FuzzySelector) createInputField() *tview.InputField {
 				if idx := tp.dropdownList.GetCurrentItem(); idx >= 0 && idx < len(filtered) {
 					if tp.onSelect != nil {
 						tp.clearSearchText()
-						tp.onSelect(filtered[idx])
+						isRelation := !isSQL[idx]
+						tp.onSelect(filtered[idx], isRelation)
 					}
 				}
 				return nil // Consume the event
@@ -437,7 +443,7 @@ func (tp *FuzzySelector) clearSearchText() {
 }
 
 // createDropdownListWithData creates and populates the dropdown list with pre-calculated filtered results.
-func (tp *FuzzySelector) createDropdownListWithData(filtered []string, matchPositions map[int][]int) {
+func (tp *FuzzySelector) createDropdownListWithData(filtered []string, matchPositions map[int][]int, isSQL map[int]bool) {
 	tp.dropdownList = tview.NewList().
 		SetWrapAround(true).
 		ShowSecondaryText(false)
@@ -451,12 +457,18 @@ func (tp *FuzzySelector) createDropdownListWithData(filtered []string, matchPosi
 			positions := matchPositions[i]
 			displayText := formatTableNameWithColor(tableName, positions)
 
-			// Capture table name in closure for selection handler
+			// Add "[Execute SQL] " prefix to display if this is SQL
+			if isSQL[i] {
+				displayText = "[Execute SQL] " + displayText
+			}
+
+			// Capture values in closure for selection handler
 			name := tableName
+			itemIsRelation := !isSQL[i]
 			tp.dropdownList.AddItem(displayText, "", rune(0), func() {
 				if tp.onSelect != nil {
 					tp.clearSearchText()
-					tp.onSelect(name)
+					tp.onSelect(name, itemIsRelation)
 				}
 			})
 		}
@@ -490,7 +502,8 @@ func (tp *FuzzySelector) createDropdownListWithData(filtered []string, matchPosi
 			if currentItem >= 0 && currentItem < len(filtered) {
 				if tp.onSelect != nil {
 					tp.clearSearchText()
-					tp.onSelect(filtered[currentItem])
+					isRelation := !isSQL[currentItem]
+					tp.onSelect(filtered[currentItem], isRelation)
 				}
 			}
 			return nil // Consume the event
