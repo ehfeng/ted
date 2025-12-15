@@ -36,6 +36,9 @@ type Row struct {
 	modified []int // indices of columns that were modified in the last refresh
 }
 
+// BottomBorderRow is a sentinel value used to mark the end of data
+var BottomBorderRow = Row{}
+
 // relation.attributes stores the database attributes
 // lookup key is unique: it's always selected
 // if a multicolumn reference is selected, all columns in the reference are selected
@@ -244,7 +247,7 @@ func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 		tablePicker: nil, // Will be initialized after editor is created
 		paletteMode: PaletteModeDefault,
 		pointer:     0,
-		buffer:      make([]Row, tableDataHeight),
+		buffer:      nil, // Will be initialized after table creation
 	}
 
 	// Create selector with callback now that editor exists
@@ -317,6 +320,9 @@ func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 			return action, event
 		},
 	})
+
+	// Initialize buffer with correct size for circular buffer arithmetic
+	editor.buffer = make([]Row, tableDataHeight+1)
 
 	editor.table.SetTableName(displayName).SetVimMode(editor.vimMode)
 

@@ -28,15 +28,15 @@ func (e *Editor) renderData() {
 	for i := 0; i < rowCount; i++ {
 		ptr := (i + e.pointer) % len(e.buffer)
 		// insert mode row needs "space" at the top to still be able to render
-		// the last db row
-		if len(e.table.insertRow) > 0 && i == 0 {
+		// unless the e.buffer is smaller than the rowsHeight
+		if len(e.table.insertRow) > 0 && len(e.buffer) == e.table.rowsHeight {
 			ptr++
 		}
 		normalizedRows[i] = e.buffer[ptr] // Reference to Row, not a copy
 	}
 	// Add the nil sentinel row at the end if we're at the bottom
 	if atBottom {
-		normalizedRows = append(normalizedRows, Row{}) // nil sentinel
+		normalizedRows = append(normalizedRows, BottomBorderRow) // nil sentinel
 	}
 	e.table.SetDataReferences(normalizedRows)
 }
@@ -472,7 +472,7 @@ func (e *Editor) refresh() error {
 	}
 	// Mark end with empty row if we didn't fill the buffer
 	if len(currentRows) < len(e.buffer) {
-		e.buffer[len(currentRows)] = Row{}
+		e.buffer[len(currentRows)] = BottomBorderRow
 	}
 	// }
 
@@ -548,7 +548,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		}
 		// Mark end with empty row if we didn't fill the buffer
 		if len(currentRows) < len(e.buffer) {
-			e.buffer[len(currentRows)] = Row{}
+			e.buffer[len(currentRows)] = BottomBorderRow
 		}
 
 		// Set previousRows to currentRows
@@ -598,7 +598,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		}
 		// Mark end with empty row if we didn't fill the buffer
 		if len(currentRows) < len(e.buffer) {
-			e.buffer[len(currentRows)] = Row{}
+			e.buffer[len(currentRows)] = BottomBorderRow
 		}
 
 		// Set previousRows to currentRows
@@ -707,7 +707,7 @@ func (e *Editor) nextRows(i int) (bool, error) {
 	// If we fetched fewer rows than requested, we've reached the end
 	if rowsFetched < i {
 		e.incrPtr(1)
-		e.buffer[e.lastRowIdx()] = Row{} // Mark end of data
+		e.buffer[e.lastRowIdx()] = BottomBorderRow // Mark end of data
 	}
 
 	// Update previousRows to match current buffer view (for accurate diff on next refresh)

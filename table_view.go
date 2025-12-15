@@ -845,20 +845,6 @@ func (tv *TableView) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 		key := event.Key()
 
 		switch key {
-		case tcell.KeyUp:
-			if len(tv.insertRow) > 0 {
-				return // Disable vertical navigation in insert mode
-			}
-			if tv.selectedRow > 0 {
-				tv.Select(tv.selectedRow-1, tv.selectedCol)
-			}
-		case tcell.KeyDown:
-			if len(tv.insertRow) > 0 {
-				return // Disable vertical navigation in insert mode
-			}
-			if tv.selectedRow < len(tv.data)-1 {
-				tv.Select(tv.selectedRow+1, tv.selectedCol)
-			}
 		case tcell.KeyLeft:
 			if tv.selectedCol > 0 {
 				tv.Select(tv.selectedRow, tv.selectedCol-1)
