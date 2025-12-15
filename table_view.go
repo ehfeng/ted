@@ -127,7 +127,6 @@ type TableView struct {
 	readOnlyBgColor tcell.Color
 	separatorChar   rune
 	bottom          bool
-	insertRow       []any // if non-empty, render as insert mode row with special styling
 
 	// Selection state
 	selectedRow int
@@ -265,17 +264,6 @@ func (tv *TableView) SetDataReferences(data []Row) *TableView {
 	return tv
 }
 
-func (tv *TableView) SetupInsertRow() {
-	tv.insertRow = make([]any, len(tv.headers))
-	for i := range tv.insertRow {
-		tv.insertRow[i] = dblib.EmptyCellValue
-	}
-}
-
-func (tv *TableView) ClearInsertRow() {
-	tv.insertRow = nil
-}
-
 // GetSelection returns the currently selected data row and column
 func (tv *TableView) GetSelection() (row, col int) {
 	return tv.selectedRow, tv.selectedCol
@@ -289,9 +277,6 @@ func (tv *TableView) GetDataLength() int {
 // Select selects a data cell
 func (tv *TableView) Select(row, col int) *TableView {
 	maxRow := len(tv.data)
-	if len(tv.insertRow) > 0 {
-		maxRow = len(tv.data) + 1 // Allow selecting the virtual insert mode row
-	}
 	if row >= 0 && row < maxRow && col >= 0 && col < len(tv.headers) {
 		// Only trigger callback if selection actually changed
 		selectionChanged := (tv.selectedRow != row || tv.selectedCol != col)
@@ -377,12 +362,9 @@ func (tv *TableView) UpdateRowsHeightFromRect(height int) {
 	// Reserve space for top border, header row, and header separator
 	maxDataRows := height - 3
 
-	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
+	// Check if we should draw the bottom border (when final slice is nil)
 	drawBottomBorder := tv.bottom
 	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1].data) == 0 {
-		drawBottomBorder = true
-	}
-	if len(tv.insertRow) > 0 {
 		drawBottomBorder = true
 	}
 
@@ -441,12 +423,9 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		currentY++
 	}
 
-	// Check if we should draw the bottom border (when final slice is nil or in insert mode)
+	// Check if we should draw the bottom border (when final slice is nil)
 	drawBottomBorder := tv.bottom
 	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1].data) == 0 {
-		drawBottomBorder = true
-	}
-	if len(tv.insertRow) > 0 {
 		drawBottomBorder = true
 	}
 
@@ -457,25 +436,12 @@ func (tv *TableView) Draw(screen tcell.Screen) {
 		maxDataRows = maxDataRows - 1
 	}
 
-	// When in insert mode, we need to reserve one more row for the insert mode row
-	maxRegularDataRows := maxDataRows
-	if len(tv.insertRow) > 0 {
-		maxRegularDataRows = maxDataRows - 1
-	}
-
-	// Draw regular data rows
-	for i := 0; i < len(tv.data) && dataRowsDrawn < maxRegularDataRows && currentY < y+height; i++ {
+	// Draw data rows (including insert row if present)
+	for i := 0; i < len(tv.data) && dataRowsDrawn < maxDataRows && currentY < y+height; i++ {
 		if tv.data[i].data == nil || len(tv.data[i].data) == 0 {
 			break // Stop drawing when we hit a nil slice
 		}
 		tv.drawDataRow(x, currentY, tableWidth, i)
-		currentY++
-		dataRowsDrawn++
-	}
-
-	// Draw insert mode row if enabled and there's space
-	if len(tv.insertRow) > 0 && currentY < y+height {
-		tv.drawDataRow(x, currentY, tableWidth, len(tv.data))
 		currentY++
 		dataRowsDrawn++
 	}
@@ -665,14 +631,14 @@ func (tv *TableView) drawHeaderSeparator(x, y, tableWidth int) {
 
 // drawDataRow draws a data row
 func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
-	// Check if this is the insert mode row (when newRecordRow is set and rowIdx is beyond data)
-	isNewRecordRow := len(tv.insertRow) > 0 && rowIdx == len(tv.data)
-
 	// Get the row state for background color
 	var rowState RowState
 	if rowIdx < len(tv.data) {
 		rowState = tv.data[rowIdx].state
 	}
+
+	// Check if this is the insert mode row
+	isNewRecordRow := rowState == RowStateInsert
 
 	// Left border
 	borderStyle := tcell.StyleDefault.Foreground(tv.borderColor)
@@ -747,13 +713,13 @@ func (tv *TableView) drawDataRow(x, y, tableWidth, rowIdx int) {
 			// For insert mode row, render cell value with special styling
 			// dblib.EmptyCellValue means empty (column not included in INSERT) - show as ·
 			// nil means null
-			if tv.insertRow[i] == dblib.EmptyCellValue {
+			if tv.data[rowIdx].data[i] == dblib.EmptyCellValue {
 				// Empty cell in insert mode - show repeating dots
 				for k := 0; k < header.Width; k++ {
 					tv.viewport.SetContent(pos+k, y, '·', nil, cellStyle)
 				}
 			} else {
-				cellText, cellStyle := formatCellValue(tv.insertRow[i], cellStyle)
+				cellText, cellStyle := formatCellValue(tv.data[rowIdx].data[i], cellStyle)
 				cellText = padCellToWidth(cellText, header.Width)
 				for j, ch := range cellText {
 					tv.viewport.SetContent(pos+j, y, ch, nil, cellStyle)

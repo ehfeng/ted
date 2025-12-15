@@ -373,7 +373,7 @@ func (e *Editor) setPaletteMode(mode PaletteMode, focus bool) {
 			e.statusBar.SetBackgroundColor(tcell.ColorLightGray)
 		}
 	}
-	if e.table.insertRow != nil {
+	if e.insertRow != nil {
 		e.commandPalette.SetPlaceholder("INSERT preview… (Esc to exit)")
 	}
 	if e.editing {
@@ -448,7 +448,7 @@ func (e *Editor) SetStatusLog(message string) {
 // This is only called when not in edit mode
 func (e *Editor) updateStatusWithCellContent() {
 	// Don't update status when in edit mode, insert mode, or delete mode
-	if e.editing || len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+	if e.editing || len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 		return
 	}
 

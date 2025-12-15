@@ -21,8 +21,8 @@ func (e *Editor) enterEditMode(row, col int) {
 	}
 
 	var currentValue any
-	if len(e.table.insertRow) > 0 {
-		currentValue = e.table.insertRow[col]
+	if len(e.insertRow) > 0 {
+		currentValue = e.insertRow[col]
 	} else {
 		currentValue = e.table.GetCell(row, col)
 	}
@@ -39,7 +39,7 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 	// In insert mode, allow editing the virtual insert mode row
 	// The virtual row index equals the length of the data array
 	// (which is shorter than records in insert mode)
-	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
+	isNewRecordRow := len(e.insertRow) > 0 && row == e.table.GetDataLength()
 
 	// Create textarea for editing with proper styling
 	textArea := tview.NewTextArea().
@@ -70,10 +70,10 @@ func (e *Editor) enterEditModeWithInitialValue(row, col int, initialText string)
 
 		// Ctrl+S: execute INSERT in insert mode (save and insert)
 		if (rune == 's' || rune == 19) && mod&tcell.ModCtrl != 0 {
-			if len(e.table.insertRow) > 0 {
+			if len(e.insertRow) > 0 {
 				// Save current cell first
 				newText := textArea.GetText()
-				e.table.insertRow[col] = newText
+				e.insertRow[col] = newText
 				e.exitEditMode()
 				e.executeInsert()
 				return nil
@@ -161,8 +161,8 @@ func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
 	}
 
 	var currentValue any
-	if len(e.table.insertRow) > 0 {
-		currentValue = e.table.insertRow[col]
+	if len(e.insertRow) > 0 {
+		currentValue = e.insertRow[col]
 	} else {
 		currentValue = e.table.GetCell(row, col)
 	}
@@ -176,7 +176,7 @@ func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
 	// In insert mode, allow editing the virtual insert mode row
 	// The virtual row index equals the length of the data array
 	// (which is shorter than records in insert mode)
-	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
+	isNewRecordRow := len(e.insertRow) > 0 && row == e.table.GetDataLength()
 
 	// Create textarea for editing with proper styling
 	// Set cursor position: true for end, false for beginning
@@ -208,10 +208,10 @@ func (e *Editor) enterEditModeWithSelection(row, col int, selectAll bool) {
 
 		// Ctrl+S: execute INSERT in insert mode (save and insert)
 		if (rune == 's' || rune == 19) && mod&tcell.ModCtrl != 0 {
-			if len(e.table.insertRow) > 0 {
+			if len(e.insertRow) > 0 {
 				// Save current cell first
 				newText := textArea.GetText()
-				e.table.insertRow[col] = newText
+				e.insertRow[col] = newText
 				e.exitEditMode()
 				e.executeInsert()
 				return nil
@@ -382,7 +382,7 @@ func (e *Editor) exitEditMode() {
 		e.app.SetFocus(e.table)
 		e.editing = false
 		// Return palette to default mode after editing
-		if e.table.insertRow == nil {
+		if e.insertRow == nil {
 			e.setPaletteMode(PaletteModeDefault, false)
 			// Trigger status update via selection change callback
 			row, col := e.table.GetSelection()
@@ -390,7 +390,7 @@ func (e *Editor) exitEditMode() {
 				e.table.selectionChangeFunc(row, col)
 			}
 		} else {
-			preview := e.relation.BuildInsertPreview(e.table.insertRow, e.table.GetHeaders())
+			preview := e.relation.BuildInsertPreview(e.insertRow, e.table.GetHeaders())
 			e.commandPalette.SetPlaceholder(preview)
 			e.updateStatusForInsertMode()
 		}
@@ -409,15 +409,15 @@ func (e *Editor) updateEditPreview(newText string) {
 
 	row, col := e.table.GetSelection()
 	// Check if we're in insert mode
-	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
+	isNewRecordRow := len(e.insertRow) > 0 && row == e.table.GetDataLength()
 
 	var preview string
 	colName := e.table.GetHeaders()[col].Name
 	if isNewRecordRow {
 		// Show INSERT preview and set palette mode to Insert
 		e.setPaletteMode(PaletteModeInsert, false)
-		newRecordRow := make([]any, len(e.table.insertRow))
-		copy(newRecordRow, e.table.insertRow)
+		newRecordRow := make([]any, len(e.insertRow))
+		copy(newRecordRow, e.insertRow)
 		newRecordRow[col] = newText
 		preview = e.relation.BuildInsertPreview(newRecordRow, e.table.GetHeaders())
 	} else {
@@ -441,14 +441,14 @@ func (e *Editor) updateEditPreview(newText string) {
 
 func (e *Editor) updateCell(row, col int, newValue string) {
 	// Check if this is an insert mode row
-	isNewRecordRow := len(e.table.insertRow) > 0 && row == e.table.GetDataLength()
+	isNewRecordRow := len(e.insertRow) > 0 && row == e.table.GetDataLength()
 
 	if isNewRecordRow {
 		// Update the insert mode row with the new value
 		if newValue == dblib.NullGlyph {
-			e.table.insertRow[col] = nil
+			e.insertRow[col] = nil
 		} else {
-			e.table.insertRow[col] = newValue
+			e.insertRow[col] = newValue
 		}
 		e.exitEditMode()
 		return
@@ -597,19 +597,19 @@ func (e *Editor) updateCell(row, col int, newValue string) {
 
 // executeInsert executes the INSERT statement for the new record row
 func (e *Editor) executeInsert() error {
-	if len(e.table.insertRow) == 0 {
+	if len(e.insertRow) == 0 {
 		return fmt.Errorf("no new record to insert")
 	}
 
 	// Execute the insert
-	insertedRow, err := e.relation.InsertDBRecord(e.table.insertRow)
+	insertedRow, err := e.relation.InsertDBRecord(e.insertRow)
 	if err != nil {
 		e.SetStatusErrorWithSentry(err)
 		return err
 	}
 
 	// Exit insert mode
-	e.table.ClearInsertRow()
+	e.ClearInsertRow()
 	// TODO focus on inserted row
 	e.SetStatusMessage("Record inserted successfully")
 
@@ -687,4 +687,19 @@ func (e *Editor) isMultilineColumnType(col int) bool {
 		strings.Contains(attrType, "varchar") ||
 		strings.Contains(attrType, "text") ||
 		attrType == "json" // json but not jsonb
+}
+
+func (e *Editor) SetupInsertRow() {
+	if e.relation == nil {
+		return
+	}
+	headers := e.table.GetHeaders()
+	e.insertRow = make([]any, len(headers))
+	for i := range e.insertRow {
+		e.insertRow[i] = dblib.EmptyCellValue
+	}
+}
+
+func (e *Editor) ClearInsertRow() {
+	e.insertRow = nil
 }

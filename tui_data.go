@@ -18,22 +18,23 @@ func (e *Editor) renderData() {
 	if atBottom {
 		rowCount--
 	}
-	// When in insert mode, we need to reserve one slot for the insert mode row
-	// that will be rendered by TableView
-	if len(e.table.insertRow) > 0 {
-		rowCount--
-	}
 
 	normalizedRows := make([]Row, rowCount)
 	for i := 0; i < rowCount; i++ {
 		ptr := (i + e.pointer) % len(e.buffer)
-		// insert mode row needs "space" at the top to still be able to render
-		// unless the e.buffer is smaller than the rowsHeight
-		if len(e.table.insertRow) > 0 && len(e.buffer) == e.table.rowsHeight {
-			ptr++
-		}
 		normalizedRows[i] = e.buffer[ptr] // Reference to Row, not a copy
 	}
+
+	// If in insert mode, append insert row with RowStateInsert
+	if len(e.insertRow) > 0 {
+		insertRow := Row{
+			state:    RowStateInsert,
+			data:     e.insertRow,
+			modified: nil,
+		}
+		normalizedRows = append(normalizedRows, insertRow)
+	}
+
 	// Add the nil sentinel row at the end if we're at the bottom
 	if atBottom {
 		normalizedRows = append(normalizedRows, BottomBorderRow) // nil sentinel

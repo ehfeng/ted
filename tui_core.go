@@ -28,6 +28,7 @@ const (
 	RowStateNormal RowState = iota
 	RowStateNew
 	RowStateDeleted
+	RowStateInsert
 )
 
 type Row struct {
@@ -66,7 +67,8 @@ type Editor struct {
 	lastGPress          time.Time // For detecting 'gg' in vim mode
 
 	// selection
-	editing bool
+	editing   bool
+	insertRow []any // insert mode row data (moved from TableView)
 
 	// data, records is a circular buffer
 	query      *sql.Rows  // unified query for scrolling

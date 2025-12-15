@@ -81,7 +81,7 @@ func (e *Editor) setupKeyBindings() {
 
 		// Ctrl+S: execute INSERT in insert mode (save and insert)
 		if (rune == 's' || rune == 19) && mod&tcell.ModCtrl != 0 {
-			if len(e.table.insertRow) > 0 && !e.editing {
+			if len(e.insertRow) > 0 && !e.editing {
 				e.executeInsert()
 				return nil
 			}
@@ -105,7 +105,7 @@ func (e *Editor) setupKeyBindings() {
 			go func() {
 				e.app.QueueUpdateDraw(func() { e.nextRows(1) })
 			}()
-			e.table.SetupInsertRow()
+			e.SetupInsertRow()
 			e.updateStatusForInsertMode()
 			e.renderData()
 			_, col := e.table.GetSelection()
@@ -115,13 +115,13 @@ func (e *Editor) setupKeyBindings() {
 
 		// Alt+0: set cell to null for nullable columns in insert mode
 		if rune == '0' && mod&tcell.ModAlt != 0 {
-			if len(e.table.insertRow) > 0 && !e.editing && e.relation != nil {
+			if len(e.insertRow) > 0 && !e.editing && e.relation != nil {
 				// Check if the selected column is nullable
 				colName := e.table.GetHeaders()[col].Name
 				if colIdx, ok := e.relation.ColumnIndex[colName]; ok && colIdx < len(e.relation.Columns) {
 					attr := e.relation.Columns[colIdx]
 					if attr.Nullable {
-						e.table.insertRow[col] = nil
+						e.insertRow[col] = nil
 						e.renderData()
 					}
 				}
@@ -131,7 +131,7 @@ func (e *Editor) setupKeyBindings() {
 
 		switch {
 		case key == tcell.KeyEnter:
-			if len(e.table.insertRow) > 0 && !e.editing && mod&tcell.ModAlt != 0 {
+			if len(e.insertRow) > 0 && !e.editing && mod&tcell.ModAlt != 0 {
 				e.executeInsert()
 				return nil
 			}
@@ -161,9 +161,9 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 
-			if len(e.table.insertRow) > 0 {
+			if len(e.insertRow) > 0 {
 				// Exit insert mode and select last real row
-				e.table.ClearInsertRow()
+				e.ClearInsertRow()
 
 				// Find the last non-nil record
 				lastIdx := len(e.buffer) - 1
@@ -198,7 +198,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 			if mod&tcell.ModCtrl != 0 {
-				if len(e.table.insertRow) > 0 {
+				if len(e.insertRow) > 0 {
 					return nil // Disable vertical navigation in insert mode
 				}
 				// Ctrl+Home: jump to first row
@@ -214,7 +214,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 			if mod&tcell.ModCtrl != 0 {
-				if len(e.table.insertRow) > 0 {
+				if len(e.insertRow) > 0 {
 					return nil // Disable vertical navigation in insert mode
 				}
 				// Ctrl+End: jump to last row
@@ -225,7 +225,7 @@ func (e *Editor) setupKeyBindings() {
 			e.table.Select(row, len(e.table.GetHeaders())-1)
 			return nil
 		case key == tcell.KeyPgUp:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// Page up: scroll data backward while keeping selection in same visual position
@@ -233,7 +233,7 @@ func (e *Editor) setupKeyBindings() {
 			e.prevRows(pageSize)
 			return nil
 		case key == tcell.KeyPgDn:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// Page down: scroll data forward while keeping selection in same visual position
@@ -323,7 +323,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 		case key == tcell.KeyUp:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			if mod&tcell.ModMeta != 0 {
@@ -340,7 +340,7 @@ func (e *Editor) setupKeyBindings() {
 				return nil
 			}
 		case key == tcell.KeyDown:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			if mod&tcell.ModMeta != 0 {
@@ -409,7 +409,7 @@ func (e *Editor) setupKeyBindings() {
 			}
 			return nil
 		case e.vimMode && key == tcell.KeyRune && rune == 'j' && mod == 0:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// j: move down
@@ -426,7 +426,7 @@ func (e *Editor) setupKeyBindings() {
 			}
 			return nil
 		case e.vimMode && key == tcell.KeyRune && rune == 'k' && mod == 0:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// k: move up
@@ -438,7 +438,7 @@ func (e *Editor) setupKeyBindings() {
 			return nil
 		case e.vimMode && key == tcell.KeyRune && rune == 'g' && mod == 0:
 			// Disable in insert/delete mode
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil
 			}
 			// Check if this is a double 'g' press (gg)
@@ -456,7 +456,7 @@ func (e *Editor) setupKeyBindings() {
 			return nil
 		case e.vimMode && key == tcell.KeyRune && rune == 'G':
 			// Disable in insert/delete mode
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil
 			}
 			// G: jump to last row
@@ -496,7 +496,7 @@ func (e *Editor) setupKeyBindings() {
 			e.enterEditModeWithSelection(row, col, false)
 			return nil
 		case e.vimMode && (rune == 'b' || rune == 2) && mod&tcell.ModCtrl != 0:
-			if len(e.table.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
+			if len(e.insertRow) > 0 || e.paletteMode == PaletteModeDelete {
 				return nil // Disable vertical navigation in insert mode or delete mode
 			}
 			// Ctrl+B: page up (already handled by KeyPgUp, but vim users might use Ctrl+B)
@@ -546,7 +546,7 @@ func (e *Editor) consumeKittyCSI(key tcell.Key, r rune, mod tcell.ModMask) bool 
 						case 96: // Ctrl+` (backtick)
 							e.setPaletteMode(PaletteModeSQL, true)
 						case 105: // Ctrl+I: Jump to end and enable insert mode
-							e.table.SetupInsertRow()
+							e.SetupInsertRow()
 							e.loadFromRowId(nil, false, 0)
 							e.updateStatusForInsertMode()
 							// Select the insert mode row (which is at index len(data))
