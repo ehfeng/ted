@@ -323,9 +323,6 @@ func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 		},
 	})
 
-	// Initialize buffer with correct size for circular buffer arithmetic
-	editor.buffer = make([]Row, tableDataHeight)
-
 	editor.table.SetTableName(displayName).SetVimMode(editor.vimMode)
 
 	// Only load data if we have a relation

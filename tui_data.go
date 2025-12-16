@@ -12,23 +12,33 @@ import (
 func (e *Editor) renderData() {
 	// number of rows to send to TableView
 	rowCount := len(e.buffer)
-
-	normalizedRows := make([]Row, rowCount)
-	for i := 0; i < rowCount; i++ {
-		ptr := (i + e.pointer) % len(e.buffer)
-		normalizedRows[i] = e.buffer[ptr] // Reference to Row, not a copy
+	// if table does not fill the screen, we can add a row for the insert row
+	if len(e.insertRow) > 0 && e.table.rowsHeight > rowCount {
+		rowCount++
 	}
+	// reverse layout to make it easier to layout inserted rows
+	i := rowCount - 1
+	normalizedRows := make([]Row, rowCount)
 
-	// If in insert mode, append insert row with RowStateInsert
 	if len(e.insertRow) > 0 {
-		insertRow := Row{
+		normalizedRows[i] = BottomBorderRow
+		i--
+		normalizedRows[i] = Row{
 			state:    RowStateInsert,
 			data:     e.insertRow,
 			modified: nil,
 		}
-		normalizedRows = append(normalizedRows, insertRow)
+		i--
 	}
 
+	for ; i >= 0; i-- {
+		ptr := (e.pointer + i) % len(e.buffer)
+		// only if the table fills the screen
+		if len(e.insertRow) > 0 && e.table.rowsHeight == rowCount {
+			ptr = (ptr + 1) % len(e.buffer)
+		}
+		normalizedRows[i] = e.buffer[ptr] // Reference to Row, not a copy
+	}
 	e.table.SetDataReferences(normalizedRows)
 }
 
@@ -454,18 +464,18 @@ func (e *Editor) refresh() error {
 	rows.Close()
 
 	// Apply diff tracking if previous data exists and differs
-	// if e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
-	// 	e.diffAndPopulateBuffer(currentRows)
-	// } else {
-	// No diffing needed - just populate buffer normally
-	for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
-		e.buffer[i] = currentRows[i]
+	if e.previousRows != nil && !rowsEqual(e.previousRows, currentRows) {
+		e.diffAndPopulateBuffer(currentRows)
+	} else {
+		// No diffing needed - just populate buffer normally
+		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
+			e.buffer[i] = currentRows[i]
+		}
+		// Mark end with empty row if we didn't fill the buffer
+		if len(currentRows) < len(e.buffer) {
+			e.buffer[len(currentRows)] = BottomBorderRow
+		}
 	}
-	// Mark end with empty row if we didn't fill the buffer
-	if len(currentRows) < len(e.buffer) {
-		e.buffer[len(currentRows)] = BottomBorderRow
-	}
-	// }
 
 	// Clone currentRows to previousRows for next refresh
 	e.previousRows = make([]Row, len(currentRows))
@@ -483,6 +493,8 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 	if e.relation == nil || e.relation.DB == nil {
 		return fmt.Errorf("no database connection available")
 	}
+	// reset buffer to nil
+	e.buffer = nil
 
 	// Stop refresh timer when starting a new query
 	e.stopRefreshTimer()
@@ -532,14 +544,13 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 				modified: nil,
 			})
 		}
-
 		// Populate buffer normally
-		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
-			e.buffer[i] = currentRows[i]
+		for i := 0; i < len(currentRows); i++ {
+			e.buffer = append(e.buffer, currentRows[i])
 		}
 		// Mark end with empty row if we didn't fill the buffer
-		if len(currentRows) < len(e.buffer) {
-			e.buffer[len(currentRows)] = BottomBorderRow
+		if len(currentRows) < e.table.rowsHeight {
+			e.buffer = append(e.buffer, BottomBorderRow)
 		}
 
 		// Set previousRows to currentRows
@@ -575,7 +586,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 				data:     row,
 				modified: nil,
 			})
-			if len(currentRows) >= len(e.buffer)-1 {
+			if len(currentRows) >= e.table.rowsHeight-1 {
 				break
 			}
 		}
@@ -584,12 +595,12 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 		slices.Reverse(currentRows)
 
 		// Populate buffer normally
-		for i := 0; i < len(currentRows) && i < len(e.buffer); i++ {
-			e.buffer[i] = currentRows[i]
+		for i := 0; i < len(currentRows); i++ {
+			e.buffer = append(e.buffer, currentRows[i])
 		}
 		// Mark end with empty row if we didn't fill the buffer
-		if len(currentRows) < len(e.buffer) {
-			e.buffer[len(currentRows)] = BottomBorderRow
+		if len(currentRows) < e.table.rowsHeight {
+			e.buffer = append(e.buffer, BottomBorderRow)
 		}
 
 		// Set previousRows to currentRows

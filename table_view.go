@@ -231,31 +231,6 @@ func (tv *TableView) SetVimMode(enabled bool) *TableView {
 	return tv
 }
 
-// SetData sets the table data
-func (tv *TableView) SetData(data [][]any) *TableView {
-	tv.data = make([]Row, len(data))
-	for i, row := range data {
-		tv.data[i].data = make([]any, len(row))
-		copy(tv.data[i].data, row)
-		tv.data[i].state = RowStateNormal
-	}
-	return tv
-}
-
-func (tv *TableView) SetDataWithStates(data [][]any, states []RowState) *TableView {
-	tv.data = make([]Row, len(data))
-	for i, row := range data {
-		tv.data[i].data = make([]any, len(row))
-		copy(tv.data[i].data, row)
-		if i < len(states) {
-			tv.data[i].state = states[i]
-		} else {
-			tv.data[i].state = RowStateNormal
-		}
-	}
-	return tv
-}
-
 // SetDataReferences sets table data using references instead of deep copies.
 // This is more efficient when the data is already owned by the caller and won't be modified.
 // The data slices are stored as references to avoid unnecessary allocations.
@@ -358,23 +333,8 @@ func (tv *TableView) SetCell(row, col int, value any) *TableView {
 // of rows are fetched based on the current display height. This method accepts the height
 // as a parameter to avoid calling GetRect() from the UI event loop which can cause deadlocks.
 func (tv *TableView) UpdateRowsHeightFromRect(height int) {
-	// Calculate maxDataRows based on the provided height
-	// Reserve space for top border, header row, and header separator
-	maxDataRows := height - 3
-
-	// Check if we should draw the bottom border (when final slice is nil)
-	drawBottomBorder := tv.bottom
-	if len(tv.data) > 0 && len(tv.data[len(tv.data)-1].data) == 0 {
-		drawBottomBorder = true
-	}
-
-	// Reserve additional space for bottom border if needed
-	if drawBottomBorder {
-		maxDataRows--
-	}
-
 	// Update the rowsHeight field
-	tv.rowsHeight = maxDataRows
+	tv.rowsHeight = height - 3
 }
 
 // Draw renders the table view

@@ -441,7 +441,7 @@ func (e *Editor) updateEditPreview(newText string) {
 
 func (e *Editor) updateCell(row, col int, newValue string) {
 	// Check if this is an insert mode row
-	isNewRecordRow := len(e.insertRow) > 0 && row == e.table.GetDataLength()
+	isNewRecordRow := len(e.insertRow) > 0
 
 	if isNewRecordRow {
 		// Update the insert mode row with the new value

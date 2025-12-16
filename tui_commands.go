@@ -345,7 +345,6 @@ func (e *Editor) selectTableFromPicker(tableName string, isRelation bool) {
 
 	// Reload data from the beginning
 	e.pointer = 0
-	e.buffer = make([]Row, e.table.rowsHeight)
 	e.loadFromRowId(nil, true, 0)
 	e.renderData()
 	e.table.Select(0, 0)
