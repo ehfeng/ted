@@ -261,7 +261,7 @@ func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 		editor.setCursorStyle(0)         // Reset to default cursor style
 	})
 
-	editor.table = NewTableView(tableDataHeight+1, &TableViewConfig{
+	editor.table = NewTableView(tableDataHeight, &TableViewConfig{
 		Headers: headers,
 		DoubleClickFunc: func(row, col int) {
 			editor.enterEditMode(row, col)
@@ -324,7 +324,7 @@ func runEditor(config *Config, dbname, tablename, sqlStatement string) error {
 	})
 
 	// Initialize buffer with correct size for circular buffer arithmetic
-	editor.buffer = make([]Row, tableDataHeight+1)
+	editor.buffer = make([]Row, tableDataHeight)
 
 	editor.table.SetTableName(displayName).SetVimMode(editor.vimMode)
 

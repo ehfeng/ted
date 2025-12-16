@@ -12,12 +12,6 @@ import (
 func (e *Editor) renderData() {
 	// number of rows to send to TableView
 	rowCount := len(e.buffer)
-	// Count actual data rows (excluding nil sentinels)
-	atBottom := e.buffer[e.lastRowIdx()].data == nil
-
-	if atBottom {
-		rowCount--
-	}
 
 	normalizedRows := make([]Row, rowCount)
 	for i := 0; i < rowCount; i++ {
@@ -35,10 +29,6 @@ func (e *Editor) renderData() {
 		normalizedRows = append(normalizedRows, insertRow)
 	}
 
-	// Add the nil sentinel row at the end if we're at the bottom
-	if atBottom {
-		normalizedRows = append(normalizedRows, BottomBorderRow) // nil sentinel
-	}
 	e.table.SetDataReferences(normalizedRows)
 }
 
@@ -446,7 +436,7 @@ func (e *Editor) refresh() error {
 	e.pointer = 0
 	scanTargets := make([]any, colCount)
 	var currentRows []Row
-	for rows.Next() {
+	for rows.Next() && len(currentRows) < e.table.rowsHeight {
 		row := make([]any, colCount)
 		for j := 0; j < colCount; j++ {
 			scanTargets[j] = &row[j]
@@ -528,7 +518,7 @@ func (e *Editor) loadFromRowId(id []any, fromTop bool, focusColumn int) error {
 
 		// Scan all rows from database into local currentRows
 		var currentRows []Row
-		for rows.Next() {
+		for rows.Next() && len(currentRows) < e.table.rowsHeight {
 			row := make([]any, colCount)
 			for j := 0; j < colCount; j++ {
 				scanTargets[j] = &row[j]
